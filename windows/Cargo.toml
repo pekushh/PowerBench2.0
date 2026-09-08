@@ -1,0 +1,21 @@
+[package]
+name = "powerbench-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Интеграция с Windows: powercfg, запрет сна, фоновая нагрузка, проверка прав."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Performance",
+    "Win32_System_Power",
+    "Win32_System_Threading",
+    "Win32_Globalization",
+    "Win32_UI_Shell",
+] }
+sysinfo = "0.30"

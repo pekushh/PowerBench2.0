@@ -1,0 +1,9 @@
+[package]
+name = "powerbench-recommend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Движок рекомендаций PlanRecommendationV3: чистые функции без побочных эффектов."
+
+[dependencies]
+powerbench-metrics = { path = "../metrics" }

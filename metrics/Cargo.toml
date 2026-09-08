@@ -1,0 +1,9 @@
+[package]
+name = "powerbench-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Статистика и метрики бенчмарка: чистые функции без побочных эффектов."
+
+[dependencies]
+serde.workspace = true

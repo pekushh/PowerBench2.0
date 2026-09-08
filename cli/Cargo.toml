@@ -1,0 +1,22 @@
+[package]
+name = "powerbench-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Консольный валидатор и консольный запуск теста без UI."
+
+[[bin]]
+name = "powerbench-cli"
+path = "src/main.rs"
+
+[dependencies]
+powerbench-core = { path = "../core" }
+powerbench-metrics = { path = "../metrics" }
+powerbench-recommend = { path = "../recommend" }
+powerbench-orchestrator = { path = "../orchestrator" }
+powerbench-windows = { path = "../windows" }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation"] }

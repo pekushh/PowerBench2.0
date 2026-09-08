@@ -1,0 +1,23 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node / frontend (Tauri)
+app/node_modules
+app/dist
+app/vite-dev.log
+
+# Дистрибутивы сборки (инсталляторы, portable-exe)
+/dist
+
+# Локальные данные приложения
+%LOCALAPPDATA%/PowerBench/
+
+# Редакторы и ОС
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.user
+Thumbs.db
+Desktop.ini

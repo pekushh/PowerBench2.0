@@ -1,0 +1,9 @@
+[package]
+name = "powerbench-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Движок нагрузки GamingCpuV1: тик-процессор, пул воркеров, контрольные суммы, буфер сэмплов."
+
+[dependencies]
+sha2 = "0.10"

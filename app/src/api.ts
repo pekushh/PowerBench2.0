@@ -23,6 +23,10 @@ export interface SettingsDto {
   sidebar_collapsed: boolean;
   favorite_schemes: string[];
   excluded_schemes: string[];
+  scoring_performance: number;
+  scoring_stability: number;
+  scoring_worst_second: number;
+  retention_max_sessions: number;
 }
 
 export interface CheckpointDto {

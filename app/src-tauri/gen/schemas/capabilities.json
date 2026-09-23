@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Основные возможности окна PowerBench","local":true,"windows":["main"],"permissions":["core:default","dialog:default"]}}
+{"default":{"identifier":"default","description":"Основные возможности окна PowerBench","local":true,"windows":["main"],"permissions":["core:default","dialog:default","core:app:allow-app-hide","core:app:allow-app-show"]}}

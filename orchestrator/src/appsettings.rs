@@ -63,7 +63,41 @@ impl Default for AppearanceSettings {
             theme: "Graphite".to_string(),
             mode: "Dark".to_string(),
             reduce_motion: false,
-            sidebar_collapsed: false,
+            sidebar_collapsed: true,
+        }
+    }
+}
+
+/// Настройки скоринга (секция `scoring`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScoringSettings {
+    pub performance: f64,
+    pub stability: f64,
+    pub worst_second: f64,
+}
+
+impl Default for ScoringSettings {
+    fn default() -> Self {
+        Self {
+            performance: 50.0,
+            stability: 30.0,
+            worst_second: 20.0,
+        }
+    }
+}
+
+/// Настройки удержания данных (секция `retention`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetentionSettings {
+    pub max_sessions: u32,
+}
+
+impl Default for RetentionSettings {
+    fn default() -> Self {
+        Self {
+            max_sessions: 200,
         }
     }
 }
@@ -74,6 +108,8 @@ impl Default for AppearanceSettings {
 pub struct AppSettings {
     pub benchmark: BenchmarkSettings,
     pub appearance: AppearanceSettings,
+    pub scoring: ScoringSettings,
+    pub retention: RetentionSettings,
     /// GUID избранных схем (для UI «Схемы питания»).
     pub favorite_schemes: Vec<String>,
     /// GUID схем, исключённых из теста.
@@ -85,13 +121,15 @@ impl Default for AppSettings {
         Self {
             benchmark: BenchmarkSettings::default(),
             appearance: AppearanceSettings::default(),
+            scoring: ScoringSettings::default(),
+            retention: RetentionSettings::default(),
             favorite_schemes: Vec::new(),
             excluded_schemes: Vec::new(),
         }
     }
 }
 
-/// Путь к `appsettings.json` в каталоге данных.
+    /// Путь к `appsettings.json` в каталоге данных.
 pub fn appsettings_path() -> PathBuf {
     data_dir().join(APPSETTINGS_FILE_NAME)
 }
@@ -163,7 +201,7 @@ mod tests {
         assert_eq!(s.appearance.theme, "Graphite");
         assert_eq!(s.appearance.mode, "Dark");
         assert!(!s.appearance.reduce_motion);
-        assert!(!s.appearance.sidebar_collapsed);
+        assert!(s.appearance.sidebar_collapsed);
         assert!(s.favorite_schemes.is_empty());
         assert!(s.excluded_schemes.is_empty());
     }

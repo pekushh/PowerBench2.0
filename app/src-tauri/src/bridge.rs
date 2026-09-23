@@ -143,6 +143,10 @@ pub struct SettingsDto {
     pub sidebar_collapsed: bool,
     pub favorite_schemes: Vec<String>,
     pub excluded_schemes: Vec<String>,
+    pub scoring_performance: f64,
+    pub scoring_stability: f64,
+    pub scoring_worst_second: f64,
+    pub retention_max_sessions: u32,
 }
 
 fn settings_to_dto(s: &AppSettings) -> SettingsDto {
@@ -158,6 +162,10 @@ fn settings_to_dto(s: &AppSettings) -> SettingsDto {
         sidebar_collapsed: s.appearance.sidebar_collapsed,
         favorite_schemes: s.favorite_schemes.clone(),
         excluded_schemes: s.excluded_schemes.clone(),
+        scoring_performance: s.scoring.performance,
+        scoring_stability: s.scoring.stability,
+        scoring_worst_second: s.scoring.worst_second,
+        retention_max_sessions: s.retention.max_sessions,
     }
 }
 
@@ -181,9 +189,19 @@ pub fn set_settings(mut settings: SettingsDto) -> Result<(), String> {
         reduce_motion: settings.reduce_motion,
         sidebar_collapsed: settings.sidebar_collapsed,
     };
+    let scoring = powerbench_orchestrator::appsettings::ScoringSettings {
+        performance: settings.scoring_performance,
+        stability: settings.scoring_stability,
+        worst_second: settings.scoring_worst_second,
+    };
+    let retention = powerbench_orchestrator::appsettings::RetentionSettings {
+        max_sessions: settings.retention_max_sessions,
+    };
     let s = AppSettings {
         benchmark: bench,
         appearance,
+        scoring,
+        retention,
         favorite_schemes: std::mem::take(&mut settings.favorite_schemes),
         excluded_schemes: std::mem::take(&mut settings.excluded_schemes),
     };

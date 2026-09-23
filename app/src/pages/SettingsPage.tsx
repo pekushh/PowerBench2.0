@@ -130,6 +130,57 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
       </Glass>
 
       <Glass>
+        <div className="card-title">Скоринг (веса)</div>
+        <div className="grid2">
+          <Field label={`Performance — сейчас ${st.scoring_performance}`}>
+            <input
+              type="number"
+              step={0.1}
+              min={0}
+              max={100}
+              value={st.scoring_performance}
+              onChange={(e) => patch({ scoring_performance: +e.target.value })}
+            />
+          </Field>
+          <Field label={`Stability — сейчас ${st.scoring_stability}`}>
+            <input
+              type="number"
+              step={0.1}
+              min={0}
+              max={100}
+              value={st.scoring_stability}
+              onChange={(e) => patch({ scoring_stability: +e.target.value })}
+            />
+          </Field>
+          <Field label={`Worst second — сейчас ${st.scoring_worst_second}`}>
+            <input
+              type="number"
+              step={0.1}
+              min={0}
+              max={100}
+              value={st.scoring_worst_second}
+              onChange={(e) => patch({ scoring_worst_second: +e.target.value })}
+            />
+          </Field>
+        </div>
+      </Glass>
+
+      <Glass>
+        <div className="card-title">Удержание данных</div>
+        <div className="grid2">
+          <Field label={`Макс. сессий — сейчас ${st.retention_max_sessions}`}>
+            <input
+              type="number"
+              min={1}
+              max={10000}
+              value={st.retention_max_sessions}
+              onChange={(e) => patch({ retention_max_sessions: +e.target.value })}
+            />
+          </Field>
+        </div>
+      </Glass>
+
+      <Glass>
         <div className="card-title">Идентичность нагрузки</div>
         <div className="grid2">
           <Stat label="Версия нагрузка" value={ident?.workload_version ?? "—"} />

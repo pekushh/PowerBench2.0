@@ -9,7 +9,9 @@ pub mod appsettings;
 pub mod checkpoint;
 pub mod config;
 pub mod history;
+pub mod report;
 pub mod result;
+pub mod score;
 pub mod session;
 
 /// Имя каталога данных приложения (в `%LOCALAPPDATA%`).

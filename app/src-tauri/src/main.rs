@@ -2,13 +2,25 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bridge;
+mod logger;
 mod runner;
 
 use crate::bridge::{
-    ac_power_online, appsettings_path, checkpoint_status, get_settings, history_export_to,
-    history_list, history_open, identity_info, is_admin, list_schemes, results_dir, scheme_action,
-    set_settings, start_test, stop_test, test_running, AppState,
+    ac_power_online, appsettings_path, checkpoint_status, get_settings, history_delete,
+    history_export_to, history_list, history_open, history_open_folder, history_report, identity_info,
+    is_admin, list_schemes, log_history, open_file, open_folder, results_dir, scheme_action,
+    session_report, set_settings, start_test, stop_test, storage_stats, system_ready, test_running,
+    AppState,
 };
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{TrayIcon, TrayIconBuilder},
+    Manager,
+};
+
+// Хранит дескриптор трея, чтобы он не был удалён до завершения приложения.
+#[allow(dead_code)]
+struct TrayState(std::sync::Mutex<Option<TrayIcon>>);
 
 /// Новый идентификатор плана (универсальный уникальный).
 pub fn new_plan_guid() -> String {
@@ -38,10 +50,36 @@ fn rand_u64() -> u64 {
 fn main() {
     let state = bridge::AppState {
         runner: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        log: std::sync::Arc::new(logger::Logger::new()),
     };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        .setup(|app| {
+            let tray_icon = TrayIconBuilder::with_id("powerbench-tray")
+                .tooltip("PowerBench")
+                .icon(tauri::image::Image::from_bytes(include_bytes!(
+                    "../icons/tray-icon-32.png"
+                ))?)
+                .build(app)?;
+            let show_i = MenuItem::with_id(app, "show", "Показать окно", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+            tray_icon.set_menu(Some(menu))?;
+            tray_icon.on_menu_event(|app, event| match event.id.as_ref() {
+                "show" => {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.unminimize();
+                        let _ = w.set_focus();
+                    }
+                }
+                "quit" => app.exit(0),
+                _ => {}
+            });
+            app.manage(TrayState(std::sync::Mutex::new(Some(tray_icon))));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_schemes,
             is_admin,
@@ -57,6 +95,15 @@ fn main() {
             history_list,
             history_open,
             history_export_to,
+            history_report,
+            session_report,
+            history_delete,
+            history_open_folder,
+            storage_stats,
+            open_folder,
+            open_file,
+            log_history,
+            system_ready,
             results_dir,
             appsettings_path
         ])

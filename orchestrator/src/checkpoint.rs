@@ -146,6 +146,15 @@ impl StoredRun {
     ) -> powerbench_metrics::RunSummary {
         let mut stats = self.combined;
         stats.consistency_percent = self.cross_phase_consistency;
+        let background_purity = {
+            let correlated: f64 = self.background.iter().map(|p| p.correlated_spike_windows as f64).sum();
+            let total = self.spike_windows as f64;
+            if total > 0.0 {
+                Some((1.0 - (correlated / total).min(1.0)) * 100.0)
+            } else {
+                None
+            }
+        };
         powerbench_metrics::RunSummary {
             signature,
             determinism: powerbench_metrics::DeterminismSignature::new(
@@ -153,6 +162,7 @@ impl StoredRun {
             ),
             stats,
             burst_retention_percent: self.burst_retention_percent,
+            background_purity,
             started_at_ns: self.started_at_ns,
             duration_ms: self.duration_ms,
         }

@@ -76,6 +76,8 @@ pub struct RunSummary {
     pub determinism: DeterminismSignature,
     pub stats: crate::run::RunStats,
     pub burst_retention_percent: f64,
+    /// Чистота фона прогона (%) — 100 при отсутствии коррелированных процессов.
+    pub background_purity: Option<f64>,
     /// Время старта прогона (UTC, наносекунды от эпохи) — для минимума.
     pub started_at_ns: u64,
     /// Длительность прогона в мс — для суммы.
@@ -135,6 +137,10 @@ pub struct AggregateResult {
     pub median_consistency_percent: f64,
     pub median_burst_retention_percent: f64,
     pub median_jitter_p99_ms: f64,
+    /// Медиана худших секунд прогонов (минимальный AverageThroughput по окнам 1 с).
+    pub median_worst_window_throughput: f64,
+    /// Медиана чистоты фона по прогонам (None — данные недоступны).
+    pub median_background_purity: Option<f64>,
     /// RunDuration агрегата = сумма длительностей прогонов.
     pub run_duration_ms: u64,
     /// RunStartedAtUtc агрегата = минимальное время старта прогонов.
@@ -196,6 +202,8 @@ pub fn aggregate_runs(runs: &[RunSummary]) -> Result<AggregateResult, AggregateE
 
     let median_burst: Vec<f64> = runs.iter().map(|r| r.burst_retention_percent).collect();
     let median_jitter: Vec<f64> = runs.iter().map(|r| r.stats.jitter_p99_ms).collect();
+    let purity: Vec<f64> = runs.iter().filter_map(|r| r.background_purity).collect();
+    let median_purity = if purity.is_empty() { None } else { Some(median(&purity)) };
 
     Ok(AggregateResult {
         runs: k,
@@ -214,6 +222,8 @@ pub fn aggregate_runs(runs: &[RunSummary]) -> Result<AggregateResult, AggregateE
         median_consistency_percent: med(|s| s.consistency_percent),
         median_burst_retention_percent: median(&median_burst),
         median_jitter_p99_ms: median(&median_jitter),
+        median_worst_window_throughput: med(|s| s.worst_second_throughput),
+        median_background_purity: median_purity,
         run_duration_ms: runs.iter().map(|r| r.duration_ms).sum(),
         started_at_min_ns: runs.iter().map(|r| r.started_at_ns).min().unwrap_or(0),
     })
@@ -258,6 +268,7 @@ mod tests {
             determinism: DeterminismSignature::new(vec![dets_sum, dets_sum + 1]),
             stats: stats_from(&times),
             burst_retention_percent: 100.0,
+            background_purity: None,
             started_at_ns: started_ns,
             duration_ms,
         }
@@ -348,8 +359,10 @@ mod tests {
                     p99_execution_time_ms: p95 * 1.01,
                     consistency_percent: cons,
                     jitter_p99_ms: jit,
+                    worst_second_throughput: cons * 0.8,
                 },
                 burst_retention_percent: burst,
+                background_purity: None,
                 started_at_ns: 1,
                 duration_ms: 100,
             }
@@ -368,6 +381,7 @@ mod tests {
         assert_eq!(a.median_consistency_percent, 70.0);
         assert_eq!(a.median_burst_retention_percent, 120.0);
         assert_eq!(a.median_jitter_p99_ms, 0.2);
+        assert!((a.median_worst_window_throughput - 56.0).abs() < 1e-9);
     }
 
     #[test]

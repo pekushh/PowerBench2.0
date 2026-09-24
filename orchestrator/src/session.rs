@@ -532,6 +532,7 @@ const fn zero_run_stats() -> RunStats {
         p99_execution_time_ms: 0.0,
         consistency_percent: 0.0,
         jitter_p99_ms: 0.0,
+        worst_second_throughput: 0.0,
     }
 }
 
@@ -1129,6 +1130,8 @@ fn build_aggregation(
                     median_consistency_percent: 0.0,
                     median_burst_retention_percent: 0.0,
                     median_jitter_p99_ms: 0.0,
+                    median_worst_window_throughput: 0.0,
+                    median_background_purity: None,
                     run_duration_ms: 0,
                     started_at_min_ns: 0,
                 },

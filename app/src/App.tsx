@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { commands, onTestFinished, type SettingsDto } from "./api";
 import { Badge } from "./components/ui";
+import TitleBar from "./components/TitleBar";
 import { pushToast, setLastResult, useSession, useToasts } from "./store";
 import LogPage from "./pages/LogPage";
 import ResultsPage from "./pages/ResultsPage";
@@ -120,6 +121,8 @@ export default function App() {
   return (
     <div className="shell">
       <div className="ambient" />
+      <TitleBar />
+      <div className="body">
       <aside className="sidebar fade-in">
         <div className="brand">
           <span className="mark" />
@@ -158,6 +161,7 @@ export default function App() {
         {page === "log" ? <LogPage /> : null}
         {page === "settings" ? <SettingsPage onAppearance={setAppearanceForRender} /> : null}
       </main>
+      </div>
 
       <div className="pill float" role="navigation" aria-label="Навигация">
         {ROUTES.map((r) => (

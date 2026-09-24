@@ -354,6 +354,10 @@ mod tests {
                 tie_criterion: Some("P1".to_string()),
             },
             warnings: Vec::new(),
+            rounds_planned: 1,
+            rounds_completed: 1,
+            early_stop_reason: None,
+            score_weights: crate::result::default_score_weights(),
         }
     }
 
@@ -375,6 +379,8 @@ mod tests {
             median_consistency_percent: 0.0,
             median_burst_retention_percent: 0.0,
             median_jitter_p99_ms: 0.0,
+            median_worst_window_throughput: 0.0,
+            median_background_purity: None,
             run_duration_ms: 0,
             started_at_min_ns: 0,
         }

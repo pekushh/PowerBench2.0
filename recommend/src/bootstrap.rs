@@ -194,6 +194,8 @@ mod tests {
             median_consistency_percent: 0.0,
             median_burst_retention_percent: 0.0,
             median_jitter_p99_ms: 0.0,
+            median_worst_window_throughput: 0.0,
+            median_background_purity: None,
             run_duration_ms: 0,
             started_at_min_ns: 0,
         }

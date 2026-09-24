@@ -43,6 +43,12 @@ pub fn bootstrap_mode_id(mode: BootMode) -> &'static str {
     }
 }
 
+/// Веса скоринга по умолчанию (производительность / стабильность / худшая
+/// секунда, %). Источник значения — секция `scoring` настроек приложения.
+pub fn default_score_weights() -> [f64; 3] {
+    [50.0, 30.0, 20.0]
+}
+
 /// Признак разрешения ничьей как строка.
 pub fn tie_criterion_id(criterion: TieCriterion) -> &'static str {
     match criterion {
@@ -93,6 +99,11 @@ pub struct SchemeJson {
     pub median_consistency_percent: f64,
     pub median_burst_retention_percent: f64,
     pub median_jitter_p99_ms: f64,
+    /// Медиана худших секунд прогонов (тик/с).
+    pub median_worst_window_throughput: f64,
+    /// Медиана чистоты фона (%) — None, если данные недоступны.
+    #[serde(default)]
+    pub median_background_purity: Option<f64>,
     pub run_duration_ms: u64,
     pub started_at_min_ns: u64,
     pub per_run: Vec<StoredRun>,
@@ -127,6 +138,8 @@ impl SchemeJson {
             median_consistency_percent: aggregate.median_consistency_percent,
             median_burst_retention_percent: aggregate.median_burst_retention_percent,
             median_jitter_p99_ms: aggregate.median_jitter_p99_ms,
+            median_worst_window_throughput: aggregate.median_worst_window_throughput,
+            median_background_purity: aggregate.median_background_purity,
             run_duration_ms: aggregate.run_duration_ms,
             started_at_min_ns: aggregate.started_at_min_ns,
             per_run,
@@ -158,6 +171,19 @@ pub struct SessionJson {
     pub schemes: Vec<SchemeJson>,
     pub recommendation: RecommendationJson,
     pub warnings: Vec<String>,
+    /// Плановых раундов (повторов на схему) в сессии.
+    #[serde(default)]
+    pub rounds_planned: u32,
+    /// Фактически выполненных раундов.
+    #[serde(default)]
+    pub rounds_completed: u32,
+    /// Причина досрочного завершения (например, остановка вручную).
+    #[serde(default)]
+    pub early_stop_reason: Option<String>,
+    /// Веса скоринга, действовавшие при сохранении (производительность,
+    /// стабильность, худшая секунда), в процентах.
+    #[serde(default)]
+    pub score_weights: [f64; 3],
 }
 
 /// Построить машинный JSON из контрольной точки и рекомендации.
@@ -168,6 +194,8 @@ pub fn build_session_json(
     recommendation_schemes: &[(String, bool, Option<String>, AggregateResult, Vec<StoredRun>)],
     recommendation: &powerbench_recommend::Recommendation,
     warnings: Vec<String>,
+    cancelled: bool,
+    score_weights: [f64; 3],
 ) -> SessionJson {
     let _ = &aggregated;
     let schemes = recommendation_schemes
@@ -176,6 +204,24 @@ pub fn build_session_json(
             SchemeJson::from_aggregate(id.clone(), *rejected, reason.clone(), agg, per_run.clone())
         })
         .collect();
+    let rounds_planned = checkpoint.plan.repetitions;
+    let rounds_completed = {
+        let mut rounds: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for run in &checkpoint.runs {
+            rounds.insert(run.round);
+        }
+        rounds.len() as u32
+    };
+    let rounds_completed = rounds_completed.min(rounds_planned);
+    let early_stop_reason = if cancelled || rounds_completed < rounds_planned {
+        Some(if cancelled {
+            "сессия остановлена вручную".to_string()
+        } else {
+            "сессия завершена досрочно".to_string()
+        })
+    } else {
+        None
+    };
     SessionJson {
         plan_guid: checkpoint.plan.plan_guid.clone(),
         original_scheme_guid: checkpoint.original_scheme_guid.clone(),
@@ -194,6 +240,10 @@ pub fn build_session_json(
             tie_criterion: recommendation.tie_criterion.map(tie_criterion_id).map(String::from),
         },
         warnings,
+        rounds_planned,
+        rounds_completed,
+        early_stop_reason,
+        score_weights,
     }
 }
 

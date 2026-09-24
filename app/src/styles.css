@@ -203,9 +203,80 @@ body {
 /* ---------- Каркас ---------- */
 .shell {
   display: flex;
+  flex-direction: column;
   height: 100vh;
+  gap: 8px;
+  padding: 8px 12px 12px;
+}
+.body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
   gap: 12px;
-  padding: 12px;
+}
+
+/* ---------- Кастомный заголовок безрамочного окна ---------- */
+.titlebar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding-left: 10px;
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  backdrop-filter: blur(18px) saturate(1.35);
+  -webkit-backdrop-filter: blur(18px) saturate(1.35);
+  user-select: none;
+  -webkit-user-select: none;
+  overflow: hidden;
+}
+.tb-drag {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 100%;
+  min-width: 0;
+}
+.tb-mark {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 5px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 0 1px var(--glass-border);
+}
+.tb-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--text-2);
+}
+.tb-btns {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+.tb-btn {
+  width: 46px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.tb-btn:hover {
+  background: var(--glass-inset);
+  color: var(--text);
+}
+.tb-btn.close:hover {
+  background: var(--danger);
+  color: #fff;
 }
 .sidebar {
   width: var(--sidebar-w);
@@ -281,6 +352,7 @@ body {
   flex: 1 1 auto;
   min-width: 0;
   overflow-y: auto;
+  overflow-x: clip;
   border-radius: var(--radius-lg);
 }
 .page {
@@ -350,8 +422,17 @@ body {
 }
 .grid2 {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+/* Дети сетки не имеют права распирать колонки и вылезать из карточки. */
+.grid2 > * {
+  min-width: 0;
+}
+@media (max-width: 640px) {
+  .grid2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* ---------- Статистика ---------- */
@@ -360,15 +441,24 @@ body {
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-md);
   padding: 10px 12px;
+  min-width: 0;
+  overflow: hidden;
 }
 .stat .label {
   font-size: var(--fs-caption);
   color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+/* Цифры и единица измерения — строго внутри рамки, без вылезания. */
 .stat .value {
   font-size: 22px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---------- Кнопки ---------- */
@@ -424,19 +514,25 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
 .field label {
   font-size: var(--fs-caption);
   color: var(--text-3);
+  overflow-wrap: break-word;
 }
+/* Все поля — строго одинаковой ширины: ровно по ширине своей колонки. */
 .field input,
 .field select {
+  width: 100%;
+  box-sizing: border-box;
   background: var(--surface-a);
   color: var(--text);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-md);
   padding: 7px 10px;
   font-size: var(--fs-body);
+  font-variant-numeric: tabular-nums;
   min-width: 0;
 }
 .field input:focus,

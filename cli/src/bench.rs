@@ -232,6 +232,8 @@ fn empty_aggregate() -> AggregateResult {
         median_consistency_percent: 0.0,
         median_burst_retention_percent: 0.0,
         median_jitter_p99_ms: 0.0,
+        median_worst_window_throughput: 0.0,
+        median_background_purity: None,
         run_duration_ms: 0,
         started_at_min_ns: 0,
     }
@@ -365,6 +367,8 @@ let agg = outcome
         &recommendation_schemes,
         &rec,
         warnings,
+        outcome.cancelled,
+        [50.0, 30.0, 20.0],
     );
     if let Err(e) = crate::write_json(&json, out) {
         eprintln!("PowerBench CLI: {e}");

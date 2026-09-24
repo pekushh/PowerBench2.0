@@ -4,10 +4,9 @@
   "version": "1.0.0",
   "identifier": "ru.pekushh.powerbench",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
-    "frontendDist": "../dist"
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "frontendDist": "../build-ui"
   },
   "app": {
     "windows": [
@@ -19,7 +18,8 @@
         "minWidth": 780,
         "minHeight": 560,
         "resizable": true,
-        "center": true
+        "center": true,
+        "decorations": false
       }
     ],
     "security": {

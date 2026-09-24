@@ -8,14 +8,15 @@ use std::thread::JoinHandle;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use powerbench_core::engine::{Engine, ProgressSnapshot};
 use powerbench_metrics::AggregateResult;
 use powerbench_recommend::{EvidenceLevel, Recommendation};
+use powerbench_orchestrator::appsettings::AppSettings;
 use powerbench_orchestrator::checkpoint::StoredRun;
 use powerbench_orchestrator::config::SessionConfig;
-use powerbench_orchestrator::result::{build_session_json, IdentityJson};
+use powerbench_orchestrator::result::{build_session_json, IdentityJson, SessionJson};
 use powerbench_orchestrator::session::{
     run_session, session_signature, DiskCheckpointStore, RealSchemeDriver, SessionEvent,
     TelemetryObserver,
@@ -35,11 +36,15 @@ pub struct FinishedPayload {
     pub error: Option<String>,
     pub plan_guid: Option<String>,
     pub cancelled: Option<bool>,
+    pub early_stopped: bool,
     pub result_path: Option<String>,
+    pub report_path: Option<String>,
     pub level: Option<String>,
     pub level_label: Option<String>,
     pub recommended_scheme: Option<String>,
     pub recommended_name: Option<String>,
+    pub expected_margin_percent: Option<f64>,
+    pub winner_margin_percent: Option<f64>,
 }
 
 /// Контекст текущей измеряемой фазы для вычисления скорости в teлеметрии.
@@ -132,6 +137,7 @@ impl TelemetryObserver for AppObserver {
             text: e.to_string(),
             ts_ms: now_ms(),
         };
+        persist_log(&self.app, &msg.level, &msg.text);
         let _ = self.app.emit("log", msg);
     }
 
@@ -229,6 +235,8 @@ fn empty_aggregate() -> AggregateResult {
         median_consistency_percent: 0.0,
         median_burst_retention_percent: 0.0,
         median_jitter_p99_ms: 0.0,
+        median_worst_window_throughput: 0.0,
+        median_background_purity: None,
         run_duration_ms: 0,
         started_at_min_ns: 0,
     }
@@ -249,7 +257,15 @@ fn empty_recommendation() -> Recommendation {
 
 fn warn_of(app: &AppHandle, text: &str) {
     let msg = LogMsg { level: "warn".into(), text: text.to_string(), ts_ms: now_ms() };
+    persist_log(app, "warn", text);
     let _ = app.emit("log", msg);
+}
+
+/// Дублировать запись журнала в персистентный `Logger` (если состояние есть).
+fn persist_log(app: &AppHandle, level: &str, text: &str) {
+    if let Some(state) = app.try_state::<crate::bridge::AppState>() {
+        state.log.append(level, text);
+    }
 }
 
 /// Тело фонового потока сессии.
@@ -339,6 +355,12 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
             _ => None,
         })
         .collect();
+    let settings = AppSettings::load();
+    let score_weights = [
+        settings.scoring.performance,
+        settings.scoring.stability,
+        settings.scoring.worst_second,
+    ];
     let json = build_session_json(
         &outcome.checkpoint,
         identity_of(&engine),
@@ -350,6 +372,8 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
         &recommendation_schemes,
         &rec,
         warnings,
+        outcome.cancelled,
+        score_weights,
     );
     let saved = match powerbench_orchestrator::history::save_result(&json) {
         Ok(path) => Some(path.display().to_string()),
@@ -358,6 +382,19 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
             None
         }
     };
+    let report_path = match write_session_report(&json) {
+        Some(p) => Some(p),
+        None => {
+            warn_of(&app, "не удалось сформировать HTML-отчёт по сессии");
+            None
+        }
+    };
+    let winner = json
+        .recommendation
+        .recommended_scheme
+        .as_ref()
+        .and_then(|id| json.schemes.iter().find(|sch| sch.scheme_id.eq_ignore_ascii_case(id)))
+        .cloned();
     let _ = app.emit(
         "test-finished",
         FinishedPayload {
@@ -365,22 +402,41 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
             error: None,
             plan_guid: Some(json.plan_guid.clone()),
             cancelled: Some(outcome.cancelled),
+            early_stopped: outcome.cancelled || json.rounds_completed < json.rounds_planned,
             result_path: saved,
+            report_path,
             level: Some(json.recommendation.level.clone()),
             level_label: Some(json.recommendation.level_label.clone()),
             recommended_scheme: json.recommendation.recommended_scheme.clone(),
-            recommended_name: json
-                .schemes
-                .iter()
-                .find(|s| {
-                    json.recommendation
-                        .recommended_scheme
-                        .as_deref()
-                        .is_some_and(|id| s.scheme_id.eq_ignore_ascii_case(id))
-                })
+            recommended_name: winner
+                .as_ref()
                 .and_then(|s| s.name.clone()),
+            expected_margin_percent: json.recommendation.expected_margin_percent,
+            winner_margin_percent: winner.as_ref().filter(|s| s.margin.is_finite()).map(|s| s.margin),
         },
     );
+}
+
+/// Сформировать HTML-отчёт по сессии рядом с результатами истории.
+pub fn write_session_report(json: &SessionJson) -> Option<String> {
+    let html = powerbench_orchestrator::report::build_session_report(json);
+    let dir = powerbench_orchestrator::history::results_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let start = powerbench_orchestrator::history::session_started_at_ns(json).unwrap_or(0);
+    let stamp = powerbench_orchestrator::history::date_time_stamp(start);
+    let plan_part: String = json
+        .plan_guid
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let mut candidate = dir.join(format!("PowerBench-Session_{plan_part}_{stamp}.html"));
+    let mut suffix = 2u32;
+    while candidate.exists() {
+        candidate = dir.join(format!("PowerBench-Session_{plan_part}_{stamp}_{suffix}.html"));
+        suffix += 1;
+    }
+    std::fs::write(&candidate, html).ok()?;
+    Some(candidate.display().to_string())
 }
 
 fn empty_finished() -> FinishedPayload {
@@ -389,11 +445,15 @@ fn empty_finished() -> FinishedPayload {
         error: None,
         plan_guid: None,
         cancelled: None,
+        early_stopped: false,
         result_path: None,
+        report_path: None,
         level: None,
         level_label: None,
         recommended_scheme: None,
         recommended_name: None,
+        expected_margin_percent: None,
+        winner_margin_percent: None,
     }
 }
 
@@ -446,9 +506,10 @@ pub fn running(runner: &Arc<Mutex<Option<RunnerHandle>>>) -> bool {
 }
 
 /// Глобальное состояние приложения не должны видеть внутренности; лог-хелпер
-/// для команд интерфейса (событие `log`).
+/// для команд интерфейса (событие `log` + персистентный журнал).
 pub fn emit_log(app: &AppHandle, level: &str, text: &str) {
     let msg = LogMsg { level: level.to_string(), text: text.to_string(), ts_ms: now_ms() };
+    persist_log(app, level, text);
     let _ = app.emit("log", msg);
 }
 

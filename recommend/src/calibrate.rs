@@ -99,6 +99,8 @@ fn scheme_from_runs(id: &str, avgs: &[f64]) -> SchemeAggregate {
         median_consistency_percent: 95.0,
         median_burst_retention_percent: 0.0,
         median_jitter_p99_ms: 0.0,
+        median_worst_window_throughput: median_avg * 0.9,
+        median_background_purity: None,
         run_duration_ms: 0,
         started_at_min_ns: 0,
     };

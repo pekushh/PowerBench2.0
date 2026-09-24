@@ -98,6 +98,33 @@ pub fn burst_retention_percent(average_heavy: f64, average_light: f64) -> f64 {
     }
 }
 
+/// Худшая секунда прогона: минимум AverageThroughput по 1-секундным окнам
+/// (целочисленные границы). Окно без валидных сэмплов не участвует.
+pub fn worst_second_throughput(times_ms: &[f64]) -> f64 {
+    use std::collections::BTreeMap;
+    let times = filter_valid_times(times_ms);
+    if times.is_empty() {
+        return 0.0;
+    }
+    let mut buckets: BTreeMap<u64, (u64, f64)> = BTreeMap::new();
+    for ms in &times {
+        let second = (*ms / 1000.0).floor().max(0.0) as u64;
+        let e = buckets.entry(second).or_insert((0, 0.0));
+        e.0 += 1;
+        e.1 += ms;
+    }
+    let mut worst = f64::INFINITY;
+    for (work, active_ms) in buckets.values() {
+        if *active_ms > 0.0 {
+            let t = *work as f64 * 1000.0 / active_ms;
+            if t < worst {
+                worst = t;
+            }
+        }
+    }
+    if worst.is_finite() { worst } else { 0.0 }
+}
+
 /// Статистика одного прогона фазы.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RunStats {
@@ -126,6 +153,9 @@ pub struct RunStats {
     pub consistency_percent: f64,
     /// TickJitterP99Ms.
     pub jitter_p99_ms: f64,
+    /// Худшая секунда: минимум AverageThroughput среди 1-секундных окон.
+    #[serde(default)]
+    pub worst_second_throughput: f64,
 }
 
 /// Статистика прогона по временам тиков. `None`, если валидных сэмплов нет.
@@ -159,6 +189,7 @@ pub fn run_stats(times_ms: &[f64]) -> Option<RunStats> {
         p99_execution_time_ms: percentile_sorted(&times_sorted, 0.99),
         consistency_percent: consistency_percent(&[(0, &times)]),
         jitter_p99_ms: jitter_p99_ms(&times),
+        worst_second_throughput: worst_second_throughput(&times),
     })
 }
 

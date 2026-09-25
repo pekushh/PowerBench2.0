@@ -9,6 +9,12 @@ pub mod aggregate;
 pub mod percentile;
 pub mod run;
 
-pub use aggregate::{aggregate_runs, AggregateError, AggregateResult, CompatibilitySignature, DeterminismSignature, RunSummary};
+pub use aggregate::{
+    AggregateError, AggregateResult, CompatibilitySignature, DeterminismSignature, RunSummary,
+    aggregate_runs,
+};
 pub use percentile::{percentile, percentile_sorted};
-pub use run::{burst_retention_percent, consistency_percent, filter_valid_times, jitter_p99_ms, median, population_std, run_stats, RunStats};
+pub use run::{
+    RunStats, burst_retention_percent, consistency_percent, filter_valid_times, jitter_p99_ms,
+    median, population_std, run_stats,
+};

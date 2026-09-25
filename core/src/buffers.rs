@@ -6,7 +6,7 @@
 //! спецификации: задача j владеет слотом j и своим диапазоном анимации).
 
 use crate::config::{ENTITY_CAPACITY, SEED};
-use crate::prng::{unit_signed, XorShift64};
+use crate::prng::{XorShift64, unit_signed};
 
 /// Буферы сущностей: позиции, скорости, флаги, глубина, анимация и
 /// предвычисленный порядок обхода (Fisher-Yates от Seed).
@@ -69,15 +69,15 @@ impl EntityBuffers {
     fn fill(&mut self, seed: u64) {
         let mut rng = XorShift64::new(seed);
         for i in 0..ENTITY_CAPACITY {
-            self.x[i] = unit_signed(rng.next());
-            self.y[i] = unit_signed(rng.next());
-            self.z[i] = unit_signed(rng.next());
-            self.vx[i] = unit_signed(rng.next());
-            self.vy[i] = unit_signed(rng.next());
-            self.vz[i] = unit_signed(rng.next());
-            self.flags[i] = rng.next();
-            self.depth[i] = normalized(rng.next());
-            self.anim[i] = normalized(rng.next());
+            self.x[i] = unit_signed(rng.next_u64());
+            self.y[i] = unit_signed(rng.next_u64());
+            self.z[i] = unit_signed(rng.next_u64());
+            self.vx[i] = unit_signed(rng.next_u64());
+            self.vy[i] = unit_signed(rng.next_u64());
+            self.vz[i] = unit_signed(rng.next_u64());
+            self.flags[i] = rng.next_u64();
+            self.depth[i] = normalized(rng.next_u64());
+            self.anim[i] = normalized(rng.next_u64());
         }
     }
 
@@ -100,7 +100,7 @@ impl EntityBuffers {
         let mut rng = XorShift64::new(seed);
         // Fisher-Yates: случайность ТОЛЬКО из PRNG.
         for i in (1..ENTITY_CAPACITY).rev() {
-            let j = (rng.next() % (i as u64 + 1)) as usize;
+            let j = (rng.next_u64() % (i as u64 + 1)) as usize;
             b.order.swap(i, j);
         }
         b
@@ -114,7 +114,7 @@ impl EntityBuffers {
         self.order.extend(0..ENTITY_CAPACITY as u32);
         let mut rng = XorShift64::new(SEED);
         for i in (1..ENTITY_CAPACITY).rev() {
-            let j = (rng.next() % (i as u64 + 1)) as usize;
+            let j = (rng.next_u64() % (i as u64 + 1)) as usize;
             self.order.swap(i, j);
         }
     }

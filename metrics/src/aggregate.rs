@@ -100,7 +100,10 @@ impl fmt::Display for AggregateError {
         match self {
             AggregateError::EmptyRuns => write!(f, "нет ни одного прогона для агрегации"),
             AggregateError::SignatureMismatch => {
-                write!(f, "несовместимые сигнатуры: запрещено объединять такие прогоны")
+                write!(
+                    f,
+                    "несовместимые сигнатуры: запрещено объединять такие прогоны"
+                )
             }
             AggregateError::ChecksumMismatch => {
                 write!(f, "контрольная сумма различается между повторами")
@@ -168,10 +171,7 @@ pub fn aggregate_runs(runs: &[RunSummary]) -> Result<AggregateResult, AggregateE
     }
 
     // Средние throughput прогонов, отсортированы по возрастанию.
-    let mut averages: Vec<f64> = runs
-        .iter()
-        .map(|r| r.stats.average_throughput)
-        .collect();
+    let mut averages: Vec<f64> = runs.iter().map(|r| r.stats.average_throughput).collect();
     averages.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let k = runs.len();
@@ -203,7 +203,11 @@ pub fn aggregate_runs(runs: &[RunSummary]) -> Result<AggregateResult, AggregateE
     let median_burst: Vec<f64> = runs.iter().map(|r| r.burst_retention_percent).collect();
     let median_jitter: Vec<f64> = runs.iter().map(|r| r.stats.jitter_p99_ms).collect();
     let purity: Vec<f64> = runs.iter().filter_map(|r| r.background_purity).collect();
-    let median_purity = if purity.is_empty() { None } else { Some(median(&purity)) };
+    let median_purity = if purity.is_empty() {
+        None
+    } else {
+        Some(median(&purity))
+    };
 
     Ok(AggregateResult {
         runs: k,
@@ -342,8 +346,8 @@ mod tests {
     fn median_aggregation_over_run_stats() {
         let s = sig("GamingCpuV1", "DDD");
         // Три прогона с разными статистиками — берётся медиана по прогонам.
-        let mk = |med: f64, p1: f64, p95: f64, cons: f64, burst: f64, jit: f64, det: u64| {
-            RunSummary {
+        let mk =
+            |med: f64, p1: f64, p95: f64, cons: f64, burst: f64, jit: f64, det: u64| RunSummary {
                 signature: s.clone(),
                 determinism: DeterminismSignature::new(vec![det]),
                 stats: crate::run::RunStats {
@@ -365,8 +369,7 @@ mod tests {
                 background_purity: None,
                 started_at_ns: 1,
                 duration_ms: 100,
-            }
-        };
+            };
         let runs = [
             mk(500.0, 10.0, 1.0, 50.0, 100.0, 0.1, 1),
             mk(1000.0, 20.0, 2.0, 70.0, 120.0, 0.2, 1),

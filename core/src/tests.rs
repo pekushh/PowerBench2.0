@@ -99,7 +99,9 @@ fn checksum_is_independent_of_worker_count() {
     for workers in [1usize, 2, 3, 6, 8] {
         let mut engine = Engine::new(Some(workers));
         engine.reset();
-        let heavy = engine.run_phase(Phase::Heavy, RunTarget::Ticks(64)).unwrap();
+        let heavy = engine
+            .run_phase(Phase::Heavy, RunTarget::Ticks(64))
+            .unwrap();
         engine.reset();
         let response = engine
             .run_phase(Phase::Response, RunTarget::Ticks(256))
@@ -138,7 +140,9 @@ fn zero_allocations_in_tick_loop() {
 
     // Прогрев: ленивые инициализации (TLS, системные примитивы) должны пройти
     // до включения счётчика.
-    engine.run_phase(Phase::Heavy, RunTarget::Ticks(16)).unwrap();
+    engine
+        .run_phase(Phase::Heavy, RunTarget::Ticks(16))
+        .unwrap();
 
     crate::alloc_count::COUNT.store(0, Ordering::Relaxed);
     crate::alloc_count::ENABLED.store(true, Ordering::Relaxed);
@@ -185,9 +189,13 @@ fn cancellation_is_bounded_and_pool_recovers() {
 
     // Пул восстановлен: reset + новый прогон дают корректные контрольные суммы.
     engine.reset();
-    let a = engine.run_phase(Phase::Heavy, RunTarget::Ticks(64)).unwrap();
+    let a = engine
+        .run_phase(Phase::Heavy, RunTarget::Ticks(64))
+        .unwrap();
     engine.reset();
-    let b = engine.run_phase(Phase::Heavy, RunTarget::Ticks(64)).unwrap();
+    let b = engine
+        .run_phase(Phase::Heavy, RunTarget::Ticks(64))
+        .unwrap();
     assert_eq!(a.run_checksum, b.run_checksum);
 }
 
@@ -222,9 +230,13 @@ fn self_check_passes_and_fixes_reference_checksums() {
 
     // Фактические первые тики фаз сверяются с эталонами.
     engine.reset();
-    let light = engine.run_phase(Phase::Light, RunTarget::Ticks(32)).unwrap();
+    let light = engine
+        .run_phase(Phase::Light, RunTarget::Ticks(32))
+        .unwrap();
     engine.reset();
-    let heavy = engine.run_phase(Phase::Heavy, RunTarget::Ticks(32)).unwrap();
+    let heavy = engine
+        .run_phase(Phase::Heavy, RunTarget::Ticks(32))
+        .unwrap();
     engine.reset();
     let response = engine
         .run_phase(Phase::Response, RunTarget::Ticks(256))

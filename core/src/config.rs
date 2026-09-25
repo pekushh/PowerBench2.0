@@ -142,8 +142,7 @@ pub const fn response_profile(tick_index_in_phase: u64) -> Profile {
 /// культура): `Version|Seed_HEX16|EntityCapacity|Supercycle|` затем пять
 /// профилей (Light, Heavy, ResponseBase, ResponseMedium, ResponseMajor),
 /// каждый — `MainEntityUpdates,VisibilityProbes,AnimationItems,WorkerJobs`.
-pub const CONFIG_PAYLOAD: &str =
-    "GamingCpuV1|C52A202600000001|131072|256|8192,32768,8192,16|32768,131072,32768,64|16384,65536,16384,32|24576,98304,24576,48|32768,131072,32768,64";
+pub const CONFIG_PAYLOAD: &str = "GamingCpuV1|C52A202600000001|131072|256|8192,32768,8192,16|32768,131072,32768,64|16384,65536,16384,32|24576,98304,24576,48|32768,131072,32768,64";
 
 /// SHA-256 от payload конфигурации, hex-строка ВЕРХНИМ регистром.
 /// Вычисляется один раз и кэшируется.

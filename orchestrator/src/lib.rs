@@ -8,11 +8,16 @@
 pub mod appsettings;
 pub mod checkpoint;
 pub mod config;
+pub mod diagnostics;
 pub mod history;
+pub mod recovery;
 pub mod report;
 pub mod result;
 pub mod score;
 pub mod session;
+
+#[cfg(test)]
+mod goldens;
 
 /// Имя каталога данных приложения (в `%LOCALAPPDATA%`).
 pub const DATA_DIR_NAME: &str = "PowerBench";

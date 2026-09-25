@@ -1,8 +1,8 @@
 //! Фоновый мониторинг процессов (sysinfo/PDH-эквивалент) и корреляция
 //! «окон скачков» латентности с процессами, активными в те же секунды.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Минимальная занятость процесса (в % одного ядра), при которой секунда
 /// считается «активной» для этого процесса в целях корреляции.
@@ -58,6 +58,12 @@ pub struct ProcessSampler {
     #[cfg(windows)]
     system: sysinfo::System,
     self_pid: u32,
+}
+
+impl Default for ProcessSampler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProcessSampler {
@@ -160,7 +166,10 @@ pub fn correlate(
 
     for (second, samples) in samples_by_second {
         for s in samples {
-            all_samples.entry(s.name.clone()).or_default().push(s.clone());
+            all_samples
+                .entry(s.name.clone())
+                .or_default()
+                .push(s.clone());
             if !covered.contains(second) {
                 continue;
             }
@@ -184,8 +193,10 @@ pub fn correlate(
         let samples = all_samples.get(name).cloned().unwrap_or_default();
         let cpus: Vec<f64> = samples.iter().map(|s| s.cpu_percent).collect();
         let peak = cpus.iter().cloned().fold(0.0f64, f64::max);
-        let mut phases: Vec<String> =
-            phase_hits.get(name).map(|s| s.iter().cloned().collect()).unwrap_or_default();
+        let mut phases: Vec<String> = phase_hits
+            .get(name)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
         phases.sort();
         list.push(CorrelatedProcess {
             name: name.clone(),
@@ -201,7 +212,11 @@ pub fn correlate(
     list.sort_by(|a, b| {
         b.correlated_spike_windows
             .cmp(&a.correlated_spike_windows)
-            .then_with(|| b.peak_cpu_percent.partial_cmp(&a.peak_cpu_percent).unwrap_or(Ordering::Equal))
+            .then_with(|| {
+                b.peak_cpu_percent
+                    .partial_cmp(&a.peak_cpu_percent)
+                    .unwrap_or(Ordering::Equal)
+            })
             .then_with(|| a.name.cmp(&b.name))
     });
     list.truncate(5);
@@ -232,11 +247,16 @@ mod tests {
 
     #[test]
     fn correlation_matches_window_to_busy_process() {
-        let windows = vec![
-            SpikeWindow { start_second: 1, end_second: 1, phase_label: "Тяжёлая".to_string() },
-        ];
+        let windows = vec![SpikeWindow {
+            start_second: 1,
+            end_second: 1,
+            phase_label: "Тяжёлая".to_string(),
+        }];
         let mut map: BTreeMap<u64, Vec<ProcessSample>> = BTreeMap::new();
-        map.insert(1, vec![sample("antivirus", 40.0, 100), sample("explorer", 0.1, 5)]);
+        map.insert(
+            1,
+            vec![sample("antivirus", 40.0, 100), sample("explorer", 0.1, 5)],
+        );
         map.insert(2, vec![sample("antivirus", 40.0, 100)]);
         let result = correlate(&windows, &map);
         assert_eq!(result.len(), 1);
@@ -250,7 +270,11 @@ mod tests {
 
     #[test]
     fn idle_processes_in_window_do_not_correlate() {
-        let windows = vec![SpikeWindow { start_second: 5, end_second: 5, phase_label: "Лёгкая".to_string() }];
+        let windows = vec![SpikeWindow {
+            start_second: 5,
+            end_second: 5,
+            phase_label: "Лёгкая".to_string(),
+        }];
         let mut map: BTreeMap<u64, Vec<ProcessSample>> = BTreeMap::new();
         map.insert(5, vec![sample("explorer", 0.2, 5)]);
         let result = correlate(&windows, &map);
@@ -273,8 +297,16 @@ mod tests {
     #[test]
     fn multi_window_counting_and_phase_collection() {
         let windows = vec![
-            SpikeWindow { start_second: 1, end_second: 1, phase_label: "Лёгкая".to_string() },
-            SpikeWindow { start_second: 9, end_second: 9, phase_label: "Отклик".to_string() },
+            SpikeWindow {
+                start_second: 1,
+                end_second: 1,
+                phase_label: "Лёгкая".to_string(),
+            },
+            SpikeWindow {
+                start_second: 9,
+                end_second: 9,
+                phase_label: "Отклик".to_string(),
+            },
         ];
         let mut map: BTreeMap<u64, Vec<ProcessSample>> = BTreeMap::new();
         map.insert(1, vec![sample("busy", 50.0, 7)]);
@@ -287,7 +319,11 @@ mod tests {
 
     #[test]
     fn top_five_limit_with_ranking() {
-        let windows = vec![SpikeWindow { start_second: 1, end_second: 1, phase_label: "X".to_string() }];
+        let windows = vec![SpikeWindow {
+            start_second: 1,
+            end_second: 1,
+            phase_label: "X".to_string(),
+        }];
         let mut map: BTreeMap<u64, Vec<ProcessSample>> = BTreeMap::new();
         let mut jobs: Vec<ProcessSample> = Vec::new();
         for i in 0..8 {

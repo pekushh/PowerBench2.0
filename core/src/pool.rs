@@ -212,7 +212,14 @@ fn worker_loop(
 
         // 2) Обработка своей части батча (падение воркера = ошибка запуска).
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            process_jobs(&shared, &cancel, worker_index, worker_count, epoch, &entities)
+            process_jobs(
+                &shared,
+                &cancel,
+                worker_index,
+                worker_count,
+                epoch,
+                &entities,
+            )
         }));
 
         // 3) Сообщить о завершении порции.
@@ -253,9 +260,7 @@ impl Pool {
             let entities = entities.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("powerbench-worker-{w}"))
-                .spawn(move || {
-                    worker_loop(shared, cancel, shutdown, w, worker_count, entities)
-                })
+                .spawn(move || worker_loop(shared, cancel, shutdown, w, worker_count, entities))
                 .expect("не удалось запустить воркер");
             handles.push(handle);
         }
@@ -303,8 +308,9 @@ impl Pool {
 
     /// Опубликовать батч из `active_jobs` задач и разбудить воркеров.
     pub fn dispatch(&self, active_jobs: usize, descriptors: &[JobDescriptor]) {
-        assert!(active_jobs >= 1 && active_jobs <= MAXIMUM_JOBS);
-        debug_assert_eq!(descriptors.len(), MAXIMUM_JOBS);
+        assert!((1..=MAXIMUM_JOBS).contains(&active_jobs));
+        // Короткий слайс молча оставил бы stale-дескрипторы прошлого батча.
+        assert!(descriptors.len() >= active_jobs);
         let mut guard = self.shared.lock.lock().unwrap();
         guard.epoch = guard.epoch.wrapping_add(1);
         guard.workers_done = 0;
@@ -348,12 +354,14 @@ impl Pool {
                     Ok(())
                 };
             }
-            if let Some(start) = grace_start {
-                if start.elapsed() > CANCEL_GRACE {
-                    return Err(BatchError::Cancelled);
-                }
+            if grace_start.is_some_and(|start| start.elapsed() > CANCEL_GRACE) {
+                return Err(BatchError::Cancelled);
             }
-            let waited = self.shared.work_done.wait_timeout(guard, POLL_INTERVAL).unwrap();
+            let waited = self
+                .shared
+                .work_done
+                .wait_timeout(guard, POLL_INTERVAL)
+                .unwrap();
             guard = waited.0;
         }
     }

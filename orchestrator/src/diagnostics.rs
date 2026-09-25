@@ -20,7 +20,10 @@ pub struct ReadyReport {
 
 impl ReadyReport {
     fn ok() -> Self {
-        Self { ok: true, issues: Vec::new() }
+        Self {
+            ok: true,
+            issues: Vec::new(),
+        }
     }
     fn push(&mut self, issue: String) {
         self.ok = false;

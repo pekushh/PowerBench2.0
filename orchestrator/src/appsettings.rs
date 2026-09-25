@@ -5,7 +5,7 @@
 //! атомарная (временный файл + перемещение).
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -96,14 +96,12 @@ pub struct RetentionSettings {
 
 impl Default for RetentionSettings {
     fn default() -> Self {
-        Self {
-            max_sessions: 200,
-        }
+        Self { max_sessions: 200 }
     }
 }
 
 /// Все настройки файла `appsettings.json`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
     pub benchmark: BenchmarkSettings,
@@ -116,20 +114,7 @@ pub struct AppSettings {
     pub excluded_schemes: Vec<String>,
 }
 
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            benchmark: BenchmarkSettings::default(),
-            appearance: AppearanceSettings::default(),
-            scoring: ScoringSettings::default(),
-            retention: RetentionSettings::default(),
-            favorite_schemes: Vec::new(),
-            excluded_schemes: Vec::new(),
-        }
-    }
-}
-
-    /// Путь к `appsettings.json` в каталоге данных.
+/// Путь к `appsettings.json` в каталоге данных.
 pub fn appsettings_path() -> PathBuf {
     data_dir().join(APPSETTINGS_FILE_NAME)
 }
@@ -142,7 +127,7 @@ impl AppSettings {
     }
 
     /// Загрузить из конкретного пути.
-    pub fn load_from(path: &PathBuf) -> Self {
+    pub fn load_from(path: &Path) -> Self {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(_) => return Self::default(),
@@ -156,7 +141,7 @@ impl AppSettings {
     }
 
     /// Сохранить настройки в указанный путь (атомарно, каталоги создаются).
-    pub fn save_to(&self, path: &PathBuf) -> io::Result<()> {
+    pub fn save_to(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -172,7 +157,7 @@ impl AppSettings {
     }
 
     /// Изменить настройки и автосохранить в указанный путь (для тестов).
-    pub fn update_to<F: FnOnce(&mut Self)>(&mut self, path: &PathBuf, f: F) -> io::Result<()> {
+    pub fn update_to<F: FnOnce(&mut Self)>(&mut self, path: &Path, f: F) -> io::Result<()> {
         f(self);
         self.save_to(path)
     }
@@ -270,7 +255,10 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|n| n.contains("json.tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "остались временные файлы: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "остались временные файлы: {leftovers:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

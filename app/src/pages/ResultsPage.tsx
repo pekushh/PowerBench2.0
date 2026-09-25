@@ -1,21 +1,25 @@
-// Страница «Результаты»: история завершённых сессий, бейджи доказательности,
-// расширенные данные прогонов, экспорт JSON/CSV, пометка старых записей.
+// Страница «Результаты»: история сессий, сравнение по истории, отчёты.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   commands,
-  fmtNs,
   onTestFinished,
   type HistoryRow,
-  type IdentityDto,
   type SessionJson,
 } from "../api";
-import { Badge, Button, Glass, Seg } from "../components/ui";
+import { Badge, Button, Dropdown, Modal, Panel } from "../components/ui";
 import { pushToast } from "../store";
 
-type SortKey = "started" | "level";
-type ExportFormat = "json" | "csv";
+type SortKey = "started" | "level" | "score" | "stability";
+
+const LEVEL_ORDER: Record<string, number> = {
+  Confirmed: 0,
+  Probable: 1,
+  StabilityTieBreak: 2,
+  Preliminary: 3,
+  KeepCurrent: 4,
+};
 
 function levelKind(level: string): "ok" | "warn" | "plain" | "danger" {
   switch (level) {
@@ -32,54 +36,169 @@ function levelKind(level: string): "ok" | "warn" | "plain" | "danger" {
   }
 }
 
-export default function ResultsPage() {
+function scoreKind(score: number | null): "ok" | "warn" | "danger" {
+  if (score == null) return "danger";
+  if (score >= 90) return "ok";
+  if (score >= 75) return "warn";
+  return "danger";
+}
+
+export function fmtBytes(n: number): string {
+  if (!n) return "0 Б";
+  if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} ГБ`;
+  if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} МБ`;
+  if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} КБ`;
+  return `${n} Б`;
+}
+
+interface SeriesPoint {
+  col: number;
+  score: number;
+  lo: number;
+  hi: number;
+  file: string;
+}
+
+interface Series {
+  id: string;
+  name: string;
+  pts: SeriesPoint[];
+}
+
+const PALETTE = ["#5aa2f2", "#6fd0a0", "#e4b46f", "#e57979", "#b8acff", "#58c7ee"];
+
+export default function ResultsPage({ active = true }: { active?: boolean }) {
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [sort, setSort] = useState<SortKey>("started");
-  const [selected, setSelected] = useState<SessionJson | null>(null);
-  const [selectedGuid, setSelectedGuid] = useState<string | null>(null);
-  const [currentIdentity, setCurrentIdentity] = useState<IdentityDto | null>(null);
+  const [stats, setStats] = useState<{
+    free_bytes: number;
+    history_bytes: number;
+    max_sessions: number;
+  } | null>(null);
+  const [detail, setDetail] = useState<SessionJson | null>(null);
+  const [series, setSeries] = useState<Series[]>([]);
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const [chartSessions, setChartSessions] = useState<HistoryRow[]>([]);
   const busy = useRef(false);
 
   const refresh = useCallback(() => {
+    commands.historyList().then(setRows).catch((e) => pushToast("err", String(e)));
     commands
-      .historyList()
-      .then(setRows)
-      .catch((e) => pushToast("err", String(e)));
+      .storageStats()
+      .then((s) => setStats({ free_bytes: s.free_bytes, history_bytes: s.history_bytes, max_sessions: s.max_sessions }))
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
     refresh();
-    commands.identityInfo().then(setCurrentIdentity).catch(() => undefined);
-    const unfor = onTestFinished(() => refresh());
+    const unfor = onTestFinished((m) => {
+      refresh();
+      if (m.ok && m.plan_guid) {
+        commands.historyOpen(m.plan_guid).then(setDetail).catch(() => undefined);
+      }
+    });
     return () => {
       unfor.then((f) => f());
     };
   }, [refresh]);
 
-  const openSession = (guid: string) => {
-    setSelectedGuid(guid);
-    commands
-      .historyOpen(guid)
-      .then(setSelected)
-      .catch((e) => {
-        pushToast("err", String(e));
-        setSelected(null);
+  // График сравнения: медианный throughput схем по последним сессиям.
+  // Строится только на активной вкладке, чтобы не дёргать историю зря.
+  useEffect(() => {
+    if (!active) return;
+    const recent = [...rows]
+      .filter((r) => r.readable)
+      .sort((a, b) => (a.started_at_ns < b.started_at_ns ? 1 : -1))
+      .slice(0, 24)
+      .reverse();
+    setChartSessions(recent);
+    let alive = true;
+    Promise.all(
+      recent.map((r) => commands.historyOpen(r.plan_guid).then((s) => ({ row: r, s })).catch(() => null)),
+    ).then((all) => {
+      if (!alive) return;
+      const byScheme = new Map<string, Series>();
+      all.forEach((item, col) => {
+        if (!item) return;
+        for (const sch of item.s.schemes) {
+          if (sch.rejected) continue;
+          const name = sch.name ?? sch.scheme_id;
+          let se = byScheme.get(name);
+          if (!se) {
+            se = { id: name, name, pts: [] };
+            byScheme.set(name, se);
+          }
+          se.pts.push({
+            col,
+            score: sch.median_throughput,
+            lo: sch.ci_95[0],
+            hi: sch.ci_95[1],
+            file: item.row.plan_guid,
+          });
+        }
       });
+      setSeries([...byScheme.values()]);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [rows, active]);
+
+  const sorted = useMemo(() => {
+    const arr = [...rows];
+    switch (sort) {
+      case "started":
+        arr.sort((a, b) => {
+          const x = a.readable ? a.started_at_ns : -Infinity;
+          const y = b.readable ? b.started_at_ns : -Infinity;
+          return y - x;
+        });
+        break;
+      case "level":
+        arr.sort((a, b) => (a.readable ? (LEVEL_ORDER[a.level] ?? 99) : 99) - (b.readable ? (LEVEL_ORDER[b.level] ?? 99) : 99));
+        break;
+      case "score":
+        arr.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+        break;
+      case "stability":
+        arr.sort((a, b) => (b.stability ?? -1) - (a.stability ?? -1));
+        break;
+    }
+    return arr;
+  }, [rows, sort]);
+
+  const openSession = (guid: string) => {
+    commands.historyOpen(guid).then(setDetail).catch((e) => pushToast("err", String(e)));
   };
 
-  const sorted = [...rows].sort((a, b) => {
-    if (sort === "started") return a.started_label.localeCompare(b.started_label);
-    return a.level.localeCompare(b.level);
-  }).reverse();
+  const openReport = (guid: string) => {
+    commands
+      .sessionReport(guid)
+      .then((p) => pushToast("okk", `Отчёт открыт: ${p}`))
+      .catch((e) => pushToast("err", String(e)));
+  };
 
-  const exportSessions = async (format: ExportFormat) => {
+  const deleteRow = async (r: HistoryRow) => {
+    if (r.readable) {
+      if (!window.confirm("Удалить запись?")) return;
+    }
+    try {
+      await commands.historyDelete(r.file_name);
+      pushToast("okk", "Запись удалена");
+      if (detail?.plan_guid === r.plan_guid) setDetail(null);
+      refresh();
+    } catch (e) {
+      pushToast("err", String(e));
+    }
+  };
+
+  const exportAll = async (format: "json" | "csv") => {
     if (busy.current) return;
     busy.current = true;
     try {
       const dir = await open({ directory: true, title: "Каталог для экспорта" });
       if (!dir) return;
-      const guid = selectedGuid ?? "all";
-      const paths = await commands.historyExportTo(guid, format, dir);
+      const paths = await commands.historyExportTo("all", format, dir as string);
       const note = paths.find((p) => p.startsWith("| "));
       pushToast("okk", `Экспортировано файлов: ${paths.length - (note ? 1 : 0)}`);
       if (note) pushToast("err", note.slice(2));
@@ -90,177 +209,343 @@ export default function ResultsPage() {
     }
   };
 
-  const legacyBadge = (s: SessionJson): React.ReactNode | null => {
-    if (!currentIdentity) return null;
-    const id = s.identity;
-    const compat =
-      id.workload_version === currentIdentity.workload_version &&
-      id.config_hash === currentIdentity.config_hash &&
-      id.seed_hex === currentIdentity.seed_hex;
-    if (compat) return null;
-    return <Badge kind="warn" title={`Версия ${id.workload_version}, хэш ${id.config_hash}, seed ${id.seed_hex}`}>другая версия нагрузки</Badge>;
-  };
+  const lowDisk =
+    stats != null && (stats.free_bytes < 250 * 1024 * 1024);
 
   return (
     <div className="page">
       <div className="page-head">
         <h1>Результаты</h1>
         <span className="sub">{rows.length} записей</span>
-        <div className="grow" />
-        <div className="row">
-          <Seg
+        <div className="page-head-line">
+          <span className="sub storage-line">
+            {lowDisk ? <Badge kind="warn">Место на диске заканчивается</Badge> : null}
+            Свободно {fmtBytes(stats?.free_bytes ?? 0)} · История {fmtBytes(stats?.history_bytes ?? 0)}
+            {stats && stats.max_sessions > 0
+              ? ` · хранится до ${stats.max_sessions}`
+              : stats
+                ? " · хранится без ограничений"
+                : ""}
+          </span>
+        </div>
+        <div className="actions">
+          <Dropdown
+            title="Сортировка"
+            value={sort}
+            onChange={setSort}
             options={[
               { value: "started", label: "По дате" },
               { value: "level", label: "По уровню" },
+              { value: "score", label: "По баллу" },
+              { value: "stability", label: "По стабильности" },
             ]}
-            value={sort}
-            onChange={setSort}
           />
-          <Button onClick={() => openSession(selectedGuid ?? "")} disabled={!selectedGuid}>
-            Открыть
+          <Button variant="ghost" onClick={() => void exportAll("json")}>
+            Экспорт…
           </Button>
-          <Button onClick={() => exportSessions("json")}>Экспорт JSON</Button>
-          <Button onClick={() => exportSessions("csv")}>Экспорт CSV</Button>
-          <Button onClick={refresh}>Обновить</Button>
+          <Button
+            variant="ghost"
+            title="Открыть папку с результатами"
+            onClick={() => commands.historyOpenFolder().catch((e) => pushToast("err", String(e)))}
+          >
+            Папка
+          </Button>
+          <Button variant="ghost" title="Обновить список" onClick={refresh}>
+            Обновить
+          </Button>
         </div>
       </div>
 
-      <Glass>
-        <table className="grid">
-          <thead>
-            <tr>
-              <th>Старт (UTC)</th>
-              <th>План</th>
-              <th className="num">Схем</th>
-              <th>Уровень</th>
-              <th>Совместимость</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((r) => {
-              const isSel = r.plan_guid !== "" && r.plan_guid === selectedGuid;
-              return (
-                <tr key={r.file_name} className="clickable" onClick={() => r.readable && openSession(r.plan_guid)}>
-                  <td>{r.readable ? r.started_label : r.file_name}</td>
-                  <td>
-                    <span className="num">{r.plan_guid}</span>
-                    {isSel ? <span> </span> : null}
-                  </td>
-                  <td className="num">{r.readable ? r.schemes : "—"}</td>
-                  <td>
-                    {r.readable ? (
-                      <Badge kind={levelKind(r.level)}>{r.level_label}</Badge>
-                    ) : (
-                      <Badge kind="danger" title={r.error ?? ""}>не читается</Badge>
-                    )}
-                  </td>
-                  <td>{isSel && selected ? legacyBadge(selected) : null}</td>
-                </tr>
-              );
-            })}
-            {sorted.length === 0 ? (
-              <tr>
-                <td colSpan={5} style={{ color: "var(--text-3)" }}>
-                  История пуста. Завершённые сессии появляются здесь автоматически.
-                </td>
-              </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </Glass>
+      <div className="page-toolbar">
+        <Panel
+          title="Сравнение производительности схем по истории"
+          hint="Медианный throughput каждой схемы по сессиям; полосы — ДИ 95%; клик по точке — HTML-отчёт сессии"
+        >
+          <Chart series={series} sessions={chartSessions} hidden={hidden} onToggleHide={(id) =>
+            setHidden((prev) => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            })
+          } onDot={(file) => openReport(file)} />
+        </Panel>
+      </div>
 
-      {selected ? (
-        <Glass className="fade-in">
-          <div className="row between wrap">
-            <div>
-              <div className="card-title">
-                {selected.plan_guid} <Badge kind={levelKind(selected.recommendation.level)} big>{selected.recommendation.level_label}</Badge> {legacyBadge(selected)}
+      <div className="results-list">
+        {sorted.length === 0 ? (
+          <Panel title="Нет сопоставимых сессий">
+            <div className="muted">Завершённые сессии с данными по схемам появятся здесь.</div>
+          </Panel>
+        ) : (
+          sorted.map((r) => (
+            <div key={r.file_name} className="glass lift rc-row" onClick={() => r.readable && openSession(r.plan_guid)}>
+              <div className="rc-main">
+                <div className="rc-line1">
+                  <span className="rc-name">{r.readable ? r.started_label : r.file_name}</span>
+                  {r.readable ? <Badge kind={levelKind(r.level)}>{r.level_label}</Badge> : <Badge kind="plain">Не завершено</Badge>}
+                  {r.early_stopped ? <Badge kind="plain">ранняя остановка</Badge> : null}
+                </div>
+                <div className="rc-line2">
+                  <span>
+                    {r.schemes} сх. {r.scheme_name ? `· ${r.scheme_name}` : ""}
+                  </span>
+                  {r.score != null ? <span className="num">балл {r.score.toFixed(1)}</span> : null}
+                  {r.margin != null ? <span className="num">ДИ ±{r.margin.toFixed(1)}</span> : null}
+                  {!r.readable && r.error ? <span>{r.error}</span> : null}
+                </div>
               </div>
-              <div className="sub" style={{ color: "var(--text-3)" }}>
-                {selected.recommendation.reason}
+              <div className="rc-actions">
+                {r.score != null ? <Badge kind={scoreKind(r.score)}>{r.score.toFixed(0)}</Badge> : null}
+                <Button
+                  sm
+                  variant="ghost"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void deleteRow(r);
+                  }}
+                >
+                  Удалить
+                </Button>
               </div>
             </div>
-            <div className="sub num" style={{ color: "var(--text-3)" }}>
-              исходная схема: <span className="num">{selected.original_scheme_guid ?? "—"}</span>
-            </div>
-          </div>
-          <table className="grid" style={{ marginTop: 12 }}>
-            <thead>
-              <tr>
-                <th>Схема</th>
-                <th className="num">Прогоны</th>
-                <th className="num">Средний throughput</th>
-                <th className="num">CV</th>
-                <th className="num">медиана Отклик p1</th>
-                <th className="num">стабильность</th>
-                <th>Статус</th>
-              </tr>
-            </thead>
-            <tbody>
-              {selected.schemes.map((s) => (
-                <tr key={s.scheme_id} title="Клик для прогонов">
-                  <td style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {s.name ?? s.scheme_id}
-                    <div className="sub num" style={{ color: "var(--text-3)", fontSize: 11 }}>{s.scheme_id}</div>
-                  </td>
-                  <td className="num">{s.runs}</td>
-                  <td className="num">{Number.isFinite(s.mean_average_throughput) ? s.mean_average_throughput.toFixed(1) : "—"}</td>
-                  <td className="num">{Number.isFinite(s.run_variation_percent) ? `${s.run_variation_percent.toFixed(1)}%` : "—"}</td>
-                  <td className="num">{s.median_p1_throughput.toFixed(1)}</td>
-                  <td className="num">{`${s.median_consistency_percent.toFixed(1)}%`}</td>
-                  <td>
-                    {s.rejected ? <Badge kind="danger">{s.rejection_reason ?? "забракована"}</Badge> : <Badge kind="ok">допущена</Badge>}
-                    {s.cv_warning ? <span> </span> : null}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <PerRunGrid session={selected} />
-        </Glass>
-      ) : null}
+          ))
+        )}
+      </div>
+
+      <Modal open={detail !== null} title="Результат сессии" onClose={() => setDetail(null)}>
+        {detail ? (
+          <SessionDetail
+            s={detail}
+            fileName={rows.find((r) => r.plan_guid === detail.plan_guid)?.file_name ?? ""}
+            onDelete={() => {
+              setDetail(null);
+              refresh();
+            }}
+          />
+        ) : null}
+      </Modal>
     </div>
   );
 }
 
-function PerRunGrid({ session }: { session: SessionJson }) {
-  const runs = session.schemes.flatMap((s) => s.per_run.map((r) => ({ ...r, schemeName: s.name ?? s.scheme_id })));
-  if (runs.length === 0) return null;
+function Chart({
+  series,
+  sessions,
+  hidden,
+  onToggleHide,
+  onDot,
+}: {
+  series: Series[];
+  sessions: HistoryRow[];
+  hidden: Set<string>;
+  onToggleHide: (id: string) => void;
+  onDot: (planGuid: string) => void;
+}) {
+  const W = 720;
+  const H = 240;
+  const pad = { l: 56, r: 12, t: 12, b: 28 };
+  const shown = series.filter((s) => !hidden.has(s.id) && s.pts.length > 0);
+  if (sessions.length < 1 || shown.length === 0) {
+    return <div className="chart-empty muted">Нет данных для сравнения.</div>;
+  }
+  const vals = shown.flatMap((s) => s.pts.flatMap((p) => [p.lo, p.hi]));
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  const span = Math.max(1, max - min);
+  const y = (v: number) => pad.t + (1 - (v - min) / span) * (H - pad.t - pad.b);
+  const x = (col: number) =>
+    sessions.length <= 1
+      ? (W - pad.l - pad.r) / 2 + pad.l
+      : pad.l + (col / (sessions.length - 1)) * (W - pad.l - pad.r);
+  const gridVals = [0, 1, 2, 3, 4].map((i) => min + (span * i) / 4);
   return (
-    <>
-      <div className="card-title" style={{ marginTop: 16 }}>Прогоны ({runs.length})</div>
-      <table className="grid">
-        <thead>
-          <tr>
-            <th>Схема</th>
-            <th className="num">раунд</th>
-            <th className="num">тики</th>
-            <th className="num">длит., мс</th>
-            <th className="num">арифм. среднее</th>
-            <th className="num">Отклик p01</th>
-            <th className="num">консистентность</th>
-            <th className="num">cкачки</th>
-          </tr>
-        </thead>
-        <tbody>
-          {runs.map((r) => (
-            <tr key={`${r.key}:${r.scheme_id}`}>
-              <td style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis" }}>{r.schemeName}</td>
-              <td className="num">{r.round + 1}</td>
-              <td className="num">{r.ticks}</td>
-              <td className="num">{r.duration_ms}</td>
-              <td className="num">{r.combined.mean.toFixed(1)}</td>
-              <td className="num">{r.combined.p01.toFixed(1)}</td>
-              <td className="num">{`${r.cross_phase_consistency.toFixed(1)}%`}</td>
-              <td className="num">{r.spike_windows}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div className="sub" style={{ color: "var(--text-3)", marginTop: 8 }}>
-        Идентичность нагрузки: {session.identity.workload_version} · хэш {session.identity.config_hash} · seed{" "}
-        {session.identity.seed_hex} · воркеров {session.identity.worker_count} · старт {fmtNs(session.schemes[0]?.started_at_min_ns ?? 0)}
+    <div>
+      <div className="chart-legend">
+        {series.map((s, i) => (
+          <button
+            key={s.id}
+            className="chart-chip"
+            title="Скрыть/показать"
+            onClick={() => onToggleHide(s.id)}
+          >
+            <i style={{ background: PALETTE[i % PALETTE.length] }} />
+            {s.name || "—"}
+          </button>
+        ))}
+        <span className="chart-note">полосы — ДИ 95%</span>
       </div>
-    </>
+      <div className="chart-wrap">
+        <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Сравнение производительности схем по истории">
+          {gridVals.map((v) => (
+            <g key={v}>
+              <line className="chart-grid" x1={pad.l} x2={W - pad.r} y1={y(v)} y2={y(v)} />
+              <text className="chart-ylab" x={pad.l - 8} y={y(v) + 3.5} textAnchor="end">
+                {v.toFixed(0)}
+              </text>
+            </g>
+          ))}
+          <line
+            className="chart-grid chart-axis"
+            x1={pad.l}
+            x2={W - pad.r}
+            y1={H - pad.b}
+            y2={H - pad.b}
+          />
+          {sessions.map((s, i) =>
+            i % Math.max(1, Math.ceil(sessions.length / 5)) === 0 ? (
+              <text key={s.file_name} className="chart-xlab" x={x(i)} y={H - 12} textAnchor="middle">
+                {s.started_label}
+              </text>
+            ) : null,
+          )}
+          {shown.map((s) => {
+            const color = PALETTE[series.indexOf(s) % PALETTE.length];
+            const d = s.pts.map((p, k) => `${k === 0 ? "M" : "L"}${x(p.col).toFixed(1)} ${y(p.score).toFixed(1)}`).join(" ");
+            return (
+              <g key={s.id}>
+                {s.pts.map((p) => (
+                  <line
+                    key={p.col}
+                    className="chart-ci"
+                    x1={x(p.col)}
+                    x2={x(p.col)}
+                    y1={y(p.hi)}
+                    y2={y(p.lo)}
+                    stroke={color}
+                  />
+                ))}
+                <path className="chart-line" d={d} fill="none" stroke={color} strokeWidth={1.8} strokeLinejoin="round" />
+                {s.pts.map((p) => (
+                  <circle
+                    key={p.col}
+                    className="chart-dot"
+                    cx={x(p.col)}
+                    cy={y(p.score)}
+                    r={4}
+                    fill={color}
+                    onClick={() => onDot(p.file)}
+                  >
+                    <title>{`${s.name}: ${p.score.toFixed(1)} тик/с (ДИ 95% ±${((p.hi - p.lo) / 2).toFixed(1)})`}</title>
+                  </circle>
+                ))}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+function SessionDetail({
+  s,
+  fileName,
+  onDelete,
+}: {
+  s: SessionJson;
+  fileName: string;
+  onDelete: () => void;
+}) {
+  const rec = s.recommendation;
+  const probs = rec.probabilities;
+  const del = async () => {
+    if (!fileName) {
+      pushToast("err", "Файл записи не найден");
+      return;
+    }
+    if (!window.confirm("Удалить запись?")) return;
+    try {
+      await commands.historyDelete(fileName);
+      pushToast("okk", "Запись удалена");
+      onDelete();
+    } catch (e) {
+      pushToast("err", String(e));
+    }
+  };
+  return (
+    <div className="result-body">
+      <div className="result-hero">
+        <div className="verdict">{rec.level_label ?? "—"}</div>
+        <Badge kind={levelKind(rec.level)} big>
+          уровень подтверждён
+        </Badge>
+      </div>
+      {s.early_stop_reason ? (
+        <div className="row wrap gap-3">
+          <Badge kind="accent" big>
+            ранняя остановка
+          </Badge>
+          <span className="hint">{s.early_stop_reason}</span>
+        </div>
+      ) : null}
+      {rec.recommended_scheme ? (
+        <div className="result-rec">
+          <span className="rl">Рекомендуемая схема</span>
+          <span className="rv">«{rec.recommended_scheme}»</span>
+        </div>
+      ) : null}
+      {probs ? (
+        <div className="evid-probs">
+          <span>P(лучший)={probs[0].toFixed(2)}</span>
+          <span>P(перевес&gt;0)={probs[1].toFixed(2)}</span>
+          <span>P(перевес&gt;1%)={probs[2].toFixed(2)}</span>
+        </div>
+      ) : null}
+      {s.warnings.length > 0 ? (
+        <div className="hint">{s.warnings.join(" ")}</div>
+      ) : null}
+      <div className="rec-schemes-narrow">
+        {s.schemes.map((sch) => (
+          <div key={sch.scheme_id} className="glass inset">
+            <div className="rc-name">{sch.name ?? sch.scheme_id}</div>
+            <div className="hint">
+              медиана {sch.median_throughput.toFixed(1)} тик/с · ДИ [{sch.ci_95[0].toFixed(1)};{" "}
+              {sch.ci_95[1].toFixed(1)}] · прогонов: {sch.runs}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="results-table-wrap">
+        <table className="grid evid-table">
+          <thead>
+            <tr>
+              <th>Схема</th>
+              <th className="num">Медиана, тик/с</th>
+              <th className="num">ДИ 95%</th>
+              <th className="num">Прогоны</th>
+            </tr>
+          </thead>
+          <tbody>
+            {s.schemes.map((sch) => (
+              <tr key={sch.scheme_id}>
+                <td>{sch.name ?? sch.scheme_id}</td>
+                <td className="num">{sch.median_throughput.toFixed(1)}</td>
+                <td className="num">
+                  [{sch.ci_95[0].toFixed(1)}; {sch.ci_95[1].toFixed(1)}]
+                </td>
+                <td className="num">{sch.runs}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="result-actions">
+        <Button
+          variant="ghost"
+          onClick={() =>
+            commands
+              .sessionReport(s.plan_guid)
+              .then((p) => pushToast("okk", `Отчёт открыт: ${p}`))
+              .catch((e) => pushToast("err", String(e)))
+          }
+        >
+          Открыть отчёт
+        </Button>
+        <Button variant="danger" onClick={() => void del()}>
+          Удалить
+        </Button>
+      </div>
+    </div>
   );
 }

@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 
 use powerbench_metrics::{AggregateResult, CompatibilitySignature, DeterminismSignature};
 
-use crate::bootstrap::{bootstrap_probabilities, bootstrap_mode, BootMode, BootstrapProbabilities};
+use crate::bootstrap::{BootMode, BootstrapProbabilities, bootstrap_mode, bootstrap_probabilities};
 
 /// Практическая ничья: кандидаты в пределах 1% от лидера по среднему.
 pub const PRACTICAL_TIE_PERCENT: f64 = 0.01;
@@ -85,6 +85,7 @@ impl SchemeAggregate {
     fn admitted(&self) -> bool {
         !self.rejected
             && !self.scheme_id.is_empty()
+            && !self.runs.is_empty()
             && self.aggregate.mean_average_throughput.is_finite()
             && self.aggregate.mean_average_throughput > 0.0
     }
@@ -156,11 +157,8 @@ fn primary_cmp(a: &SchemeAggregate, b: &SchemeAggregate) -> Ordering {
     if let Some(o) = cmp_f64(da.median_p1_throughput, db.median_p1_throughput).reversed_o() {
         return o;
     }
-    if let Some(o) = cmp_f64(
-        da.median_consistency_percent,
-        db.median_consistency_percent,
-    )
-    .reversed_o()
+    if let Some(o) =
+        cmp_f64(da.median_consistency_percent, db.median_consistency_percent).reversed_o()
     {
         return o;
     }
@@ -233,7 +231,10 @@ pub fn recommend(items: &[SchemeAggregate], expected_runs: usize) -> Recommendat
     let mut ids: Vec<&str> = admitted.iter().map(|c| c.scheme_id.as_str()).collect();
     ids.sort_unstable();
     if ids.windows(2).any(|w| w[0] == w[1]) {
-        return none(NoneReason::DuplicateIds, "ID схем у кандидатов не уникальны");
+        return none(
+            NoneReason::DuplicateIds,
+            "ID схем у кандидатов не уникальны",
+        );
     }
     let first = admitted[0];
     for c in &admitted[1..] {
@@ -259,8 +260,7 @@ pub fn recommend(items: &[SchemeAggregate], expected_runs: usize) -> Recommendat
             level: EvidenceLevel::Preliminary,
             recommended_scheme: Some(sorted[winner].scheme_id.clone()),
             runner_up_scheme: None,
-            reason: "кандидат один: данных для статистического сравнения недостаточно"
-                .to_string(),
+            reason: "кандидат один: данных для статистического сравнения недостаточно".to_string(),
             three_probabilities: Some([probs.p_best, probs.p_margin_gt_0, probs.p_margin_gt_1pct]),
             expected_margin_percent: None,
             bootstrap_mode: Some(mode),
@@ -281,15 +281,18 @@ pub fn recommend(items: &[SchemeAggregate], expected_runs: usize) -> Recommendat
     if tie_indices.len() >= 2 {
         let (winner_idx, criterion, level) = resolve_tie(&sorted, &tie_indices);
         let winner = sorted[winner_idx];
-        let runner_idx = 1;
+        // Раннер — лучший НЕ победитель (иначе сравнение с самим собой
+        // даёт P(перевес>0) = 0, а при победе 3-го+ — отрицательный перевес).
+        let runner_idx = if winner_idx == 0 { 1 } else { 0 };
         let (probs, mode) = bootstrap_pair(&sorted, winner_idx, Some(runner_idx), expected_runs);
         let margin = margin_percent(
             winner.aggregate.mean_average_throughput,
             sorted[runner_idx].aggregate.mean_average_throughput,
         );
         let reason = match criterion {
-            TieCriterion::P1 => "практическая ничья по среднему, разрешена по перевесу P1"
-                .to_string(),
+            TieCriterion::P1 => {
+                "практическая ничья по среднему, разрешена по перевесу P1".to_string()
+            }
             TieCriterion::Stability => {
                 "практическая ничья по среднему, разрешена по стабильности".to_string()
             }
@@ -326,8 +329,8 @@ pub fn recommend(items: &[SchemeAggregate], expected_runs: usize) -> Recommendat
     .unwrap_or(0.0);
     let (probs, mode) = bootstrap_pair(&sorted, 0, Some(1), expected_runs);
 
-    let both_at_least_3 = winner.run_count() >= CONFIRMED_MIN_RUNS
-        && runner.run_count() >= CONFIRMED_MIN_RUNS;
+    let both_at_least_3 =
+        winner.run_count() >= CONFIRMED_MIN_RUNS && runner.run_count() >= CONFIRMED_MIN_RUNS;
 
     let level = if both_at_least_3
         && winner.aggregate.run_variation_percent <= CONFIRMED_MAX_CV_PERCENT
@@ -351,7 +354,9 @@ pub fn recommend(items: &[SchemeAggregate], expected_runs: usize) -> Recommendat
         EvidenceLevel::Confirmed => {
             "перевес подтверждён статистически (ДИ и bootstrap устойчивы)".to_string()
         }
-        EvidenceLevel::Probable => "перевес вероятен, но данных/CV недостаточно для полного подтверждения".to_string(),
+        EvidenceLevel::Probable => {
+            "перевес вероятен, но данных/CV недостаточно для полного подтверждения".to_string()
+        }
         _ => "менее 3 прогонов или высокая неопределённость".to_string(),
     };
 
@@ -397,12 +402,14 @@ fn bootstrap_pair(
     (probs, mode)
 }
 
-fn resolve_tie(
-    sorted: &[&SchemeAggregate],
-    tie: &[usize],
-) -> (usize, TieCriterion, EvidenceLevel) {
+fn resolve_tie(sorted: &[&SchemeAggregate], tie: &[usize]) -> (usize, TieCriterion, EvidenceLevel) {
     // Первый применимый отличительный признак.
-    for criterion in [TieCriterion::P1, TieCriterion::Stability, TieCriterion::Cv, TieCriterion::P01] {
+    for criterion in [
+        TieCriterion::P1,
+        TieCriterion::Stability,
+        TieCriterion::Cv,
+        TieCriterion::P01,
+    ] {
         if let Some(winner) = separate_by(sorted, tie, criterion) {
             return (winner, criterion, EvidenceLevel::StabilityTieBreak);
         }
@@ -421,7 +428,11 @@ fn resolve_tie(
 /// Отделить лучшего из связанных кандидатов по признаку `criterion`.
 /// Возвращает `Some(индекс победителя)`, только если гейт пройден и перевес
 /// соответствует порогу.
-fn separate_by(sorted: &[&SchemeAggregate], tie: &[usize], criterion: TieCriterion) -> Option<usize> {
+fn separate_by(
+    sorted: &[&SchemeAggregate],
+    tie: &[usize],
+    criterion: TieCriterion,
+) -> Option<usize> {
     if tie.len() < 2 {
         return None;
     }
@@ -462,13 +473,9 @@ fn separate_by(sorted: &[&SchemeAggregate], tie: &[usize], criterion: TieCriteri
     // Гейты признаков.
     let runs_ok = |i: usize, min_samples: usize, min_runs: usize| -> bool {
         let c = sorted[i];
-        c.runs.len() >= min_runs
-            && c.runs.iter().all(|r| r.samples >= min_samples)
+        c.runs.len() >= min_runs && c.runs.iter().all(|r| r.samples >= min_samples)
     };
-    let all_ok = |min_samples: usize| -> bool {
-        tie.iter()
-            .all(|&i| runs_ok(i, min_samples, 1))
-    };
+    let all_ok = |min_samples: usize| -> bool { tie.iter().all(|&i| runs_ok(i, min_samples, 1)) };
 
     let lead = match criterion {
         TieCriterion::P1 => {
@@ -510,11 +517,7 @@ fn separate_by(sorted: &[&SchemeAggregate], tie: &[usize], criterion: TieCriteri
         TieCriterion::Preference | TieCriterion::None => 0.0,
     };
 
-    if lead >= threshold {
-        Some(top)
-    } else {
-        None
-    }
+    if lead >= threshold { Some(top) } else { None }
 }
 
 #[cfg(test)]
@@ -536,6 +539,7 @@ mod tests {
     }
 
     /// Руками заданная сводка кандидата без прогонов с ненулевой длиной.
+    #[allow(clippy::too_many_arguments)]
     fn scheme(
         id: &str,
         avg: f64,
@@ -602,30 +606,99 @@ mod tests {
         assert_eq!(r.reason, "нет допущенных кандидатов");
 
         // Все забракованы.
-        let mut c = scheme("A", 1000.0, 1000.0, 900.0, 800.0, 90.0, 1.0, &[(1000.0, 200)], false, false);
+        let mut c = scheme(
+            "A",
+            1000.0,
+            1000.0,
+            900.0,
+            800.0,
+            90.0,
+            1.0,
+            &[(1000.0, 200)],
+            false,
+            false,
+        );
         c.rejected = true;
         let r = recommend(&[c.clone()], 3);
         assert_eq!(r.level, EvidenceLevel::None);
         assert!(r.reason.contains("нет допущенных кандидатов"));
 
         // Дубли ID.
-        let a = scheme("A", 1000.0, 1000.0, 900.0, 800.0, 90.0, 1.0, &[(1000.0, 200)], false, false);
-        let b = scheme("A", 999.0, 900.0, 800.0, 700.0, 85.0, 2.0, &[(999.0, 200)], false, false);
+        let a = scheme(
+            "A",
+            1000.0,
+            1000.0,
+            900.0,
+            800.0,
+            90.0,
+            1.0,
+            &[(1000.0, 200)],
+            false,
+            false,
+        );
+        let b = scheme(
+            "A",
+            999.0,
+            900.0,
+            800.0,
+            700.0,
+            85.0,
+            2.0,
+            &[(999.0, 200)],
+            false,
+            false,
+        );
         let r = recommend(&[a, b], 3);
         assert_eq!(r.level, EvidenceLevel::None);
         assert_eq!(r.reason, "ID схем у кандидатов не уникальны");
 
         // Несовместимые сигнатуры.
-        let x = scheme("X", 1000.0, 1000.0, 900.0, 800.0, 90.0, 1.0, &[(1000.0, 200)], false, false);
-        let mut y = scheme("Y", 999.0, 900.0, 800.0, 700.0, 85.0, 2.0, &[(999.0, 200)], false, false);
+        let x = scheme(
+            "X",
+            1000.0,
+            1000.0,
+            900.0,
+            800.0,
+            90.0,
+            1.0,
+            &[(1000.0, 200)],
+            false,
+            false,
+        );
+        let mut y = scheme(
+            "Y",
+            999.0,
+            900.0,
+            800.0,
+            700.0,
+            85.0,
+            2.0,
+            &[(999.0, 200)],
+            false,
+            false,
+        );
         y.signature.config_hash = "BBBB".to_string();
         let r = recommend(&[x, y], 3);
         assert_eq!(r.level, EvidenceLevel::None);
-        assert_eq!(r.reason, "несовместимые сигнатуры кандидатов: такие результаты не ранжируются вместе");
+        assert_eq!(
+            r.reason,
+            "несовместимые сигнатуры кандидатов: такие результаты не ранжируются вместе"
+        );
 
         // Невалидный средний throughput исключается из допуска.
         let z = scheme("Z", f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, &[], false, false);
-        let ok = scheme("W", 950.0, 950.0, 850.0, 800.0, 90.0, 1.0, &[(950.0, 200)], false, false);
+        let ok = scheme(
+            "W",
+            950.0,
+            950.0,
+            850.0,
+            800.0,
+            90.0,
+            1.0,
+            &[(950.0, 200)],
+            false,
+            false,
+        );
         let r = recommend(&[z, ok], 3);
         assert!(matches!(r.level, EvidenceLevel::Preliminary));
     }
@@ -634,8 +707,30 @@ mod tests {
     /// B — «в пределах 1%» (995).
     fn tie_pair() -> (SchemeAggregate, SchemeAggregate) {
         (
-            scheme("A", 1000.0, 1000.0, 800.0, 700.0, 90.0, 2.0, &[(1000.0, 200); 3], false, false),
-            scheme("B", 995.0, 995.0, 800.0, 700.0, 90.0, 2.0, &[(995.0, 200); 3], false, false),
+            scheme(
+                "A",
+                1000.0,
+                1000.0,
+                800.0,
+                700.0,
+                90.0,
+                2.0,
+                &[(1000.0, 200); 3],
+                false,
+                false,
+            ),
+            scheme(
+                "B",
+                995.0,
+                995.0,
+                800.0,
+                700.0,
+                90.0,
+                2.0,
+                &[(995.0, 200); 3],
+                false,
+                false,
+            ),
         )
     }
 
@@ -656,9 +751,30 @@ mod tests {
         let (a, mut b) = tie_pair();
         // Гейт P1 требует ≥ 100 измерений в каждом прогоне — 50 запрещает.
         b.runs = vec![
-            crate::RunCompact { average_throughput: 995.0, median_throughput: 995.0, p1_throughput: 900.0, p01_throughput: 700.0, consistency_percent: 90.0, samples: 50 },
-            crate::RunCompact { average_throughput: 995.0, median_throughput: 995.0, p1_throughput: 900.0, p01_throughput: 700.0, consistency_percent: 90.0, samples: 50 },
-            crate::RunCompact { average_throughput: 995.0, median_throughput: 995.0, p1_throughput: 900.0, p01_throughput: 700.0, consistency_percent: 90.0, samples: 50 },
+            crate::RunCompact {
+                average_throughput: 995.0,
+                median_throughput: 995.0,
+                p1_throughput: 900.0,
+                p01_throughput: 700.0,
+                consistency_percent: 90.0,
+                samples: 50,
+            },
+            crate::RunCompact {
+                average_throughput: 995.0,
+                median_throughput: 995.0,
+                p1_throughput: 900.0,
+                p01_throughput: 700.0,
+                consistency_percent: 90.0,
+                samples: 50,
+            },
+            crate::RunCompact {
+                average_throughput: 995.0,
+                median_throughput: 995.0,
+                p1_throughput: 900.0,
+                p01_throughput: 700.0,
+                consistency_percent: 90.0,
+                samples: 50,
+            },
         ];
         b.aggregate.median_p1_throughput = 900.0;
         // Никакой признак не применим, предпочтений нет → Эквиваленты.
@@ -696,8 +812,30 @@ mod tests {
 
     #[test]
     fn practical_tie_cv_guard_blocks_with_two_runs() {
-        let mut a = scheme("A", 1000.0, 1000.0, 800.0, 700.0, 90.0, 3.0, &[(1000.0, 200); 2], false, false);
-        let mut b = scheme("B", 995.0, 995.0, 800.0, 700.0, 90.0, 2.0, &[(995.0, 200); 2], false, false);
+        let mut a = scheme(
+            "A",
+            1000.0,
+            1000.0,
+            800.0,
+            700.0,
+            90.0,
+            3.0,
+            &[(1000.0, 200); 2],
+            false,
+            false,
+        );
+        let mut b = scheme(
+            "B",
+            995.0,
+            995.0,
+            800.0,
+            700.0,
+            90.0,
+            2.0,
+            &[(995.0, 200); 2],
+            false,
+            false,
+        );
         a.aggregate.run_variation_percent = 3.0;
         b.aggregate.run_variation_percent = 2.0;
         let r = recommend(&[a, b], 3);
@@ -708,8 +846,30 @@ mod tests {
     #[test]
     fn practical_tie_resolved_by_p01_with_ten_thousand_samples() {
         // B лучше по P0.1 на ~2.1%; все прогоны ≥ 10 000 измерений — гейт P01 открыт.
-        let a = scheme("A", 1000.0, 1000.0, 800.0, 700.0, 90.0, 2.0, &[(1000.0, 20000); 3], false, false);
-        let b = scheme("B", 995.0, 995.0, 800.0, 715.0, 90.0, 2.0, &[(995.0, 20000); 3], false, false);
+        let a = scheme(
+            "A",
+            1000.0,
+            1000.0,
+            800.0,
+            700.0,
+            90.0,
+            2.0,
+            &[(1000.0, 20000); 3],
+            false,
+            false,
+        );
+        let b = scheme(
+            "B",
+            995.0,
+            995.0,
+            800.0,
+            715.0,
+            90.0,
+            2.0,
+            &[(995.0, 20000); 3],
+            false,
+            false,
+        );
         let r = recommend(&[a, b], 3);
 
         assert_eq!(r.level, EvidenceLevel::StabilityTieBreak);
@@ -727,7 +887,15 @@ mod tests {
 
         // Активная схема (исходной нет).
         let (a, b) = tie_pair();
-        let rb = recommend(&[a.clone().mut_set(|c| c.is_active = true).mut_set(|c| c.is_original = false), b], 3);
+        let rb = recommend(
+            &[
+                a.clone()
+                    .mut_set(|c| c.is_active = true)
+                    .mut_set(|c| c.is_original = false),
+                b,
+            ],
+            3,
+        );
         assert_eq!(rb.level, EvidenceLevel::KeepCurrent);
         assert_eq!(rb.recommended_scheme.as_deref(), Some("A"));
     }
@@ -735,22 +903,88 @@ mod tests {
     #[test]
     fn primary_order_prefers_median_then_consistency_then_lower_cv() {
         // Равные средние: решает медиана (B > A).
-        let a = scheme("A", 1000.0, 900.0, 800.0, 700.0, 90.0, 2.0, &[(1000.0, 200); 3], false, false);
-        let b = scheme("B", 1000.0, 990.0, 800.0, 700.0, 90.0, 2.0, &[(1000.0, 200); 3], false, false);
+        let a = scheme(
+            "A",
+            1000.0,
+            900.0,
+            800.0,
+            700.0,
+            90.0,
+            2.0,
+            &[(1000.0, 200); 3],
+            false,
+            false,
+        );
+        let b = scheme(
+            "B",
+            1000.0,
+            990.0,
+            800.0,
+            700.0,
+            90.0,
+            2.0,
+            &[(1000.0, 200); 3],
+            false,
+            false,
+        );
         let r = recommend(&[a, b], 3);
         assert_eq!(r.recommended_scheme.as_deref(), Some("B"));
 
         // Равные средние и медиана: решает CV (B меньше/лучше).
-        let a = scheme("A", 1000.0, 990.0, 800.0, 700.0, 90.0, 3.0, &[(1000.0, 200); 3], false, false);
-        let b = scheme("B", 1000.0, 990.0, 800.0, 700.0, 90.0, 1.0, &[(1000.0, 200); 3], false, false);
+        let a = scheme(
+            "A",
+            1000.0,
+            990.0,
+            800.0,
+            700.0,
+            90.0,
+            3.0,
+            &[(1000.0, 200); 3],
+            false,
+            false,
+        );
+        let b = scheme(
+            "B",
+            1000.0,
+            990.0,
+            800.0,
+            700.0,
+            90.0,
+            1.0,
+            &[(1000.0, 200); 3],
+            false,
+            false,
+        );
         let r = recommend(&[a, b], 3);
         assert_eq!(r.recommended_scheme.as_deref(), Some("B"));
     }
 
     #[test]
     fn confirmed_level_with_three_runs_per_scheme() {
-        let a = scheme("A", 1000.0, 1000.0, 950.0, 900.0, 95.0, 1.0, &[(990.0, 200), (1000.0, 200), (1010.0, 200)], false, false);
-        let b = scheme("B", 960.0, 960.0, 910.0, 860.0, 95.0, 1.0, &[(950.0, 200), (960.0, 200), (970.0, 200)], false, false);
+        let a = scheme(
+            "A",
+            1000.0,
+            1000.0,
+            950.0,
+            900.0,
+            95.0,
+            1.0,
+            &[(990.0, 200), (1000.0, 200), (1010.0, 200)],
+            false,
+            false,
+        );
+        let b = scheme(
+            "B",
+            960.0,
+            960.0,
+            910.0,
+            860.0,
+            95.0,
+            1.0,
+            &[(950.0, 200), (960.0, 200), (970.0, 200)],
+            false,
+            false,
+        );
         let r = recommend(&[a, b], 3);
         assert_eq!(r.level, EvidenceLevel::Confirmed);
         assert_eq!(r.recommended_scheme.as_deref(), Some("A"));
@@ -765,8 +999,30 @@ mod tests {
     fn probable_level_requires_positive_margin_but_not_confirmed() {
         // Перевес ~1.2%, но разброс велик: около 40% реплик падают ниже порога 1%,
         // поэтому P(перевес > 1%) ≈ 0.59 < 95% → Probable, не Confirmed.
-        let a = scheme("A", 1015.0, 1015.0, 990.0, 970.0, 95.0, 2.0, &[(1000.0, 200), (1010.0, 200), (1035.0, 200)], false, false);
-        let b = scheme("B", 1003.0, 1003.0, 980.0, 960.0, 95.0, 2.0, &[(995.0, 200), (1002.0, 200), (1012.0, 200)], false, false);
+        let a = scheme(
+            "A",
+            1015.0,
+            1015.0,
+            990.0,
+            970.0,
+            95.0,
+            2.0,
+            &[(1000.0, 200), (1010.0, 200), (1035.0, 200)],
+            false,
+            false,
+        );
+        let b = scheme(
+            "B",
+            1003.0,
+            1003.0,
+            980.0,
+            960.0,
+            95.0,
+            2.0,
+            &[(995.0, 200), (1002.0, 200), (1012.0, 200)],
+            false,
+            false,
+        );
         let r = recommend(&[a, b], 3);
         assert_eq!(r.level, EvidenceLevel::Probable);
         let p = r.three_probabilities.unwrap();
@@ -777,22 +1033,88 @@ mod tests {
 
     #[test]
     fn preliminary_when_fewer_than_three_runs() {
-        let a = scheme("A", 1000.0, 1000.0, 900.0, 800.0, 90.0, 1.0, &[(1000.0, 200), (1000.0, 200)], false, false);
-        let b = scheme("B", 920.0, 920.0, 830.0, 750.0, 90.0, 1.0, &[(920.0, 200), (920.0, 200)], false, false);
+        let a = scheme(
+            "A",
+            1000.0,
+            1000.0,
+            900.0,
+            800.0,
+            90.0,
+            1.0,
+            &[(1000.0, 200), (1000.0, 200)],
+            false,
+            false,
+        );
+        let b = scheme(
+            "B",
+            920.0,
+            920.0,
+            830.0,
+            750.0,
+            90.0,
+            1.0,
+            &[(920.0, 200), (920.0, 200)],
+            false,
+            false,
+        );
         let r = recommend(&[a, b], 3);
         assert_eq!(r.level, EvidenceLevel::Preliminary);
 
         // Один кандидат — всегда Preliminary.
-        let only = scheme("A", 1000.0, 1000.0, 900.0, 800.0, 90.0, 1.0, &[(1000.0, 200); 3], false, false);
+        let only = scheme(
+            "A",
+            1000.0,
+            1000.0,
+            900.0,
+            800.0,
+            90.0,
+            1.0,
+            &[(1000.0, 200); 3],
+            false,
+            false,
+        );
         let r = recommend(&[only], 3);
         assert_eq!(r.level, EvidenceLevel::Preliminary);
     }
 
     #[test]
     fn recommendation_is_invariant_to_input_order() {
-        let a = scheme("A", 1000.0, 1000.0, 950.0, 900.0, 95.0, 1.0, &[(990.0, 200), (1000.0, 200), (1010.0, 200)], false, false);
-        let b = scheme("B", 960.0, 960.0, 910.0, 860.0, 95.0, 1.0, &[(950.0, 200), (960.0, 200), (970.0, 200)], false, false);
-        let c = scheme("C", 920.0, 920.0, 870.0, 820.0, 90.0, 2.0, &[(910.0, 200), (920.0, 200), (930.0, 200)], false, false);
+        let a = scheme(
+            "A",
+            1000.0,
+            1000.0,
+            950.0,
+            900.0,
+            95.0,
+            1.0,
+            &[(990.0, 200), (1000.0, 200), (1010.0, 200)],
+            false,
+            false,
+        );
+        let b = scheme(
+            "B",
+            960.0,
+            960.0,
+            910.0,
+            860.0,
+            95.0,
+            1.0,
+            &[(950.0, 200), (960.0, 200), (970.0, 200)],
+            false,
+            false,
+        );
+        let c = scheme(
+            "C",
+            920.0,
+            920.0,
+            870.0,
+            820.0,
+            90.0,
+            2.0,
+            &[(910.0, 200), (920.0, 200), (930.0, 200)],
+            false,
+            false,
+        );
         let r1 = recommend(&[a.clone(), b.clone(), c.clone()], 3);
         let r2 = recommend(&[c.clone(), a.clone(), b.clone()], 3);
         let r3 = recommend(&[b.clone(), c.clone(), a.clone()], 3);

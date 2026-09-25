@@ -12,15 +12,17 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use powerbench_core::engine::{Engine, ProgressSnapshot};
 use powerbench_metrics::AggregateResult;
-use powerbench_recommend::{EvidenceLevel, Recommendation};
 use powerbench_orchestrator::appsettings::AppSettings;
 use powerbench_orchestrator::checkpoint::StoredRun;
 use powerbench_orchestrator::config::SessionConfig;
-use powerbench_orchestrator::result::{build_session_json, IdentityJson, SessionJson};
-use powerbench_orchestrator::session::{
-    run_session, session_signature, DiskCheckpointStore, RealSchemeDriver, SessionEvent,
-    TelemetryObserver,
+use powerbench_orchestrator::result::{
+    IdentityJson, RecommendationScheme, SessionJson, build_session_json,
 };
+use powerbench_orchestrator::session::{
+    DiskCheckpointStore, RealSchemeDriver, SessionEvent, TelemetryObserver, run_session,
+    session_signature,
+};
+use powerbench_recommend::{EvidenceLevel, Recommendation};
 use powerbench_windows::power::SleepGuard;
 
 /// Дескриптор запущенной сессии для остановки и проверки занятости.
@@ -256,7 +258,11 @@ fn empty_recommendation() -> Recommendation {
 }
 
 fn warn_of(app: &AppHandle, text: &str) {
-    let msg = LogMsg { level: "warn".into(), text: text.to_string(), ts_ms: now_ms() };
+    let msg = LogMsg {
+        level: "warn".into(),
+        text: text.to_string(),
+        ts_ms: now_ms(),
+    };
     persist_log(app, "warn", text);
     let _ = app.emit("log", msg);
 }
@@ -275,7 +281,11 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
         Err(e) => {
             let _ = app.emit(
                 "test-finished",
-                FinishedPayload { ok: false, error: Some(e), ..empty_finished() },
+                FinishedPayload {
+                    ok: false,
+                    error: Some(e),
+                    ..empty_finished()
+                },
             );
             return;
         }
@@ -295,7 +305,10 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
         }
     };
     let _ = guard;
-    let observer = Arc::new(AppObserver { app: app.clone(), ctx: Mutex::new(ObsCtx::default()) });
+    let observer = Arc::new(AppObserver {
+        app: app.clone(),
+        ctx: Mutex::new(ObsCtx::default()),
+    });
     let mut store = DiskCheckpointStore;
     let outcome = match run_session(
         &mut engine,
@@ -320,32 +333,34 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
         }
     };
 
-    let rec = outcome.recommendation.clone().unwrap_or_else(empty_recommendation);
-    let recommendation_schemes: Vec<(String, bool, Option<String>, AggregateResult, Vec<StoredRun>)> =
-        outcome
-            .checkpoint
-            .plan
-            .scheme_ids
-            .iter()
-            .map(|id| {
-                let agg = outcome
-                    .aggregates
-                    .iter()
-                    .find(|(sid, _)| sid.eq_ignore_ascii_case(id))
-                    .map(|(_, a)| a.clone())
-                    .unwrap_or_else(empty_aggregate);
-                let rejected = outcome.rejection_reasons.contains_key(id);
-                let reason = outcome.rejection_reasons.get(id).cloned();
-                let per_run: Vec<StoredRun> = outcome
-                    .checkpoint
-                    .runs
-                    .iter()
-                    .filter(|r| r.scheme_id.eq_ignore_ascii_case(id))
-                    .cloned()
-                    .collect();
-                (id.clone(), rejected, reason, agg, per_run)
-            })
-            .collect();
+    let rec = outcome
+        .recommendation
+        .clone()
+        .unwrap_or_else(empty_recommendation);
+    let recommendation_schemes: Vec<RecommendationScheme> = outcome
+        .checkpoint
+        .plan
+        .scheme_ids
+        .iter()
+        .map(|id| {
+            let agg = outcome
+                .aggregates
+                .iter()
+                .find(|(sid, _)| sid.eq_ignore_ascii_case(id))
+                .map(|(_, a)| a.clone())
+                .unwrap_or_else(empty_aggregate);
+            let rejected = outcome.rejection_reasons.contains_key(id);
+            let reason = outcome.rejection_reasons.get(id).cloned();
+            let per_run: Vec<StoredRun> = outcome
+                .checkpoint
+                .runs
+                .iter()
+                .filter(|r| r.scheme_id.eq_ignore_ascii_case(id))
+                .cloned()
+                .collect();
+            (id.clone(), rejected, reason, agg, per_run)
+        })
+        .collect();
 
     let warnings: Vec<String> = outcome
         .events
@@ -393,7 +408,11 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
         .recommendation
         .recommended_scheme
         .as_ref()
-        .and_then(|id| json.schemes.iter().find(|sch| sch.scheme_id.eq_ignore_ascii_case(id)))
+        .and_then(|id| {
+            json.schemes
+                .iter()
+                .find(|sch| sch.scheme_id.eq_ignore_ascii_case(id))
+        })
         .cloned();
     let _ = app.emit(
         "test-finished",
@@ -408,11 +427,12 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
             level: Some(json.recommendation.level.clone()),
             level_label: Some(json.recommendation.level_label.clone()),
             recommended_scheme: json.recommendation.recommended_scheme.clone(),
-            recommended_name: winner
-                .as_ref()
-                .and_then(|s| s.name.clone()),
+            recommended_name: winner.as_ref().and_then(|s| s.name.clone()),
             expected_margin_percent: json.recommendation.expected_margin_percent,
-            winner_margin_percent: winner.as_ref().filter(|s| s.margin.is_finite()).map(|s| s.margin),
+            winner_margin_percent: winner
+                .as_ref()
+                .filter(|s| s.margin.is_finite())
+                .map(|s| s.margin),
         },
     );
 }
@@ -424,15 +444,13 @@ pub fn write_session_report(json: &SessionJson) -> Option<String> {
     std::fs::create_dir_all(&dir).ok()?;
     let start = powerbench_orchestrator::history::session_started_at_ns(json).unwrap_or(0);
     let stamp = powerbench_orchestrator::history::date_time_stamp(start);
-    let plan_part: String = json
-        .plan_guid
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
+    let plan_part = powerbench_orchestrator::history::sanitize(&json.plan_guid);
     let mut candidate = dir.join(format!("PowerBench-Session_{plan_part}_{stamp}.html"));
     let mut suffix = 2u32;
     while candidate.exists() {
-        candidate = dir.join(format!("PowerBench-Session_{plan_part}_{stamp}_{suffix}.html"));
+        candidate = dir.join(format!(
+            "PowerBench-Session_{plan_part}_{stamp}_{suffix}.html"
+        ));
         suffix += 1;
     }
     std::fs::write(&candidate, html).ok()?;
@@ -458,7 +476,11 @@ fn empty_finished() -> FinishedPayload {
 }
 
 /// Запустить сессию в фоновом потоке. Возвращает plan_guid или причину отказа.
-pub fn start(app: &AppHandle, runner: &Arc<Mutex<Option<RunnerHandle>>>, plan: SessionConfig) -> Result<String, String> {
+pub fn start(
+    app: &AppHandle,
+    runner: &Arc<Mutex<Option<RunnerHandle>>>,
+    plan: SessionConfig,
+) -> Result<String, String> {
     {
         let guard = runner.lock().unwrap();
         if guard.is_some() {
@@ -479,8 +501,25 @@ pub fn start(app: &AppHandle, runner: &Arc<Mutex<Option<RunnerHandle>>>, plan: S
     let cancel2 = Arc::clone(&cancel);
     let runner2 = Arc::clone(runner);
     let join = std::thread::spawn(move || {
-        run_test(app2, plan, cancel2);
-        runner2.lock().unwrap().take();
+        let app_err = app2.clone();
+        // Паника в сессии не должна вешать интерфейс в «running» навсегда
+        // и оставлять чужую схему: гасим в ошибку и освобождаем раннер.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_test(app2, plan, cancel2);
+        }));
+        if let Err(payload) = outcome {
+            let _ = app_err.emit(
+                "test-finished",
+                FinishedPayload {
+                    ok: false,
+                    error: Some(format!("паника потока сессии: {}", panic_message(&payload))),
+                    ..empty_finished()
+                },
+            );
+        }
+        if let Ok(mut guard) = runner2.lock() {
+            guard.take();
+        }
     });
     if let Some(h) = runner.lock().unwrap().as_mut() {
         h.join = Some(join);
@@ -508,14 +547,32 @@ pub fn running(runner: &Arc<Mutex<Option<RunnerHandle>>>) -> bool {
 /// Глобальное состояние приложения не должны видеть внутренности; лог-хелпер
 /// для команд интерфейса (событие `log` + персистентный журнал).
 pub fn emit_log(app: &AppHandle, level: &str, text: &str) {
-    let msg = LogMsg { level: level.to_string(), text: text.to_string(), ts_ms: now_ms() };
+    let msg = LogMsg {
+        level: level.to_string(),
+        text: text.to_string(),
+        ts_ms: now_ms(),
+    };
     persist_log(app, level, text);
     let _ = app.emit("log", msg);
 }
 
+/// Текст паники для журнала (String / &str / неизвестно).
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        "неизвестная причина".to_string()
+    }
+}
+
 /// Дождаться завершения фоновой сессии (используется при закрытии окна).
 pub fn join(runner: &Arc<Mutex<Option<RunnerHandle>>>) {
-    let handle = runner.lock().unwrap().as_mut().and_then(|h| h.join.take());
+    let handle = runner
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.as_mut().and_then(|h| h.join.take()));
     if let Some(h) = handle {
         let _ = h.join();
     }

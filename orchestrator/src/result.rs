@@ -9,6 +9,15 @@ use powerbench_recommend::{EvidenceLevel, TieCriterion};
 
 use crate::checkpoint::{Checkpoint, StoredRun};
 
+/// Строка рекомендации по схеме: идентификатор, активность, имя, агрегат, прогоны.
+pub type RecommendationScheme = (
+    String,
+    bool,
+    Option<String>,
+    AggregateResult,
+    Vec<StoredRun>,
+);
+
 /// Человекочитаемые подписи уровней доказательности.
 pub fn evidence_level_label(level: EvidenceLevel) -> &'static str {
     match level {
@@ -187,11 +196,12 @@ pub struct SessionJson {
 }
 
 /// Построить машинный JSON из контрольной точки и рекомендации.
+#[allow(clippy::too_many_arguments)]
 pub fn build_session_json(
     checkpoint: &Checkpoint,
     identity: IdentityJson,
     aggregated: Vec<(String, AggregateResult)>,
-    recommendation_schemes: &[(String, bool, Option<String>, AggregateResult, Vec<StoredRun>)],
+    recommendation_schemes: &[RecommendationScheme],
     recommendation: &powerbench_recommend::Recommendation,
     warnings: Vec<String>,
     cancelled: bool,
@@ -236,8 +246,14 @@ pub fn build_session_json(
             reason: recommendation.reason.clone(),
             probabilities: recommendation.three_probabilities.map(|p: [f64; 3]| p),
             expected_margin_percent: recommendation.expected_margin_percent,
-            bootstrap_mode: recommendation.bootstrap_mode.map(bootstrap_mode_id).map(String::from),
-            tie_criterion: recommendation.tie_criterion.map(tie_criterion_id).map(String::from),
+            bootstrap_mode: recommendation
+                .bootstrap_mode
+                .map(bootstrap_mode_id)
+                .map(String::from),
+            tie_criterion: recommendation
+                .tie_criterion
+                .map(tie_criterion_id)
+                .map(String::from),
         },
         warnings,
         rounds_planned,
@@ -253,9 +269,15 @@ mod tests {
 
     #[test]
     fn labels_map_to_russian() {
-        assert_eq!(evidence_level_label(EvidenceLevel::Confirmed), "Подтверждено");
+        assert_eq!(
+            evidence_level_label(EvidenceLevel::Confirmed),
+            "Подтверждено"
+        );
         assert_eq!(evidence_level_label(EvidenceLevel::None), "Нет данных");
-        assert_eq!(evidence_level_label(EvidenceLevel::KeepCurrent), "Оставить текущую");
+        assert_eq!(
+            evidence_level_label(EvidenceLevel::KeepCurrent),
+            "Оставить текущую"
+        );
         assert_eq!(evidence_level_id(EvidenceLevel::None), "None");
         assert_eq!(bootstrap_mode_id(BootMode::Independent), "Independent");
         assert_eq!(tie_criterion_id(TieCriterion::Stability), "Stability");

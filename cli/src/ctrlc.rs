@@ -28,10 +28,8 @@ pub fn install() {
                 1
             }
             unsafe {
-                let _ = windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
-                    Some(handler),
-                    1,
-                );
+                let _ =
+                    windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(handler), 1);
             }
         });
     }

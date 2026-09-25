@@ -85,7 +85,8 @@ pub fn validate_config(cfg: &SessionConfig) -> Option<String> {
             MIN_REPETITIONS, MAX_REPETITIONS, cfg.repetitions
         ));
     }
-    if !(MIN_BACKGROUND_PERCENT..=MAX_BACKGROUND_PERCENT).contains(&cfg.background_threshold_percent)
+    if !(MIN_BACKGROUND_PERCENT..=MAX_BACKGROUND_PERCENT)
+        .contains(&cfg.background_threshold_percent)
     {
         return Some(format!(
             "порог фоновой нагрузки должен быть в диапазоне {}..{} %, задано {}",
@@ -118,9 +119,13 @@ pub struct PhaseDurations {
 
 /// Длительности измеряемых фаз по общей длительности.
 pub const fn phase_durations(total: u64) -> PhaseDurations {
-    let total = if total < MIN_DURATION_SECONDS { MIN_DURATION_SECONDS } else { total };
+    let total = if total < MIN_DURATION_SECONDS {
+        MIN_DURATION_SECONDS
+    } else {
+        total
+    };
     let extra = total - MIN_DURATION_SECONDS;
-    let side = MIN_DURATION_SECONDS / 3 + extra * 3 / 10;
+    let side = MIN_DURATION_SECONDS / 3 + extra.saturating_mul(3) / 10;
     PhaseDurations {
         light_seconds: side,
         response_seconds: side,
@@ -143,6 +148,8 @@ pub fn round_order(scheme_ids: &[String], round: u32) -> Vec<String> {
     let n = scheme_ids.len();
     let cycle = round / n as u32;
     let shift = (round % n as u32) as usize;
+    // MSRV 1.85: `is_multiple_of` стабилизирован в Rust 1.87.
+    #[allow(clippy::manual_is_multiple_of)]
     let source: Vec<String> = if cycle % 2 == 0 {
         scheme_ids.to_vec()
     } else {
@@ -185,7 +192,15 @@ mod tests {
 
     #[test]
     fn quick_preset_values() {
-        assert_eq!(QUICK_PRESET, Preset { duration_seconds: 9, warmup_seconds: 2, cooling_seconds: 1, repetitions: 1 });
+        assert_eq!(
+            QUICK_PRESET,
+            Preset {
+                duration_seconds: 9,
+                warmup_seconds: 2,
+                cooling_seconds: 1,
+                repetitions: 1
+            }
+        );
     }
 
     #[test]
@@ -221,10 +236,24 @@ mod tests {
     fn phase_division_follows_the_spec_formula() {
         // 9 с: 3/3/3.
         let p9 = phase_durations(9);
-        assert_eq!(p9, PhaseDurations { light_seconds: 3, heavy_seconds: 3, response_seconds: 3 });
+        assert_eq!(
+            p9,
+            PhaseDurations {
+                light_seconds: 3,
+                heavy_seconds: 3,
+                response_seconds: 3
+            }
+        );
         // 30 с: extra 21 → light=3+6=9, response=9, heavy=30-18=12.
         let p30 = phase_durations(30);
-        assert_eq!(p30, PhaseDurations { light_seconds: 9, heavy_seconds: 12, response_seconds: 9 });
+        assert_eq!(
+            p30,
+            PhaseDurations {
+                light_seconds: 9,
+                heavy_seconds: 12,
+                response_seconds: 9
+            }
+        );
         // Сумма всегда равна total (и total максимуется до 9).
         for total in [0u64, 1, 9, 10, 15, 21, 30, 59, 60] {
             let d = phase_durations(total);
@@ -254,7 +283,11 @@ mod tests {
             }
             positions.sort();
             positions.dedup();
-            assert_eq!(positions.len(), ids.len(), "{id} должен побывать на каждой позиции");
+            assert_eq!(
+                positions.len(),
+                ids.len(),
+                "{id} должен побывать на каждой позиции"
+            );
         }
     }
 

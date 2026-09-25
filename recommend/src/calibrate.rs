@@ -9,9 +9,7 @@
 use powerbench_metrics::{AggregateResult, CompatibilitySignature, DeterminismSignature};
 
 use crate::bootstrap::SplitMix64;
-use crate::{
-    recommend, EvidenceLevel, Recommendation, RunCompact, SchemeAggregate,
-};
+use crate::{EvidenceLevel, Recommendation, RunCompact, SchemeAggregate, recommend};
 
 /// Истинные перевесы калибровочной матрицы (%). 0 / 0.5 / 1 / 2.
 pub const CALIBRATION_MARGINS_PERCENT: [f64; 4] = [0.0, 0.5, 1.0, 2.0];
@@ -154,14 +152,16 @@ pub fn calibrate_series(
         b_avgs.push(b);
     }
 
-    (scheme_from_runs("A", &a_avgs), scheme_from_runs("B", &b_avgs))
+    (
+        scheme_from_runs("A", &a_avgs),
+        scheme_from_runs("B", &b_avgs),
+    )
 }
 
 /// Прогнать матрицу калибровки: `series_per_cell` серий на ячейку.
 pub fn run_calibration(series_per_cell: usize) -> CalibrationReport {
-    let mut cells = Vec::with_capacity(
-        CALIBRATION_MARGINS_PERCENT.len() * CALIBRATION_NOISES_PERCENT.len(),
-    );
+    let mut cells =
+        Vec::with_capacity(CALIBRATION_MARGINS_PERCENT.len() * CALIBRATION_NOISES_PERCENT.len());
 
     for &margin in &CALIBRATION_MARGINS_PERCENT {
         for &noise in &CALIBRATION_NOISES_PERCENT {
@@ -171,7 +171,14 @@ pub fn run_calibration(series_per_cell: usize) -> CalibrationReport {
             for s in 0..series_per_cell as u64 {
                 let (a, b) = calibrate_series(margin, noise, s);
                 let rec = recommend(&[a.clone(), b.clone()], CALIBRATION_PAIRED_RUNS);
-                process_series(&a, &b, &rec, &mut correct, &mut confirmed, &mut high_cv_confirmed);
+                process_series(
+                    &a,
+                    &b,
+                    &rec,
+                    &mut correct,
+                    &mut confirmed,
+                    &mut high_cv_confirmed,
+                );
             }
             cells.push(CellReport {
                 margin_pct: margin,

@@ -5,8 +5,8 @@
 //! (но не выше 4 000 000). Заполнение полного буфера раньше конца фазы — ошибка
 //! `SampleCapacityReached`, а не тихое обрезание.
 
-use crate::config::{MAX_SAMPLE_CAPACITY, MIN_SAMPLE_CAPACITY, RESPONSE_SUPERCYCLE};
 use crate::config::{ESTIMATED_MAX_TICKS_PER_SEC, Phase};
+use crate::config::{MAX_SAMPLE_CAPACITY, MIN_SAMPLE_CAPACITY, RESPONSE_SUPERCYCLE};
 
 /// Буфер сэмплов времени тиков в миллисекундах.
 #[derive(Debug)]
@@ -42,6 +42,12 @@ impl SampleBuffer {
         self.len
     }
 
+    /// Буфер пуст.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Записанные сэмплы как срез (для сбора статистики после прогона).
     #[inline]
     pub fn as_slice(&self) -> &[f64] {
@@ -73,8 +79,7 @@ pub fn capacity_for(phase: Phase, duration_secs: u64) -> usize {
     let clamped = (raw as usize).clamp(MIN_SAMPLE_CAPACITY, MAX_SAMPLE_CAPACITY);
     if phase == Phase::Response {
         // Округление ВВЕРХ до кратности 256, но не выше максимума.
-        let up = (clamped + RESPONSE_SUPERCYCLE as usize - 1) / RESPONSE_SUPERCYCLE as usize
-            * RESPONSE_SUPERCYCLE as usize;
+        let up = clamped.div_ceil(RESPONSE_SUPERCYCLE as usize) * RESPONSE_SUPERCYCLE as usize;
         up.min(MAX_SAMPLE_CAPACITY)
     } else {
         clamped

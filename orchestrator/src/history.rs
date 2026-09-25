@@ -8,9 +8,9 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use crate::checkpoint::StoredRun;
 use crate::checkpoint::{atomic_write, data_dir};
 use crate::result::{IdentityJson, RecommendationJson, SchemeJson, SessionJson};
-use crate::checkpoint::StoredRun;
 
 /// Имя каталога истории завершённых сессий в каталоге данных.
 pub const RESULTS_DIR_NAME: &str = "Results";
@@ -121,9 +121,15 @@ pub fn rankable_with<'a>(all: &'a [SessionJson], base: &IdentityJson) -> Vec<&'a
 }
 
 /// Безопасное имя файла из произвольной строки (GUID/`plan-…`).
-fn sanitize(name: &str) -> String {
+pub fn sanitize(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -179,7 +185,8 @@ pub fn list_results_in(dir: &Path) -> io::Result<Vec<HistoryEntry>> {
 
 /// Экспорт результата в JSON (pretty-print, атомарная запись).
 pub fn export_json(session: &SessionJson, path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
+    // У голого имени файла parent() даёт Some("") — фильтруем, иначе упадём.
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(session)
@@ -205,7 +212,8 @@ pub fn export_csv(session: &SessionJson, out: &mut impl Write) -> Result<usize, 
 
 /// Экспорт результата в файл CSV.
 pub fn export_csv_to(session: &SessionJson, path: &Path) -> Result<usize, String> {
-    if let Some(parent) = path.parent() {
+    // У голого имени файла parent() даёт Some("") — фильтруем, иначе упадём.
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
@@ -237,7 +245,9 @@ fn csv_row(session: &SessionJson, scheme: &SchemeJson, run: &StoredRun) -> Vec<S
         probability(rec, 0),
         probability(rec, 1),
         probability(rec, 2),
-        rec.expected_margin_percent.map(|m| format!("{m:.6}")).unwrap_or_default(),
+        rec.expected_margin_percent
+            .map(|m| format!("{m:.6}"))
+            .unwrap_or_default(),
         scheme.scheme_id.clone(),
         scheme.name.clone().unwrap_or_default(),
         scheme.rejected.to_string(),
@@ -275,8 +285,7 @@ fn probability(rec: &RecommendationJson, i: usize) -> String {
 }
 
 fn checksums_hex(a: [u64; 3]) -> String {
-    a.map(|v| format!("{v:016X}"))
-        .join(",")
+    a.map(|v| format!("{v:016X}")).join(",")
 }
 
 /// UTC-метка `YYYYMMDDTHHMMSSZ.###` из наносекунд эпохи.
@@ -424,9 +433,16 @@ mod tests {
             && a.recommendation.reason == b.recommendation.reason
             && a.recommendation.recommended_scheme == b.recommendation.recommended_scheme
             && a.recommendation.runner_up_scheme == b.recommendation.runner_up_scheme
-            && a.recommendation.expected_margin_percent.map(|v| (v * 1e9) as i64)
-                == b.recommendation.expected_margin_percent.map(|v| (v * 1e9) as i64)
-            && match (&a.recommendation.probabilities, &b.recommendation.probabilities) {
+            && a.recommendation
+                .expected_margin_percent
+                .map(|v| (v * 1e9) as i64)
+                == b.recommendation
+                    .expected_margin_percent
+                    .map(|v| (v * 1e9) as i64)
+            && match (
+                &a.recommendation.probabilities,
+                &b.recommendation.probabilities,
+            ) {
                 (Some(x), Some(y)) => (0..3).all(|i| (x[i] - y[i]).abs() < 1e-9),
                 (None, None) => true,
                 _ => false,
@@ -492,7 +508,10 @@ mod tests {
         let entries = list_results_in(&dir).unwrap();
         assert!(entries.iter().any(|e| e.path == saved));
         let loaded = load_result(&saved).unwrap();
-        assert!(same_semantics(&session, &loaded), "запись искажена при сериализации");
+        assert!(
+            same_semantics(&session, &loaded),
+            "запись искажена при сериализации"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -550,7 +569,10 @@ mod tests {
         let session = sample_session("CAFE0001");
         export_json(&session, &path).unwrap();
         let loaded = load_result(&path).unwrap();
-        assert!(same_semantics(&session, &loaded), "JSON-экспорт искажает запись");
+        assert!(
+            same_semantics(&session, &loaded),
+            "JSON-экспорт искажает запись"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

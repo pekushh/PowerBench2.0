@@ -1,81 +1,118 @@
-// Страница «Журнал»: полный живой лог событий сессии с фильтрами по уровню.
+// Страница «Логи»: старт приложения, ошибки и события сессий.
 
-import { useEffect, useRef, useState } from "react";
-import { fmtTime, onLog, type LogMsg } from "../api";
-import { Button, Glass, Seg } from "../components/ui";
+import { useEffect, useMemo, useState } from "react";
+import { commands, fmtTime, onLog, type LoggerEntry } from "../api";
+import { Badge, Panel, Seg } from "../components/ui";
+import { SearchIcon } from "../components/icons";
 
-type LevelFilter = "all" | "info" | "warn" | "success";
+type Level = "all" | "info" | "success" | "warn" | "error";
+
+const LEVEL_SHORT: Record<string, string> = {
+  info: "инфо",
+  success: "успех",
+  warn: "вним.",
+  error: "ошиб.",
+};
 
 export default function LogPage() {
-  const [entries, setEntries] = useState<LogMsg[]>([]);
-  const [filter, setFilter] = useState<LevelFilter>("all");
-  const [autoScroll, setAutoScroll] = useState(true);
-  const boxRef = useRef<HTMLDivElement>(null);
+  const [entries, setEntries] = useState<LoggerEntry[] | null>(null);
+  const [live, setLive] = useState<LoggerEntry[]>([]);
+  const [query, setQuery] = useState("");
+  const [level, setLevel] = useState<Level>("all");
 
   useEffect(() => {
-    const unfor = onLog((m) => setEntries((e) => [...e.slice(-999), m]));
+    commands.logHistory().then(setEntries).catch(() => setEntries([]));
+    const un = onLog((m) =>
+      setLive((prev) => [...prev.slice(-200), { level: m.level, text: m.text, ts_ms: m.ts_ms }]),
+    );
     return () => {
-      unfor.then((f) => f());
+      un.then((f) => f());
     };
   }, []);
 
-  useEffect(() => {
-    if (autoScroll && boxRef.current) {
-      boxRef.current.scrollTop = boxRef.current.scrollHeight;
-    }
-  }, [entries, autoScroll]);
+  const all = useMemo(
+    () => [...(entries ?? []), ...live].sort((a, b) => a.ts_ms - b.ts_ms),
+    [entries, live],
+  );
 
-  const visible = entries.filter((e) => filter === "all" || e.level === filter);
+  const counts = useMemo(() => {
+    const c = { all: all.length, info: 0, success: 0, warn: 0, error: 0, other: 0 };
+    for (const e of all) {
+      const k = e.level === "warning" ? "warn" : e.level === "err" ? "error" : e.level;
+      if (k === "info") c.info++;
+      else if (k === "success") c.success++;
+      else if (k === "warn") c.warn++;
+      else if (k === "error") c.error++;
+      else c.other++;
+    }
+    return c;
+  }, [all]);
+
+  const norm = (l: string) => (l === "warning" ? "warn" : l === "err" ? "error" : l);
+
+  const shown = all.filter((e) => {
+    if (level !== "all" && norm(e.level) !== level) return false;
+    const q = query.trim().toLowerCase();
+    if (q && !e.text.toLowerCase().includes(q)) return false;
+    return true;
+  });
 
   return (
     <div className="page">
       <div className="page-head">
-        <h1>Журнал</h1>
-        <span className="sub">{entries.length} событий за сеанс</span>
-        <div className="grow" />
+        <h1>Логи</h1>
+        <span className="sub">старт приложения, ошибки и события сессий</span>
+      </div>
+      <div className="wizard-toolbar">
+        <div className="search-box log-search">
+          <SearchIcon />
+          <input
+            className="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Поиск по тексту…"
+          />
+        </div>
         <Seg
           options={[
             { value: "all", label: "Все" },
-            { value: "success", label: "Успех" },
             { value: "info", label: "Инфо" },
+            { value: "success", label: "Успех" },
             { value: "warn", label: "Внимание" },
+            { value: "error", label: "Ошибки" },
           ]}
-          value={filter}
-          onChange={setFilter}
+          value={level}
+          onChange={setLevel}
         />
-        <label className="row" style={{ color: "var(--text-2)" }}>
-          <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} />
-          автопрокрутка
-        </label>
-        <Button
-          onClick={() => {
-            setEntries([]);
-          }}
-        >
-          Очистить
-        </Button>
+        <div className="spacer" />
+        <div className="log-counts">
+          <Badge kind="plain">{counts.all} всего</Badge>
+          <Badge kind="ok">{counts.success} успех</Badge>
+          <Badge kind="plain">{counts.info} инфо</Badge>
+          <Badge kind="warn">{counts.warn} вним.</Badge>
+          <Badge kind="danger">{counts.error} ошиб.</Badge>
+        </div>
       </div>
-
-      <Glass>
-        <div
-          ref={boxRef}
-          className="log"
-          style={{ maxHeight: "calc(100vh - 220px)", overflowY: "auto", paddingRight: 8 }}
-        >
-          {visible.length === 0 ? (
-            <div className="sub" style={{ color: "var(--text-3)" }}>
-              Журнал пуст. Запустите тест — события появятся здесь.
-            </div>
+      <Panel
+        title="Журнал"
+        hint={entries ? `показаны последние ${shown.length} записей — с фильтром обновляются` : undefined}
+      >
+        <div className={`log log-box${entries ? " fade-bottom" : ""}`}>
+          {!entries ? (
+            <div className="muted">Загрузка журнала…</div>
+          ) : shown.length === 0 ? (
+            <div className="muted">Журнал пуст. Тест или событие — и оно появится здесь.</div>
           ) : (
-            visible.map((l, i) => (
-              <div key={i} className={`log-line ${l.level}`}>
-                <span className="ts">{fmtTime(l.ts_ms)}</span>
-                <span className="tx">{l.text}</span>
+            shown.map((e, i) => (
+              <div key={`${e.ts_ms}-${i}`} className={`log-line ${norm(e.level)}`}>
+                <span className="ts">{fmtTime(e.ts_ms)}</span>
+                <span className="lv">{LEVEL_SHORT[norm(e.level)] ?? e.level}</span>
+                <span className="tx">{e.text}</span>
               </div>
             ))
           )}
         </div>
-      </Glass>
+      </Panel>
     </div>
   );
 }

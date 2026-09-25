@@ -19,9 +19,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 use powerbench_core::alloc_count::{COUNT, ENABLED};
-use powerbench_core::config::{
-    self, response_profile, Phase, Profile, RESPONSE_SUPERCYCLE,
-};
+use powerbench_core::config::{self, Phase, Profile, RESPONSE_SUPERCYCLE, response_profile};
 use powerbench_core::engine::{Engine, RunError, RunTarget};
 
 use serde::Serialize;
@@ -31,8 +29,7 @@ mod ctrlc;
 
 /// Замороженный хэш конфигурации: SHA-256 от payload конфигурации, hex UPPER.
 /// Зафиксирован строкой в коде — расхождение с `config_hash()` означает отказ.
-const FROZEN_CONFIG_HASH: &str =
-    "0C0AF7B56D30F8C62863939893F633EA190680B1D7B26F905A9FAA3D95467DA3";
+const FROZEN_CONFIG_HASH: &str = "0C0AF7B56D30F8C62863939893F633EA190680B1D7B26F905A9FAA3D95467DA3";
 
 /// Тики коротких прогонов самопроверки (детерминированные сигнатуры).
 const SHORT_TICKS: u64 = 16;
@@ -78,21 +75,21 @@ fn main() -> ExitCode {
     // Подкоманды: list / bench / resume / status / history / settings. Первый
     // токен без дефиса — имя подкоманды; иначе — существующий путь (Этап 2).
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(first) = args.first() {
-        if !first.starts_with('-') {
-            return match first.as_str() {
-                "list" => bench::cmd_list(&args[1..]),
-                "bench" => bench::cmd_bench(&args[1..]),
-                "resume" => bench::cmd_resume(&args[1..]),
-                "status" => bench::cmd_status(&args[1..]),
-                "history" => cmd_history(&args[1..]),
-                "settings" => cmd_settings(&args[1..]),
-                other => {
-                    eprintln!("PowerBench CLI: неизвестная подкоманда «{other}» (ожидается list, bench, resume, status или history).");
-                    return ExitCode::FAILURE;
-                }
-            };
-        }
+    if let Some(first) = args.first().filter(|f| !f.starts_with('-')) {
+        return match first.as_str() {
+            "list" => bench::cmd_list(&args[1..]),
+            "bench" => bench::cmd_bench(&args[1..]),
+            "resume" => bench::cmd_resume(&args[1..]),
+            "status" => bench::cmd_status(&args[1..]),
+            "history" => cmd_history(&args[1..]),
+            "settings" => cmd_settings(&args[1..]),
+            other => {
+                eprintln!(
+                    "PowerBench CLI: неизвестная подкоманда «{other}» (ожидается list, bench, resume, status или history)."
+                );
+                return ExitCode::FAILURE;
+            }
+        };
     }
 
     // Разбор аргументов: единственная опция `--json <путь>`.
@@ -129,10 +126,7 @@ fn main() -> ExitCode {
 
     println!("PowerBench — консольный валидатор «{}»", report.version);
     println!("--------------------------------");
-    println!(
-        "хэш конфигурации : {}",
-        report.config_hash
-    );
+    println!("хэш конфигурации : {}", report.config_hash);
     println!("seed              : {}", report.seed_hex);
     println!("логических CPU    : {}", report.logical_cpus);
     println!("воркеров (default): {}", report.default_workers);
@@ -179,7 +173,9 @@ fn cmd_history(args: &[String]) -> ExitCode {
         Some("list") => bench::cmd_history_list(&args[1..]),
         Some("export") => bench::cmd_history_export(&args[1..]),
         Some(other) => {
-            eprintln!("PowerBench CLI: неизвестная подкоманда истории «{other}» (ожидается list или export).");
+            eprintln!(
+                "PowerBench CLI: неизвестная подкоманда истории «{other}» (ожидается list или export)."
+            );
             ExitCode::FAILURE
         }
         None => {
@@ -195,7 +191,9 @@ fn cmd_settings(args: &[String]) -> ExitCode {
         Some("show") => bench::cmd_settings_show(&args[1..]),
         Some("reset") => bench::cmd_settings_reset(&args[1..]),
         Some(other) => {
-            eprintln!("PowerBench CLI: неизвестная подкоманда настроек «{other}» (ожидается show или reset).");
+            eprintln!(
+                "PowerBench CLI: неизвестная подкоманда настроек «{other}» (ожидается show или reset)."
+            );
             ExitCode::FAILURE
         }
         None => {
@@ -221,11 +219,9 @@ fn default_result_path() -> PathBuf {
 
 /// Атомарная запись JSON-результата (создаёт каталоги).
 fn write_json<T: Serialize>(value: &T, path: &Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("не удалось создать каталог «{}»: {e}", parent.display()))?;
-        }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("не удалось создать каталог «{}»: {e}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     std::fs::write(path, format!("{json}\n"))
@@ -411,7 +407,11 @@ fn run_validator() -> Report {
         std::thread::sleep(Duration::from_millis(250));
         let start = Instant::now();
         canceller.store(true, Ordering::Release);
-        let result = handler.join().unwrap();
+        // Паника воркера — тоже результат проверки, а не повод ронять самопроверку.
+        let result = match handler.join() {
+            Ok(r) => r,
+            Err(_) => Err(RunError::WorkerFailed),
+        };
         (result, start.elapsed())
     });
     let canceled = matches!(outcome, Err(RunError::Cancelled));

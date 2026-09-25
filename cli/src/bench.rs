@@ -7,19 +7,19 @@
 //! `status` — состояние сохранённой контрольной точки.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use powerbench_core::engine::Engine;
 use powerbench_metrics::AggregateResult;
-use powerbench_recommend::{EvidenceLevel, Recommendation};
 use powerbench_orchestrator::checkpoint::StoredRun;
-use powerbench_orchestrator::config::{validate_config, Preset, SessionConfig};
-use powerbench_orchestrator::result::{build_session_json, IdentityJson};
+use powerbench_orchestrator::config::{Preset, SessionConfig, validate_config};
+use powerbench_orchestrator::result::{IdentityJson, RecommendationScheme, build_session_json};
 use powerbench_orchestrator::session::{
-    run_session, session_signature, DiskCheckpointStore, RealSchemeDriver, SessionEvent,
+    DiskCheckpointStore, RealSchemeDriver, SessionEvent, run_session, session_signature,
 };
-use powerbench_windows::power::{is_admin, SleepGuard};
+use powerbench_recommend::{EvidenceLevel, Recommendation};
+use powerbench_windows::power::{SleepGuard, is_admin};
 
 /// Пресет сценария по имени.
 fn preset(preset_name: &str) -> Option<Preset> {
@@ -38,7 +38,10 @@ struct ArgCursor {
 
 impl ArgCursor {
     fn new(args: &[String]) -> Self {
-        Self { args: args.to_vec(), i: 0 }
+        Self {
+            args: args.to_vec(),
+            i: 0,
+        }
     }
 
     fn next(&mut self) -> Option<String> {
@@ -93,16 +96,24 @@ impl BenchCli {
                         None => {
                             return Err(format!(
                                 "неизвестный пресет «{name}» (ожидается quick или detailed)"
-                            ))
+                            ));
                         }
                     }
                 }
-                "--duration" => cli.duration = Some(parse_u64("--duration", &cursor.value("--duration")?)?),
+                "--duration" => {
+                    cli.duration = Some(parse_u64("--duration", &cursor.value("--duration")?)?)
+                }
                 "--warmup" => cli.warmup = Some(parse_u64("--warmup", &cursor.value("--warmup")?)?),
-                "--cooling" => cli.cooling = Some(parse_u64("--cooling", &cursor.value("--cooling")?)?),
-                "--reps" => cli.reps = Some(parse_u64("--reps", &cursor.value("--reps")?)? as u32),
-                "--threshold" => cli.threshold = Some(parse_f64("--threshold", &cursor.value("--threshold")?)?),
-                "--workers" => cli.workers = Some(parse_u64("--workers", &cursor.value("--workers")?)? as usize),
+                "--cooling" => {
+                    cli.cooling = Some(parse_u64("--cooling", &cursor.value("--cooling")?)?)
+                }
+                "--reps" => cli.reps = Some(parse_u32("--reps", &cursor.value("--reps")?)?),
+                "--threshold" => {
+                    cli.threshold = Some(parse_f64("--threshold", &cursor.value("--threshold")?)?)
+                }
+                "--workers" => {
+                    cli.workers = Some(parse_usize("--workers", &cursor.value("--workers")?)?)
+                }
                 "--schemes" => {
                     let raw = cursor.value("--schemes")?;
                     let ids: Vec<String> = raw
@@ -131,16 +142,34 @@ impl BenchCli {
 }
 
 fn parse_u64(option: &str, v: &str) -> Result<u64, String> {
-    v.parse().map_err(|_| format!("{option}: ожидалось целое число, получено «{v}»"))
+    v.parse()
+        .map_err(|_| format!("{option}: ожидалось целое число, получено «{v}»"))
+}
+
+fn parse_u32(option: &str, v: &str) -> Result<u32, String> {
+    v.parse().map_err(|_| {
+        format!(
+            "{option}: ожидалось целое число (0–{}), получено «{v}»",
+            u32::MAX
+        )
+    })
+}
+
+fn parse_usize(option: &str, v: &str) -> Result<usize, String> {
+    v.parse()
+        .map_err(|_| format!("{option}: ожидалось целое число, получено «{v}»"))
 }
 
 fn parse_f64(option: &str, v: &str) -> Result<f64, String> {
-    v.parse().map_err(|_| format!("{option}: ожидалось число, получено «{v}»"))
+    v.parse()
+        .map_err(|_| format!("{option}: ожидалось число, получено «{v}»"))
 }
 
 /// План для команды `bench`.
 fn build_plan(cli: &BenchCli) -> Result<SessionConfig, String> {
-    let p = cli.preset.unwrap_or(powerbench_orchestrator::config::DETAILED_PRESET);
+    let p = cli
+        .preset
+        .unwrap_or(powerbench_orchestrator::config::DETAILED_PRESET);
     let plan = SessionConfig {
         duration_seconds: cli.duration.unwrap_or(p.duration_seconds),
         warmup_seconds: cli.warmup.unwrap_or(p.warmup_seconds),
@@ -196,7 +225,9 @@ fn select_schemes_interactive() -> Result<Vec<String>, String> {
         let i = idx
             .checked_sub(1)
             .ok_or_else(|| format!("номер схемы должен быть ≥ 1, получено {idx}"))?;
-        let s = schemes.get(i).ok_or_else(|| format!("нет схемы с номером {idx}"))?;
+        let s = schemes
+            .get(i)
+            .ok_or_else(|| format!("нет схемы с номером {idx}"))?;
         if !ids.contains(&s.guid) {
             ids.push(s.guid.clone());
         }
@@ -244,7 +275,7 @@ fn finish_session(
     mut engine: Engine,
     plan: SessionConfig,
     store: &mut DiskCheckpointStore,
-    out: &PathBuf,
+    out: &Path,
 ) -> ExitCode {
     let outcome = match run_session(
         &mut engine,
@@ -286,7 +317,9 @@ fn finish_session(
         println!(
             "{scheme_id} | {} | {} | {:.2} | {:.2}% | {note}",
             name.as_deref().unwrap_or("—"),
-            agg.runs, agg.mean_average_throughput, agg.run_variation_percent
+            agg.runs,
+            agg.mean_average_throughput,
+            agg.run_variation_percent
         );
     }
 
@@ -301,7 +334,11 @@ fn finish_session(
         tie_criterion: None,
     });
     println!();
-    println!("Рекомендация [{}]: {}", evidence_label(rec.level), rec.reason);
+    println!(
+        "Рекомендация [{}]: {}",
+        evidence_label(rec.level),
+        rec.reason
+    );
     if let Some(id) = &rec.recommended_scheme {
         let rname = outcome
             .checkpoint
@@ -322,31 +359,38 @@ fn finish_session(
     }
 
     // Рекомендация → описание схем для JSON (включая забракованные).
-    let recommendation_schemes: Vec<(String, bool, Option<String>, AggregateResult, Vec<StoredRun>)> =
-        outcome
-            .checkpoint
-            .plan
-            .scheme_ids
-            .iter()
-            .map(|id| {
-let agg = outcome
-                    .aggregates
-                    .iter()
-                    .find(|(sid, _)| sid.eq_ignore_ascii_case(id))
-                    .map(|(_, a)| a.clone())
-                    .unwrap_or_else(empty_aggregate);
-                let rejected = outcome.rejection_reasons.contains_key(id);
-                let reason = outcome.rejection_reasons.get(id).cloned();
-                let per_run: Vec<StoredRun> = outcome
-                    .checkpoint
-                    .runs
-                    .iter()
-                    .filter(|r| r.scheme_id.eq_ignore_ascii_case(id))
-                    .cloned()
-                    .collect();
-                (id.clone(), rejected, reason, agg, per_run)
-            })
-            .collect();
+    let recommendation_schemes: Vec<RecommendationScheme> = outcome
+        .checkpoint
+        .plan
+        .scheme_ids
+        .iter()
+        .map(|id| {
+            let agg = outcome
+                .aggregates
+                .iter()
+                .find(|(sid, _)| sid.eq_ignore_ascii_case(id))
+                .map(|(_, a)| a.clone())
+                .unwrap_or_else(empty_aggregate);
+            // GUID сравниваем регистронезависимо, как Checkpoint::is_rejected.
+            let rejected = outcome
+                .rejection_reasons
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case(id));
+            let reason = outcome
+                .rejection_reasons
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(id))
+                .map(|(_, v)| v.clone());
+            let per_run: Vec<StoredRun> = outcome
+                .checkpoint
+                .runs
+                .iter()
+                .filter(|r| r.scheme_id.eq_ignore_ascii_case(id))
+                .cloned()
+                .collect();
+            (id.clone(), rejected, reason, agg, per_run)
+        })
+        .collect();
 
     let warnings: Vec<String> = outcome
         .events
@@ -421,7 +465,10 @@ pub fn cmd_list(_args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("PowerBench CLI: не удалось получить список схем: {}", e.message);
+            eprintln!(
+                "PowerBench CLI: не удалось получить список схем: {}",
+                e.message
+            );
             ExitCode::FAILURE
         }
     }
@@ -437,7 +484,9 @@ pub fn cmd_bench(args: &[String]) -> ExitCode {
         }
     };
     if !is_admin() {
-        eprintln!("PowerBench CLI: требуются права администратора (запустите от имени администратора).");
+        eprintln!(
+            "PowerBench CLI: требуются права администратора (запустите от имени администратора)."
+        );
         return ExitCode::FAILURE;
     }
     let mut plan = match build_plan(&cli) {
@@ -457,6 +506,17 @@ pub fn cmd_bench(args: &[String]) -> ExitCode {
         };
     }
     crate::ctrlc::install();
+    // Восстановление исходной схемы после прошлого прерывания (если было).
+    {
+        use powerbench_orchestrator::recovery::recover_interrupted_session;
+        let outcome = recover_interrupted_session(&RealSchemeDriver);
+        if outcome.interrupted_checkpoint && !outcome.already_ok {
+            eprintln!(
+                "PowerBench CLI: восстановление после прерывания: restored={} {:?}",
+                outcome.restored, outcome.error
+            );
+        }
+    }
     let engine = match prepare_engine(cli.workers) {
         Ok(e) => e,
         Err(e) => {
@@ -539,9 +599,11 @@ pub fn cmd_status(_args: &[String]) -> ExitCode {
             println!("План: {}", cp.plan.plan_guid);
             println!(
                 "Схемы: {}; повторений до: {}; длительность {} с",
-                cp.plan.scheme_ids.len(), cp.plan.repetitions, cp.plan.duration_seconds
+                cp.plan.scheme_ids.len(),
+                cp.plan.repetitions,
+                cp.plan.duration_seconds
             );
-            println!("Выполнено прогонов: {}", cp.completed_keys.len());
+            println!("Выполнено прогонов: {}", cp.runs.len());
             for (sid, reason) in &cp.rejections {
                 println!("Забракована схема {sid}: {reason}");
             }
@@ -551,7 +613,11 @@ pub fn cmd_status(_args: &[String]) -> ExitCode {
             );
             println!(
                 "Исходная схема восстановлена: {}",
-                if cp.original_restored { "да" } else { "нет" }
+                if cp.original_restored {
+                    "да"
+                } else {
+                    "нет"
+                }
             );
             ExitCode::SUCCESS
         }
@@ -563,19 +629,37 @@ pub fn cmd_settings_show(_args: &[String]) -> ExitCode {
     use powerbench_orchestrator::appsettings::{self, AppSettings};
     let s = AppSettings::load();
     let path = appsettings::appsettings_path();
-    let src = if path.exists() { path.display().to_string() } else { "<дефолт, файла нет>".to_string() };
+    let src = if path.exists() {
+        path.display().to_string()
+    } else {
+        "<дефолт, файла нет>".to_string()
+    };
     println!("Файл: {src}");
     println!(
         "benchmark: длительность {} с, разогрев {} с, охлаждение {} с, повторов {}, порог фона {}",
-        s.benchmark.duration_seconds, s.benchmark.warmup_seconds, s.benchmark.cooling_seconds,
-        s.benchmark.repetitions, s.benchmark.background_threshold_percent
+        s.benchmark.duration_seconds,
+        s.benchmark.warmup_seconds,
+        s.benchmark.cooling_seconds,
+        s.benchmark.repetitions,
+        s.benchmark.background_threshold_percent
     );
     println!(
         "appearance: тема «{}», режим «{}», reduceMotion {}, sidebarCollapsed {}",
-        s.appearance.theme, s.appearance.mode, s.appearance.reduce_motion, s.appearance.sidebar_collapsed
+        s.appearance.theme,
+        s.appearance.mode,
+        s.appearance.reduce_motion,
+        s.appearance.sidebar_collapsed
     );
-    let fav = if s.favorite_schemes.is_empty() { "-".to_string() } else { s.favorite_schemes.join(", ") };
-    let excl = if s.excluded_schemes.is_empty() { "-".to_string() } else { s.excluded_schemes.join(", ") };
+    let fav = if s.favorite_schemes.is_empty() {
+        "-".to_string()
+    } else {
+        s.favorite_schemes.join(", ")
+    };
+    let excl = if s.excluded_schemes.is_empty() {
+        "-".to_string()
+    } else {
+        s.excluded_schemes.join(", ")
+    };
     println!("favorite_schemes: {fav}");
     println!("excluded_schemes: {excl}");
     ExitCode::SUCCESS
@@ -586,12 +670,18 @@ pub fn cmd_settings_show(_args: &[String]) -> ExitCode {
 pub fn cmd_settings_reset(_args: &[String]) -> ExitCode {
     use powerbench_orchestrator::appsettings::{self, AppSettings};
     if appsettings::appsettings_path().exists() {
-        println!("Настройки уже существуют: {}", appsettings::appsettings_path().display());
+        println!(
+            "Настройки уже существуют: {}",
+            appsettings::appsettings_path().display()
+        );
         return ExitCode::SUCCESS;
     }
     match AppSettings::default().save() {
         Ok(()) => {
-            println!("Записан дефолтный appsettings.json: {}", appsettings::appsettings_path().display());
+            println!(
+                "Записан дефолтный appsettings.json: {}",
+                appsettings::appsettings_path().display()
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -675,9 +765,7 @@ pub fn cmd_history_export(args: &[String]) -> ExitCode {
         }
     }
 
-    use powerbench_orchestrator::history::{
-        export_csv_to, export_json, list_results, load_result,
-    };
+    use powerbench_orchestrator::history::{export_csv_to, export_json, list_results, load_result};
     let entries = match list_results() {
         Ok(e) => e,
         Err(e) => {
@@ -710,11 +798,16 @@ pub fn cmd_history_export(args: &[String]) -> ExitCode {
         // Все записи — в каталог `--out` (по файлу на сессию).
         let dir = out.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("PowerBench CLI: не удалось создать «{}»: {e}", dir.display());
+            eprintln!(
+                "PowerBench CLI: не удалось создать «{}»: {e}",
+                dir.display()
+            );
             return ExitCode::FAILURE;
         }
         for (_, s) in &sessions {
-            let file = dir.join(format!("{}.{format}", s.plan_guid));
+            // plan_guid — из содержимого файла: без sanitize возможен traversal.
+            let stem = powerbench_orchestrator::history::sanitize(&s.plan_guid);
+            let file = dir.join(format!("{stem}.{format}"));
             let r: Result<(), String> = if format == "json" {
                 export_json(s, &file).map_err(|e| e.to_string())
             } else {
@@ -723,7 +816,10 @@ pub fn cmd_history_export(args: &[String]) -> ExitCode {
             match r {
                 Ok(()) => println!("Экспорт: {}", file.display()),
                 Err(e) => {
-                    eprintln!("PowerBench CLI: не удалось экспортировать «{}»: {e}", file.display());
+                    eprintln!(
+                        "PowerBench CLI: не удалось экспортировать «{}»: {e}",
+                        file.display()
+                    );
                     return ExitCode::FAILURE;
                 }
             }

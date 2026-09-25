@@ -1,15 +1,13 @@
-// Кросс-страничное состояние: идёт ли сессия, последний результат,
-// незакрытое уведомление. Простой observable без внешних зависимостей.
+// Кросс-страничное состояние: идёт ли сессия. Простой observable
+// без внешних зависимостей.
 
 import { useEffect, useState } from "react";
-import type { FinishedPayload } from "./api";
 
 export interface SessionState {
   running: boolean;
-  last: FinishedPayload | null;
 }
 
-let state: SessionState = { running: false, last: null };
+let state: SessionState = { running: false };
 const listeners = new Set<(s: SessionState) => void>();
 
 function notify() {
@@ -21,15 +19,6 @@ export function setRunning(running: boolean) {
     state = { ...state, running };
     notify();
   }
-}
-
-export function setLastResult(r: FinishedPayload | null) {
-  state = { ...state, last: r };
-  notify();
-}
-
-export function getSession(): SessionState {
-  return state;
 }
 
 export function useSession(): SessionState {

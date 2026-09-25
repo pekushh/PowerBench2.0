@@ -1,33 +1,51 @@
-// Страница «Настройки»: параметры сценария по умолчанию, оформление (тема,
-// режим, reduce motion, sidebar), идентичность нагрузки, системные сведения.
+// Страница «Настройки»: оформление, скоринг, данные, система.
 
 import { useEffect, useState } from "react";
-import { getVersion } from "@tauri-apps/api/app";
-import type { IdentityDto, SettingsDto } from "../api";
-import { commands } from "../api";
-import { Badge, Field, Glass, Seg, Stat } from "../components/ui";
+import { commands, type SettingsDto } from "../api";
+import { Badge, Button, Panel, Seg, Switch } from "../components/ui";
 import { pushToast } from "../store";
 
 type ThemeName = "Graphite" | "Ocean" | "Violet";
 type ModeName = "Dark" | "Light";
 
+function WeightSlider({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="weight-slider">
+      <span>{label}</span>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        step={5}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+      <b>{Math.round(value)}%</b>
+    </label>
+  );
+}
+
 export default function SettingsPage({ onAppearance }: { onAppearance: (s: SettingsDto) => void }) {
   const [st, setSt] = useState<SettingsDto | null>(null);
-  const [ident, setIdent] = useState<IdentityDto | null>(null);
   const [adm, setAdm] = useState<boolean | null>(null);
   const [ac, setAc] = useState<boolean | null>(null);
   const [dataDir, setDataDir] = useState("");
   const [cfgDir, setCfgDir] = useState("");
-  const [version, setVersion] = useState("");
 
   useEffect(() => {
-    commands.getSettings().then((s) => setSt(s)).catch(() => undefined);
-    commands.identityInfo().then(setIdent).catch(() => undefined);
+    commands.getSettings().then(setSt).catch(() => undefined);
     commands.isAdmin().then(setAdm).catch(() => undefined);
     commands.acPowerOnline().then(setAc).catch(() => undefined);
     commands.resultsDir().then(setDataDir).catch(() => undefined);
     commands.appsettingsPath().then(setCfgDir).catch(() => undefined);
-    getVersion().then(setVersion).catch(() => undefined);
   }, []);
 
   if (!st) return <div className="page">Загрузка настроек…</div>;
@@ -38,6 +56,8 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
     commands.setSettings(next).then(() => onAppearance(next)).catch((e) => pushToast("err", String(e)));
   };
 
+  const weightsSum = st.score_performance + st.score_stability + st.score_worst_second;
+
   return (
     <div className="page">
       <div className="page-head">
@@ -45,192 +65,123 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
         <span className="sub">изменения сохраняются автоматически</span>
       </div>
 
-      <Glass>
-        <div className="card-title">Оформление</div>
-        <div className="row wrap">
-          <div className="row" style={{ flexWrap: "wrap", gap: 12 }}>
-            <Seg
-              options={[
-                { value: "Graphite", label: "Графит" },
-                { value: "Ocean", label: "Океан" },
-                { value: "Violet", label: "Фиолет" },
-              ]}
-              value={st.theme as ThemeName}
-              onChange={(v) => patch({ theme: v })}
-            />
-            <Seg
-              options={[
-                { value: "Dark", label: "Тёмная" },
-                { value: "Light", label: "Светлая" },
-              ]}
-              value={st.mode as ModeName}
-              onChange={(v) => patch({ mode: v })}
-            />
-          </div>
-          <div className="grow" />
-          <label className="row" style={{ color: "var(--text-2)" }}>
+      <Panel title="Оформление">
+        <div className="row wrap gap-3">
+          <Seg
+            options={[
+              { value: "Graphite", label: "Графит" },
+              { value: "Ocean", label: "Океан" },
+              { value: "Violet", label: "Фиолет" },
+            ]}
+            value={st.theme as ThemeName}
+            onChange={(v) => patch({ theme: v })}
+          />
+          <Seg
+            options={[
+              { value: "Dark", label: "Тёмная" },
+              { value: "Light", label: "Светлая" },
+            ]}
+            value={st.mode as ModeName}
+            onChange={(v) => patch({ mode: v })}
+          />
+          <Switch
+            checked={st.reduce_motion}
+            onChange={(v) => patch({ reduce_motion: v })}
+            label="уменьшить движение"
+          />
+        </div>
+      </Panel>
+
+      <Panel title="Скоринг схем">
+        <div className="hint mb-2">
+          Веса трёх метрик влияют на балл в отчёте «Балл по вашим весам» (100 = лучшая среди
+          допущенных). Сумма весов нормируется автоматически.
+        </div>
+        <div className="row wrap gap-3">
+          <WeightSlider
+            label="Производительность"
+            value={st.score_performance}
+            onChange={(v) => patch({ score_performance: v })}
+          />
+          <WeightSlider
+            label="Стабильность"
+            value={st.score_stability}
+            onChange={(v) => patch({ score_stability: v })}
+          />
+          <WeightSlider
+            label="Худшая секунда"
+            value={st.score_worst_second}
+            onChange={(v) => patch({ score_worst_second: v })}
+          />
+        </div>
+        {weightsSum <= 0 ? <Badge kind="danger">Сумма весов должна быть больше 0.</Badge> : null}
+        <div className="row mt-3">
+          <Button
+            sm
+            variant="ghost"
+            title="Вернуть веса по умолчанию: 50/30/20"
+            onClick={() =>
+              patch({ score_performance: 50, score_stability: 30, score_worst_second: 20 })
+            }
+          >
+            Сброс весов (50/30/20)
+          </Button>
+        </div>
+      </Panel>
+
+      <Panel title="Данные">
+        <div className="row wrap gap-3">
+          <label className="retention-field">
+            <span>Хранить завершённых сессий</span>
             <input
-              type="checkbox"
-              checked={st.reduce_motion}
-              onChange={(e) => patch({ reduce_motion: e.target.checked })}
+              type="number"
+              min={0}
+              max={100000}
+              step={10}
+              value={st.max_sessions}
+              onChange={(e) => {
+                const v = Math.max(0, Math.min(100000, Math.trunc(Number(e.target.value)) || 0));
+                patch({ max_sessions: v });
+              }}
             />
-            уменьшить движение
           </label>
         </div>
-      </Glass>
-
-      <Glass>
-        <div className="card-title">Сценарий по умолчанию</div>
-        <div className="grid2">
-          <Field label={`Длительность, с (≥9) — сейчас ${st.duration_seconds}`}>
-            <input
-              type="number"
-              min={9}
-              value={st.duration_seconds}
-              onChange={(e) => patch({ duration_seconds: +e.target.value })}
-            />
-          </Field>
-          <Field label={`Разогрев, с (≥2) — сейчас ${st.warmup_seconds}`}>
-            <input
-              type="number"
-              min={2}
-              value={st.warmup_seconds}
-              onChange={(e) => patch({ warmup_seconds: +e.target.value })}
-            />
-          </Field>
-          <Field label={`Охлаждение, с (0–60) — сейчас ${st.cooling_seconds}`}>
-            <input
-              type="number"
-              min={0}
-              max={60}
-              value={st.cooling_seconds}
-              onChange={(e) => patch({ cooling_seconds: +e.target.value })}
-            />
-          </Field>
-          <Field label={`Повторов, 1–9 — сейчас ${st.repetitions}`}>
-            <input
-              type="number"
-              min={1}
-              max={9}
-              value={st.repetitions}
-              onChange={(e) => patch({ repetitions: +e.target.value })}
-            />
-          </Field>
-          <Field label={`Порог фона, % на ядро — сейчас ${st.background_threshold_percent}`}>
-            <input
-              type="number"
-              step={0.5}
-              min={0.5}
-              max={100}
-              value={st.background_threshold_percent}
-              onChange={(e) => patch({ background_threshold_percent: +e.target.value })}
-            />
-          </Field>
+        <div className="hint mt-2">
+          Старые сессии удаляются автоматически при превышении лимита.
         </div>
-      </Glass>
-
-      <Glass>
-        <div className="card-title">Скоринг (веса)</div>
-        <div className="grid2">
-          <Field label={`Performance — сейчас ${st.scoring_performance}`}>
-            <input
-              type="number"
-              step={0.1}
-              min={0}
-              max={100}
-              value={st.scoring_performance}
-              onChange={(e) => patch({ scoring_performance: +e.target.value })}
-            />
-          </Field>
-          <Field label={`Stability — сейчас ${st.scoring_stability}`}>
-            <input
-              type="number"
-              step={0.1}
-              min={0}
-              max={100}
-              value={st.scoring_stability}
-              onChange={(e) => patch({ scoring_stability: +e.target.value })}
-            />
-          </Field>
-          <Field label={`Worst second — сейчас ${st.scoring_worst_second}`}>
-            <input
-              type="number"
-              step={0.1}
-              min={0}
-              max={100}
-              value={st.scoring_worst_second}
-              onChange={(e) => patch({ scoring_worst_second: +e.target.value })}
-            />
-          </Field>
+        <div className="row wrap gap-3 mt-3">
+          <Button
+            variant="ghost"
+            onClick={() => dataDir && commands.openFolder(dataDir).catch((e) => pushToast("err", String(e)))}
+          >
+            Папка результатов
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={!cfgDir}
+            title={cfgDir || undefined}
+            onClick={() => cfgDir && commands.openFolder(cfgDir).catch((e) => pushToast("err", String(e)))}
+          >
+            Папка настроек
+          </Button>
         </div>
-      </Glass>
+      </Panel>
 
-      <Glass>
-        <div className="card-title">Удержание данных</div>
-        <div className="grid2">
-          <Field label={`Макс. сессий — сейчас ${st.retention_max_sessions}`}>
-            <input
-              type="number"
-              min={1}
-              max={10000}
-              value={st.retention_max_sessions}
-              onChange={(e) => patch({ retention_max_sessions: +e.target.value })}
-            />
-          </Field>
-        </div>
-      </Glass>
-
-      <Glass>
-        <div className="card-title">Идентичность нагрузки</div>
-        <div className="grid2">
-          <Stat label="Версия нагрузка" value={ident?.workload_version ?? "—"} />
-          <Stat label="Воркеров / ядер" value={ident ? `${ident.worker_count} / ${ident.logical_cpus}` : "—"} />
-          <Stat label="Таймер" value={ident ? `${ident.timer_hz}` : "—"} suffix="Гц" />
-          <Stat label="seed" value={ident?.seed_hex ?? "—"} />
-        </div>
-        {ident ? (
-          <div className="sub" style={{ color: "var(--text-3)", marginTop: 8 }}>
-            Хэш конфигурации: <span className="num">{ident.config_hash}</span> · CPU: {ident.cpu_identifier} ·
-            диагностика: <span className="num">{ident.diagnostics_version}</span>
-          </div>
-        ) : null}
-      </Glass>
-
-      <Glass>
-        <div className="card-title">О приложении</div>
-        <div className="row wrap between">
-          <div>
-            PowerBench
-            {version ? <Badge kind="plain" big>версия {version}</Badge> : null}
-          </div>
-          <div className="sub" style={{ color: "var(--text-3)" }}>
-            Идентичность нагрузки и каталоги данных указаны выше.
-          </div>
-        </div>
-      </Glass>
-
-      <Glass>
-        <div className="card-title">Система</div>
-        <div className="grid2">
-          <Stat
-            label="Права администратора"
-            value={adm === null ? "…" : adm ? "есть" : "нет"}
-          />
-          <Stat label="Питание от сети" value={ac === null ? "…" : ac ? "в сети" : "батарея"} />
-        </div>
-        <div className="sub" style={{ color: "var(--text-3)", marginTop: 8 }}>
-          Результаты: <span className="num">{dataDir}</span>
-          <br />
-          Настройки: <span className="num">{cfgDir}</span>
+      <Panel title="Система">
+        <div className="row wrap gap-3">
+          <span>
+            {adm === null ? "…" : adm ? <Badge kind="ok">администратор</Badge> : <Badge kind="danger">не админ</Badge>}
+          </span>
+          <span>
+            {ac === null ? "…" : ac ? <Badge kind="ok">Питание от сети</Badge> : <Badge kind="warn">батарея</Badge>}
+          </span>
         </div>
         {adm === false ? (
-          <div style={{ marginTop: 8 }}>
-            <Badge kind="warn">
-              Запустите от имени администратора, чтобы включать запрет сна и менять схемы питания.
-            </Badge>
+          <div className="hint mt-2">
+            Запустите от имени администратора, чтобы включать запрет сна и менять схемы питания.
           </div>
         ) : null}
-      </Glass>
+      </Panel>
     </div>
   );
 }

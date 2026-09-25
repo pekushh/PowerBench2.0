@@ -4,7 +4,7 @@
 //! false`). При следующем запуске (и перед стартом нового теста) такая схема
 //! восстанавливается автоматически — тестовая схема не остаётся активной.
 
-use crate::checkpoint::{load_checkpoint, save_checkpoint, Checkpoint};
+use crate::checkpoint::{Checkpoint, load_checkpoint, save_checkpoint};
 use crate::session::SchemeDriver;
 
 /// Итог попытки восстановления после прерывания.
@@ -111,7 +111,10 @@ pub fn recover_interrupted_session(driver: &dyn SchemeDriver) -> RecoveryOutcome
         .map(|s| s.name.clone());
 
     if let Err(cause) = driver.set_active(&original) {
-        let label = name.as_deref().map(|n| format!(" «{n}»")).unwrap_or_default();
+        let label = name
+            .as_deref()
+            .map(|n| format!(" «{n}»"))
+            .unwrap_or_default();
         return RecoveryOutcome {
             interrupted_checkpoint: true,
             needed_restore: true,
@@ -129,13 +132,69 @@ pub fn recover_interrupted_session(driver: &dyn SchemeDriver) -> RecoveryOutcome
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checkpoint::{clear_checkpoint, save_checkpoint};
+    use crate::checkpoint::{checkpoint_path, save_checkpoint};
     use crate::config::SessionConfig;
-    use crate::sim::MockSchemeDriver;
+    use powerbench_windows::powercfg::PowerScheme;
 
     /// Склеивает recovery-тесты в одну цепочку: они работают с общим
     /// (глобальным) файлом контрольной точки.
     static RECOVERY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn clear_checkpoint() {
+        let _ = std::fs::remove_file(checkpoint_path());
+    }
+
+    /// Минимальный драйвер для тестов восстановления.
+    struct FakeDriver {
+        schemes: Vec<String>,
+        active: std::cell::RefCell<String>,
+        fail_restore: std::cell::RefCell<Option<String>>,
+    }
+
+    impl FakeDriver {
+        fn new(schemes: &[&str], active: &str) -> Self {
+            Self {
+                schemes: schemes.iter().map(|s| s.to_string()).collect(),
+                active: std::cell::RefCell::new(active.to_string()),
+                fail_restore: std::cell::RefCell::new(None),
+            }
+        }
+
+        fn active(&self) -> String {
+            self.active.borrow().clone()
+        }
+    }
+
+    impl crate::session::SchemeDriver for FakeDriver {
+        fn list_schemes(&self) -> Result<Vec<PowerScheme>, String> {
+            let active = self.active.borrow().clone();
+            Ok(self
+                .schemes
+                .iter()
+                .map(|g| PowerScheme {
+                    guid: g.clone(),
+                    name: g.clone(),
+                    active: *g == active,
+                })
+                .collect())
+        }
+
+        fn set_active(&self, guid: &str) -> Result<(), String> {
+            if self.fail_restore.borrow().as_deref() == Some(guid) {
+                return Err("fail_restore".to_string());
+            }
+            *self.active.borrow_mut() = guid.to_string();
+            Ok(())
+        }
+
+        fn ac_power_online(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        fn is_admin(&self) -> bool {
+            true
+        }
+    }
 
     fn plan() -> SessionConfig {
         SessionConfig {
@@ -146,7 +205,6 @@ mod tests {
             background_threshold_percent: 5.0,
             worker_count: None,
             scheme_ids: vec!["test-a".to_string()],
-            export_raw_samples: false,
             plan_guid: "recovery-plan".to_string(),
         }
     }
@@ -162,17 +220,15 @@ mod tests {
         let _guard = RECOVERY_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = clear_checkpoint();
+        clear_checkpoint();
         let out = f();
-        let _ = clear_checkpoint();
+        clear_checkpoint();
         out
     }
 
     /// Драйвер, где исходной (до тестовой сессии) считается схема `orig`.
-    fn recovery_driver(active: &str) -> MockSchemeDriver {
-        let mut driver = MockSchemeDriver::new(&["test-a", "orig"], active);
-        driver.original = "orig".to_string();
-        driver
+    fn recovery_driver(active: &str) -> FakeDriver {
+        FakeDriver::new(&["test-a", "orig"], active)
     }
 
     #[test]
@@ -218,8 +274,8 @@ mod tests {
     fn leaves_marker_when_restore_fails() {
         with_clean_checkpoint(|| {
             save_checkpoint(&checkpoint_with(Some("orig"), false)).unwrap();
-            let mut driver = recovery_driver("test-a");
-            driver.fail_restore = Some("orig".to_string());
+            let driver = recovery_driver("test-a");
+            *driver.fail_restore.borrow_mut() = Some("orig".to_string());
             let outcome = recover_interrupted_session(&driver);
             assert!(outcome.interrupted_checkpoint);
             assert!(outcome.needed_restore);

@@ -1,26 +1,24 @@
-// Корень приложения: тема из настроек, навигация (sidebar/пилюля <780px),
-// хоткеи Ctrl+1..5, Ctrl+F, Ctrl+Enter, F5, Esc.
+// Корень приложения: безрамочное окно, иконка-сайдбар, страницы.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { commands, onTestFinished, type SettingsDto } from "./api";
-import { Badge } from "./components/ui";
+import { setRunning, useToasts } from "./store";
 import TitleBar from "./components/TitleBar";
-import { pushToast, setLastResult, useSession, useToasts } from "./store";
+import { CubeIcon, GearIcon, HomeIcon, ListIcon, PowerIcon } from "./components/icons";
+import BenchmarkPage from "./pages/BenchmarkPage";
 import LogPage from "./pages/LogPage";
 import ResultsPage from "./pages/ResultsPage";
 import SchemesPage from "./pages/SchemesPage";
 import SettingsPage from "./pages/SettingsPage";
-import TestPage from "./pages/TestPage";
 import "./styles.css";
 
-type PageId = "test" | "results" | "schemes" | "log" | "settings";
+export type PageId = "test" | "schemes" | "results" | "log" | "settings";
 
-const ROUTES: { id: PageId; label: string; kbd: string; icon: string }[] = [
-  { id: "test", label: "Тестирование", kbd: "Ctrl+1", icon: "▶" },
-  { id: "results", label: "Результаты", kbd: "Ctrl+2", icon: "▤" },
-  { id: "schemes", label: "Схемы питания", kbd: "Ctrl+3", icon: "⌁" },
-  { id: "log", label: "Журнал", kbd: "Ctrl+4", icon: "≡" },
-  { id: "settings", label: "Настройки", kbd: "Ctrl+5", icon: "⚙" },
+const NAV: { id: PageId; label: string; icon: React.ReactNode }[] = [
+  { id: "test", label: "Бенчмарк", icon: <HomeIcon /> },
+  { id: "schemes", label: "Схемы", icon: <PowerIcon /> },
+  { id: "results", label: "Результаты", icon: <CubeIcon /> },
+  { id: "log", label: "Логи", icon: <ListIcon /> },
 ];
 
 function applyAppearance(s: SettingsDto) {
@@ -32,150 +30,93 @@ function applyAppearance(s: SettingsDto) {
 
 export default function App() {
   const [page, setPage] = useState<PageId>("test");
-  const [appearance, setAppearance] = useState<SettingsDto | null>(null);
-  const [adm, setAdm] = useState<boolean | null>(null);
-  const [ac, setAc] = useState<boolean | null>(null);
-  const session = useSession();
+  const [collapsed, setCollapsed] = useState(false);
   const toasts = useToasts();
 
   useEffect(() => {
-    let alive = true;
     commands
       .getSettings()
       .then((s) => {
-        if (!alive) return;
-        setAppearance(s);
-        setAppearanceForRender(s);
+        applyAppearance(s);
+        setCollapsed(s.sidebar_collapsed);
       })
       .catch(() => undefined);
-    commands.isAdmin().then((v) => alive && setAdm(v)).catch(() => undefined);
-    commands.acPowerOnline().then((v) => alive && setAc(v)).catch(() => undefined);
-    const unfor = onTestFinished((m) => {
-      setLastResult(m);
-      setAcNow();
-    });
+    commands.testRunning().then(setRunning).catch(() => undefined);
+    const unfor = onTestFinished(() => setRunning(false));
     return () => {
-      alive = false;
       unfor.then((f) => f());
     };
   }, []);
 
-  function setAppearanceForRender(s: SettingsDto) {
-    applyAppearance(s);
-  }
+  const toggleCollapse = useCallback(() => {
+    setCollapsed((c) => {
+      const next = !c;
+      commands
+        .getSettings()
+        .then((s) => commands.setSettings({ ...s, sidebar_collapsed: next }).catch(() => undefined))
+        .catch(() => undefined);
+      return next;
+    });
+  }, []);
 
-  function setAcNow() {
-    commands.acPowerOnline().then(setAc).catch(() => undefined);
-  }
-
-  useEffect(() => {
-    if (page === "schemes") {
-      // Ctrl+F уже нажался на этой странице — переключение фокуса поиска.
-      const el = document.getElementById("schemes-search");
-      if (el) el.focus();
-    }
-  }, [page]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const ctrl = e.ctrlKey || e.metaKey;
-      if (ctrl && e.key >= "1" && e.key <= "5") {
-        const r = ROUTES.find((r) => r.kbd.endsWith(e.key));
-        if (r) {
-          e.preventDefault();
-          setPage(r.id);
-        }
-        return;
-      }
-      if (ctrl && (e.key === "f" || e.key === "F" || e.key === "а" || e.key === "А")) {
-        e.preventDefault();
-        setPage("schemes");
-        requestAnimationFrame(() => {
-          const el = document.getElementById("schemes-search");
-          if (el) el.focus();
-        });
-        return;
-      }
-      if (ctrl && (e.key === "Enter")) {
-        e.preventDefault();
-        const el = document.getElementById("test-start");
-        if (el) (el as HTMLButtonElement).click();
-        return;
-      }
-      if (e.key === "F5") {
-        e.preventDefault();
-        window.dispatchEvent(new CustomEvent("pb-refresh"));
-        return;
-      }
-      if (e.key === "Escape" && session.running) {
-        e.preventDefault();
-        commands.stopTest().then((was) => {
-          if (was) pushToast("info", "запрос остановки сессии");
-        }).catch((err) => pushToast("err", String(err)));
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [page, session.running]);
+  const onAppearance = useCallback((s: SettingsDto) => applyAppearance(s), []);
 
   return (
     <div className="shell">
-      <div className="ambient" />
-      <TitleBar />
+      <TitleBar collapsed={collapsed} onToggleCollapse={toggleCollapse} />
       <div className="body">
-      <aside className="sidebar fade-in">
-        <div className="brand">
-          <span className="mark" />
-          <span>PowerBench</span>
-        </div>
-        {ROUTES.map((r) => (
-          <div
-            key={r.id}
-            className={`nav-item ${page === r.id ? "active" : ""}`}
-            onClick={() => setPage(r.id)}
-          >
-            <span>{r.icon}</span>
-            <span>{r.label}</span>
-            <span className="kbd">{r.kbd}</span>
-          </div>
-        ))}
-        <div className="nav-legend">
-          <div>
-            {adm === null ? "…" : adm ? <Badge kind="ok">администратор</Badge> : <Badge kind="danger">не админ</Badge>}
-          </div>
-          <div>
-            {ac === null ? "…" : ac ? <Badge kind="ok">сеть</Badge> : <Badge kind="warn">батарея</Badge>}
-          </div>
-          {appearance ? (
-            <div>
-              тема {appearance.theme} · {appearance.mode.toLowerCase()}
+        <aside className={`sidebar fade-in ${collapsed ? "collapsed" : ""}`}>
+          <nav className="sidebar-nav">
+            {NAV.map((n) => (
+              <div
+                key={n.id}
+                className={`nav-item ${page === n.id ? "active" : ""}`}
+                onClick={() => setPage(n.id)}
+                title={collapsed ? n.label : undefined}
+              >
+                <span className="nav-glyph">{n.icon}</span>
+                <span className="nav-label">{n.label}</span>
+              </div>
+            ))}
+          </nav>
+          <div className="sidebar-foot">
+            <div
+              className={`nav-item ${page === "settings" ? "active" : ""}`}
+              onClick={() => setPage("settings")}
+              title={collapsed ? "Настройки" : undefined}
+            >
+              <span className="nav-glyph">
+                <GearIcon />
+              </span>
+              <span className="nav-label">Настройки</span>
             </div>
-          ) : null}
-        </div>
-      </aside>
-
-      <main className="main">
-        {page === "test" ? <TestPage /> : null}
-        {page === "results" ? <ResultsPage /> : null}
-        {page === "schemes" ? <SchemesPage /> : null}
-        {page === "log" ? <LogPage /> : null}
-        {page === "settings" ? <SettingsPage onAppearance={setAppearanceForRender} /> : null}
-      </main>
+          </div>
+        </aside>
+        <main className="main">
+          <div className={`page-host ${page === "test" ? "on" : ""}`}>
+            <BenchmarkPage />
+          </div>
+          <div className={`page-host ${page === "schemes" ? "on" : ""}`}>
+            <SchemesPage />
+          </div>
+          <div className={`page-host ${page === "results" ? "on" : ""}`}>
+            <ResultsPage active={page === "results"} />
+          </div>
+          <div className={`page-host ${page === "log" ? "on" : ""}`}>
+            <LogPage />
+          </div>
+          <div className={`page-host ${page === "settings" ? "on" : ""}`}>
+            <SettingsPage onAppearance={onAppearance} />
+          </div>
+        </main>
       </div>
-
-      <div className="pill float" role="navigation" aria-label="Навигация">
-        {ROUTES.map((r) => (
-          <button key={r.id} className={page === r.id ? "on" : ""} onClick={() => setPage(r.id)} title={`${r.label} (${r.kbd})`}>
-            {r.icon}
-          </button>
+      <div className="toasts">
+        {toasts.map((t) => (
+          <div key={t.id} className={`toast glass float ${t.kind}`}>
+            {t.text}
+          </div>
         ))}
       </div>
-
-      {toasts.map((t) => (
-        <div key={t.id} className={`toast float ${t.kind}`}>
-          {t.text}
-        </div>
-      ))}
     </div>
   );
 }

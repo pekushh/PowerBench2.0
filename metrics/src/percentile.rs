@@ -12,6 +12,8 @@ pub fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
     if n == 0 {
         return f64::NAN;
     }
+    // Кламп: p вне [0,1] иначе роняет индексацию (OOB-паника).
+    let p = p.clamp(0.0, 1.0);
     let pos = p * (n - 1) as f64;
     let lower = pos.floor();
     let upper = pos.ceil();

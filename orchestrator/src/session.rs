@@ -13,19 +13,23 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use powerbench_core::config::Phase;
-use powerbench_core::engine::{Engine, ProgressSnapshot, RunError, RunReport, RunTarget, Scoreboard};
-use powerbench_metrics::run::{
-    burst_retention_percent, consistency_percent, median, population_std, run_stats, RunStats,
+use powerbench_core::engine::{
+    Engine, ProgressSnapshot, RunError, RunReport, RunTarget, Scoreboard,
 };
-use powerbench_metrics::{aggregate_runs, AggregateResult, CompatibilitySignature, DeterminismSignature};
-use powerbench_recommend::{recommend, Recommendation, RunCompact, SchemeAggregate};
+use powerbench_metrics::run::{
+    RunStats, burst_retention_percent, consistency_percent, median, population_std, run_stats,
+};
+use powerbench_metrics::{
+    AggregateResult, CompatibilitySignature, DeterminismSignature, aggregate_runs,
+};
+use powerbench_recommend::{Recommendation, RunCompact, SchemeAggregate, recommend};
 use powerbench_windows::monitor::{
-    correlate, CorrelatedProcess, ProcessSample, ProcessSampler, SpikeWindow,
+    CorrelatedProcess, ProcessSample, ProcessSampler, SpikeWindow, correlate,
 };
 use powerbench_windows::powercfg::PowerScheme;
 
 use crate::checkpoint::{Checkpoint, PhaseStats, StoredRun};
-use crate::config::{phase_durations, run_key, round_order, validate_config, SessionConfig};
+use crate::config::{SessionConfig, phase_durations, round_order, run_key, validate_config};
 
 /// Период опроса сторожевого таймера.
 pub const WATCHDOG_POLL_MS: u64 = 250;
@@ -84,7 +88,12 @@ impl std::fmt::Display for SessionError {
             SessionError::ApplyScheme { scheme_id, cause } => {
                 write!(f, "не удалось применить схему {scheme_id}: {cause}")
             }
-            SessionError::ChecksumMismatch { scheme_id, phase, expected, actual } => write!(
+            SessionError::ChecksumMismatch {
+                scheme_id,
+                phase,
+                expected,
+                actual,
+            } => write!(
                 f,
                 "рассинхрон контрольных сумм: схема {scheme_id}, фаза {phase}: ожидалось {expected:#018x}, получено {actual:#018x}"
             ),
@@ -106,19 +115,57 @@ impl std::fmt::Display for SessionError {
 /// Событие сессии (для консольного протоколирования).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
-    Started { plan_guid: String, rounds: u32, schemes: usize },
-    SchemeApplied { scheme_id: String },
-    BackgroundNoisy { measured_total_percent: f64, threshold_percent: f64 },
-    BackgroundClean { measured_total_percent: f64, threshold_percent: f64 },
-    PhaseStarted { label: String, seconds: u64 },
-    PhaseFinished { label: String, ticks: u64, samples: usize },
-    SpikeWindows { label: String, count: usize },
-    RunCompleted { key: String, ticks: u64, duration_ms: u64 },
-    RunSkippedCompleted { key: String },
-    RunSkippedRejected { scheme_id: String },
-    SchemeRejected { scheme_id: String, reason: String },
-    Cooling { seconds: u64 },
-    Restored { scheme_id: String, label: String },
+    Started {
+        plan_guid: String,
+        rounds: u32,
+        schemes: usize,
+    },
+    SchemeApplied {
+        scheme_id: String,
+    },
+    BackgroundNoisy {
+        measured_total_percent: f64,
+        threshold_percent: f64,
+    },
+    BackgroundClean {
+        measured_total_percent: f64,
+        threshold_percent: f64,
+    },
+    PhaseStarted {
+        label: String,
+        seconds: u64,
+    },
+    PhaseFinished {
+        label: String,
+        ticks: u64,
+        samples: usize,
+    },
+    SpikeWindows {
+        label: String,
+        count: usize,
+    },
+    RunCompleted {
+        key: String,
+        ticks: u64,
+        duration_ms: u64,
+    },
+    RunSkippedCompleted {
+        key: String,
+    },
+    RunSkippedRejected {
+        scheme_id: String,
+    },
+    SchemeRejected {
+        scheme_id: String,
+        reason: String,
+    },
+    Cooling {
+        seconds: u64,
+    },
+    Restored {
+        scheme_id: String,
+        label: String,
+    },
     Warn(String),
     Finished,
 }
@@ -126,32 +173,53 @@ pub enum SessionEvent {
 impl std::fmt::Display for SessionEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SessionEvent::Started { plan_guid, rounds, schemes } => write!(
-                f,
-                "Сессия {plan_guid}: раундов {rounds}, схем {schemes}"
-            ),
+            SessionEvent::Started {
+                plan_guid,
+                rounds,
+                schemes,
+            } => write!(f, "Сессия {plan_guid}: раундов {rounds}, схем {schemes}"),
             SessionEvent::SchemeApplied { scheme_id } => {
                 write!(f, "Применена схема {scheme_id}")
             }
-            SessionEvent::BackgroundNoisy { measured_total_percent, threshold_percent } => write!(
+            SessionEvent::BackgroundNoisy {
+                measured_total_percent,
+                threshold_percent,
+            } => write!(
                 f,
                 "Предупреждение: фон загружен ({measured_total_percent:.1}% при пороге {threshold_percent:.1}% суммарно), замеры продолжаются"
             ),
-            SessionEvent::BackgroundClean { measured_total_percent, threshold_percent } => write!(
+            SessionEvent::BackgroundClean {
+                measured_total_percent,
+                threshold_percent,
+            } => write!(
                 f,
                 "Фон чистый: {measured_total_percent:.1}% при пороге {threshold_percent:.1}%"
             ),
             SessionEvent::PhaseStarted { label, seconds } => {
                 write!(f, "Фаза «{label}» на {seconds} с")
             }
-            SessionEvent::PhaseFinished { label, ticks, samples } => {
-                write!(f, "Фаза «{label}» завершена: {ticks} тиков, {samples} измерений")
+            SessionEvent::PhaseFinished {
+                label,
+                ticks,
+                samples,
+            } => {
+                write!(
+                    f,
+                    "Фаза «{label}» завершена: {ticks} тиков, {samples} измерений"
+                )
             }
             SessionEvent::SpikeWindows { label, count } => {
                 write!(f, "Фаза «{label}»: окон скачков {count}")
             }
-            SessionEvent::RunCompleted { key, ticks, duration_ms } => {
-                write!(f, "Прогон {key} завершён: {ticks} тиков за {duration_ms} мс")
+            SessionEvent::RunCompleted {
+                key,
+                ticks,
+                duration_ms,
+            } => {
+                write!(
+                    f,
+                    "Прогон {key} завершён: {ticks} тиков за {duration_ms} мс"
+                )
             }
             SessionEvent::RunSkippedCompleted { key } => {
                 write!(f, "Пропуск {key}: уже выполнен ранее")
@@ -179,6 +247,7 @@ pub trait TelemetryObserver: Send + Sync {
     /// Любое событие сессии (журнал): фазы, прогоны, предупреждения.
     fn event(&self, _e: &SessionEvent) {}
     /// Перед началом измеряемой фазы: контекст текущего прогона.
+    #[allow(clippy::too_many_arguments)]
     fn phase(
         &self,
         _run_index: u32,
@@ -319,7 +388,11 @@ pub fn spike_windows_for(
     sec_per_index: f64,
     label: &str,
 ) -> Vec<SpikeWindow> {
-    let sec_per_index = if sec_per_index > 0.0 { sec_per_index } else { 1.0 / times.len().max(1) as f64 };
+    let sec_per_index = if sec_per_index > 0.0 {
+        sec_per_index
+    } else {
+        1.0 / times.len().max(1) as f64
+    };
     let mut out: Vec<SpikeWindow> = Vec::new();
     let mut i = 0usize;
     while i < times.len() {
@@ -445,23 +518,29 @@ fn run_measured_phase(
     let monitor_run = Arc::new(AtomicBool::new(true));
     let monitor_handle = spawn_monitor(Arc::clone(monitor_map), Arc::clone(&monitor_run));
     // Сторожевой таймер: отменяет при бездействии или пользовательском Ctrl+C.
-    let (watchdog_handle, rx) = spawn_watchdog(Arc::clone(&scoreboard), cancel, Arc::clone(&user_cancel));
+    let (watchdog_handle, rx) =
+        spawn_watchdog(Arc::clone(&scoreboard), cancel, Arc::clone(&user_cancel));
     // Тел­еметрия ~10 Гц для интерфейса: читает снапшот ядра и зовёт наблюдателя.
     let telemetry_handle = observer.as_ref().map(|obs| {
         let obs = Arc::clone(obs);
         let scoreboard = Arc::clone(&scoreboard);
         let label = label.to_string();
         let phase_started = Instant::now();
-        std::thread::spawn(move || loop {
-            let snap = scoreboard.snapshot();
-            if !snap.running {
-                return;
+        std::thread::spawn(move || {
+            loop {
+                let snap = scoreboard.snapshot();
+                if !snap.running {
+                    return;
+                }
+                obs.tick(&snap, &label, &phase_started);
+                std::thread::sleep(Duration::from_millis(100));
             }
-            obs.tick(&snap, &label, &phase_started);
-            std::thread::sleep(Duration::from_millis(100));
         })
     });
-    let result = engine.run_phase(phase, RunTarget::Duration(Duration::from_secs(seconds.max(1))));
+    let result = engine.run_phase(
+        phase,
+        RunTarget::Duration(Duration::from_secs(seconds.max(1))),
+    );
     monitor_run.store(false, Ordering::Relaxed);
     let _ = monitor_handle.join();
     // Классификация отмены: только сторожевой таймер мог отменить прогон.
@@ -480,9 +559,9 @@ fn run_measured_phase(
         return Err(PhaseFailure::LoadDidNotStop);
     }
     match (result, verdict) {
-        (Err(RunError::Cancelled), Some(WatchdogVerdict::Hung)) => {
-            Err(PhaseFailure::Hung { phase: label.to_string() })
-        }
+        (Err(RunError::Cancelled), Some(WatchdogVerdict::Hung)) => Err(PhaseFailure::Hung {
+            phase: label.to_string(),
+        }),
         (Err(RunError::Cancelled), _) => Err(PhaseFailure::UserCancelled),
         (Err(err), _) => Err(PhaseFailure::Engine(err)),
         (Ok(report), _) => Ok((report, engine.samples().to_vec())),
@@ -563,9 +642,7 @@ pub fn run_session(
 
     // Список схем и карта «guid → имя»: имя нужно только для отображения
     // (PlanName), в идентификации/матчинге никогда не участвует.
-    let schemes_list = driver
-        .list_schemes()
-        .map_err(|e| SessionError::Config(e))?;
+    let schemes_list = driver.list_schemes().map_err(SessionError::Config)?;
     let name_map: BTreeMap<String, String> = schemes_list
         .iter()
         .map(|s| (s.guid.to_ascii_lowercase(), s.name.clone()))
@@ -584,43 +661,54 @@ pub fn run_session(
         }
         None => {
             let mut cp = Checkpoint::new(plan.clone());
-            cp.original_scheme_guid = schemes_list.iter().find(|s| s.active).map(|s| s.guid.clone());
+            cp.original_scheme_guid = schemes_list
+                .iter()
+                .find(|s| s.active)
+                .map(|s| s.guid.clone());
             cp
         }
     };
 
     // Восстановление после прерывания: если активна не исходная схема —
     // восстанавливаем до продолжения.
+    // MSRV 1.85: схлопывание через let-цепочки требует Rust 1.88+.
+    #[allow(clippy::collapsible_if)]
     if !checkpoint.original_restored {
         if let Some(original) = checkpoint.original_scheme_guid.clone() {
             let active_guid = driver
                 .list_schemes()
-                .map_err(|e| SessionError::Config(e))?
+                .map_err(SessionError::Config)?
                 .into_iter()
                 .find(|s| s.active)
                 .map(|s| s.guid);
             if active_guid.as_deref() != Some(original.as_str()) {
                 driver
                     .set_active(&original)
-                    .map_err(|cause| SessionError::RestoreScheme(cause))?;
-                note(&observer, &mut events, SessionEvent::Restored {
-                    scheme_id: original.clone(),
-                    label: "после прерывания".to_string(),
-                });
+                    .map_err(SessionError::RestoreScheme)?;
+                note(
+                    &observer,
+                    &mut events,
+                    SessionEvent::Restored {
+                        scheme_id: original.clone(),
+                        label: "после прерывания".to_string(),
+                    },
+                );
             }
             checkpoint.original_restored = true;
-            store
-                .save(&checkpoint)
-                .map_err(|e| SessionError::Persist(e))?;
+            store.save(&checkpoint).map_err(SessionError::Persist)?;
         }
     }
 
     let n_schemes = plan.scheme_ids.len();
-    note(&observer, &mut events, SessionEvent::Started {
-        plan_guid: plan.plan_guid.clone(),
-        rounds: plan.repetitions,
-        schemes: n_schemes,
-    });
+    note(
+        &observer,
+        &mut events,
+        SessionEvent::Started {
+            plan_guid: plan.plan_guid.clone(),
+            rounds: plan.repetitions,
+            schemes: n_schemes,
+        },
+    );
 
     // Основной цикл раундов (признак возврата — «остановлено пользователем»).
     let loop_result = run_session_loop(
@@ -637,7 +725,8 @@ pub fn run_session(
 
     // Гарантия ОС: исходная схема восстанавливается при любом завершении —
     // и при успехе, и при ошибке/отмене.
-    let restore_result = restore_original(driver, &mut checkpoint, &mut events, &mut *store, &observer);
+    let restore_result =
+        restore_original(driver, &mut checkpoint, &mut events, &mut *store, &observer);
 
     let cancelled = match loop_result {
         Err(e) => {
@@ -667,7 +756,6 @@ pub fn run_session(
 /// Цикл раундов: применение схем, преамбула, измеряемые фазы, контрольные
 /// точки и охлаждение. Возвращает признак «остановлено пользователем».
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn run_session_loop(
     engine: &mut Engine,
     driver: &dyn SchemeDriver,
@@ -692,24 +780,46 @@ fn run_session_loop(
         let key = run_key(round, &plan.plan_guid);
         let round_done = checkpoint.is_completed(&key);
         if round_done {
-            note(observer, events, SessionEvent::RunSkippedCompleted { key: key.clone() });
+            note(
+                observer,
+                events,
+                SessionEvent::RunSkippedCompleted { key: key.clone() },
+            );
             continue;
         }
-        for scheme_id in order {
+        'scheme: for scheme_id in order {
             run_index += 1;
             if user_wants_stop(user_cancel) {
                 cancelled = true;
                 break 'outer;
             }
             if checkpoint.has_run(round, &scheme_id) {
-                note(observer, events, SessionEvent::RunSkippedCompleted { key: key.clone() });
+                note(
+                    observer,
+                    events,
+                    SessionEvent::RunSkippedCompleted { key: key.clone() },
+                );
                 continue;
             }
             if checkpoint.is_rejected(&scheme_id) {
-                note(observer, events, SessionEvent::RunSkippedRejected { scheme_id: scheme_id.clone() });
+                note(
+                    observer,
+                    events,
+                    SessionEvent::RunSkippedRejected {
+                        scheme_id: scheme_id.clone(),
+                    },
+                );
                 continue;
             }
 
+            // Сначала сбрасываем флаг (и сохраняем): если kill случится до
+            // или во время set_active, чекпоинт честно говорит «не
+            // восстановлено», и следующий запуск всё починит. Обратный
+            // порядок оставлял бы чужую схему активной при restored=true.
+            if checkpoint.original_restored {
+                checkpoint.original_restored = false;
+                store.save(checkpoint).map_err(SessionError::Persist)?;
+            }
             // --- Применение схемы ---
             driver
                 .set_active(&scheme_id)
@@ -717,32 +827,39 @@ fn run_session_loop(
                     scheme_id: scheme_id.clone(),
                     cause,
                 })?;
-            note(observer, events, SessionEvent::SchemeApplied { scheme_id: scheme_id.clone() });
-            // С этого момента активна не исходная схема: флаг сброшен, чтобы
-            // восстановление произошло при любом завершении (в т.ч. kill).
-            if checkpoint.original_restored {
-                checkpoint.original_restored = false;
-                store
-                    .save(checkpoint)
-                    .map_err(|e| SessionError::Persist(e))?;
-            }
+            note(
+                observer,
+                events,
+                SessionEvent::SchemeApplied {
+                    scheme_id: scheme_id.clone(),
+                },
+            );
 
             // --- Преамбула: пауза после схемы ---
             std::thread::sleep(Duration::from_secs(PAUSE_AFTER_SCHEME_SECS));
 
             // --- Проверка фона ---
-            let (clean, measured) = background_check(engine.logical_cpus(), plan.background_threshold_percent);
+            let (clean, measured) =
+                background_check(engine.logical_cpus(), plan.background_threshold_percent);
             let threshold = plan.background_threshold_percent * engine.logical_cpus() as f64;
             if clean {
-                note(observer, events, SessionEvent::BackgroundClean {
-                    measured_total_percent: measured,
-                    threshold_percent: threshold,
-                });
+                note(
+                    observer,
+                    events,
+                    SessionEvent::BackgroundClean {
+                        measured_total_percent: measured,
+                        threshold_percent: threshold,
+                    },
+                );
             } else {
-                note(observer, events, SessionEvent::BackgroundNoisy {
-                    measured_total_percent: measured,
-                    threshold_percent: threshold,
-                });
+                note(
+                    observer,
+                    events,
+                    SessionEvent::BackgroundNoisy {
+                        measured_total_percent: measured,
+                        threshold_percent: threshold,
+                    },
+                );
             }
 
             // --- Разогрев профилем «Отклик» (результаты отбрасываются) ---
@@ -750,11 +867,8 @@ fn run_session_loop(
             engine.prepare_sample_buffer(Phase::Response, plan.warmup_seconds.max(1));
             let warmup_cancel = engine.canceller();
             let warmup_scoreboard = engine.scoreboard_arc();
-            let (warmup_handle, warmup_rx) = spawn_watchdog(
-                warmup_scoreboard,
-                warmup_cancel,
-                Arc::clone(user_cancel),
-            );
+            let (warmup_handle, warmup_rx) =
+                spawn_watchdog(warmup_scoreboard, warmup_cancel, Arc::clone(user_cancel));
             let warmup_result = engine.run_phase(
                 Phase::Response,
                 RunTarget::Duration(Duration::from_secs(plan.warmup_seconds.max(1))),
@@ -771,17 +885,22 @@ fn run_session_loop(
                         cancelled = true;
                         break 'outer;
                     }
-                    note(observer, events, SessionEvent::SchemeRejected {
-                        scheme_id: scheme_id.clone(),
-                        reason: format!("нет прогресса более {} секунд", WATCHDOG_NO_PROGRESS_SECS),
-                    });
+                    note(
+                        observer,
+                        events,
+                        SessionEvent::SchemeRejected {
+                            scheme_id: scheme_id.clone(),
+                            reason: format!(
+                                "нет прогресса более {} секунд",
+                                WATCHDOG_NO_PROGRESS_SECS
+                            ),
+                        },
+                    );
                     checkpoint.rejections.insert(
                         scheme_id.clone(),
                         format!("нет прогресса более {} секунд", WATCHDOG_NO_PROGRESS_SECS),
                     );
-                    store
-                        .save(checkpoint)
-                        .map_err(|e| SessionError::Persist(e))?;
+                    store.save(checkpoint).map_err(SessionError::Persist)?;
                     continue;
                 }
                 Err(err) => return Err(SessionError::Engine(err)),
@@ -791,7 +910,11 @@ fn run_session_loop(
             }
 
             // --- Измеряемые фазы (с подключённым «пользовательским» флагом) ---
-            let phase_secs = [durs.light_seconds, durs.heavy_seconds, durs.response_seconds];
+            let phase_secs = [
+                durs.light_seconds,
+                durs.heavy_seconds,
+                durs.response_seconds,
+            ];
             let monitor_map: Arc<Mutex<BTreeMap<u64, Vec<ProcessSample>>>> =
                 Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -812,10 +935,14 @@ fn run_session_loop(
                     break 'outer;
                 }
                 let label = phase_label(phase);
-                note(observer, events, SessionEvent::PhaseStarted {
-                    label: label.to_string(),
-                    seconds: secs,
-                });
+                note(
+                    observer,
+                    events,
+                    SessionEvent::PhaseStarted {
+                        label: label.to_string(),
+                        seconds: secs,
+                    },
+                );
                 if let Some(obs) = observer {
                     obs.phase(
                         run_index,
@@ -842,6 +969,8 @@ fn run_session_loop(
                 match phase_result {
                     Ok((report, times)) => {
                         let reference = engine.first_tick_reference(phase.first_profile());
+                        // MSRV 1.85: схлопывание через let-цепочки требует Rust 1.88+.
+                        #[allow(clippy::collapsible_if)]
                         if let Some(expected) = reference {
                             if report.first_tick_checksum != expected {
                                 return Err(SessionError::ChecksumMismatch {
@@ -852,24 +981,28 @@ fn run_session_loop(
                                 });
                             }
                         }
-                        note(observer, events, SessionEvent::PhaseFinished {
-                            label: label.to_string(),
-                            ticks: report.ticks,
-                            samples: times.len(),
-                        });
+                        note(
+                            observer,
+                            events,
+                            SessionEvent::PhaseFinished {
+                                label: label.to_string(),
+                                ticks: report.ticks,
+                                samples: times.len(),
+                            },
+                        );
                         ticks += report.ticks;
                         if phase == Phase::Response {
                             supercycles = report.supercycles_completed;
                         }
                         first_tick_checksums[idx] = report.first_tick_checksum;
                         run_checksums[idx] = report.run_checksum;
-                        let secs_total = plan.duration_seconds;
-                        let sec_per_index =
-                            secs_total as f64 / times.len().max(1) as f64;
+                        // Шаг перевода индекса сэмпла в секунды: длительность ЭТОЙ
+                        // фазы, а не всего теста (иначе окна скачков растянуты).
+                        let sec_per_index = secs as f64 / times.len().max(1) as f64;
                         let windows = spike_windows_for(
                             &times,
                             spike_threshold(&times),
-                            now_unix_secs() - secs as u64,
+                            now_unix_secs() - secs,
                             sec_per_index,
                             label,
                         );
@@ -879,23 +1012,36 @@ fn run_session_loop(
                         // Стабилизационная пауза после каждой фазы.
                         std::thread::sleep(Duration::from_secs(STABILIZATION_SECS));
                         if spike_count_total > 0 {
-                            note(observer, events, SessionEvent::SpikeWindows {
-                                label: label.to_string(),
-                                count: windows.len(),
-                            });
+                            note(
+                                observer,
+                                events,
+                                SessionEvent::SpikeWindows {
+                                    label: label.to_string(),
+                                    count: windows.len(),
+                                },
+                            );
                         }
                     }
                     Err(PhaseFailure::Hung { phase }) => {
-                        note(observer, events, SessionEvent::SchemeRejected {
-                            scheme_id: scheme_id.clone(),
-                            reason: format!("нет прогресса более {} секунд (фаза «{phase}»)", WATCHDOG_NO_PROGRESS_SECS),
-                        });
-                        let reason = format!("нет прогресса более {} секунд (фаза «{phase}»)", WATCHDOG_NO_PROGRESS_SECS);
+                        note(
+                            observer,
+                            events,
+                            SessionEvent::SchemeRejected {
+                                scheme_id: scheme_id.clone(),
+                                reason: format!(
+                                    "нет прогресса более {} секунд (фаза «{phase}»)",
+                                    WATCHDOG_NO_PROGRESS_SECS
+                                ),
+                            },
+                        );
+                        let reason = format!(
+                            "нет прогресса более {} секунд (фаза «{phase}»)",
+                            WATCHDOG_NO_PROGRESS_SECS
+                        );
                         checkpoint.rejections.insert(scheme_id.clone(), reason);
-                        store
-                            .save(checkpoint)
-                            .map_err(|e| SessionError::Persist(e))?;
-                        continue 'outer;
+                        store.save(checkpoint).map_err(SessionError::Persist)?;
+                        // Зависла одна схема — остальные схемы раунда идут дальше.
+                        continue 'scheme;
                     }
                     Err(PhaseFailure::UserCancelled) => {
                         cancelled = true;
@@ -929,7 +1075,8 @@ fn run_session_loop(
                 group_refs.push((0u32, times.clone()));
             }
             let combined = run_stats(&all_times).unwrap_or_else(zero_run_stats);
-            let combined_groups: Vec<(u32, &[f64])> = group_refs.iter().map(|(g, t)| (*g, t.as_slice())).collect();
+            let combined_groups: Vec<(u32, &[f64])> =
+                group_refs.iter().map(|(g, t)| (*g, t.as_slice())).collect();
             let cross = consistency_percent(&combined_groups);
 
             // Фоновые корреляции по окнам скачков этого прогона.
@@ -957,19 +1104,27 @@ fn run_session_loop(
             if let Some(run) = run_outcome {
                 let stored = build_stored_run(&run, plan, name_map);
                 checkpoint.runs.push(stored);
-                store
-                    .save(checkpoint)
-                    .map_err(|e| SessionError::Persist(e))?;
-                note(observer, events, SessionEvent::RunCompleted {
-                    key: key.clone(),
-                    ticks: run.ticks,
-                    duration_ms: run.duration_ms,
-                });
+                store.save(checkpoint).map_err(SessionError::Persist)?;
+                note(
+                    observer,
+                    events,
+                    SessionEvent::RunCompleted {
+                        key: key.clone(),
+                        ticks: run.ticks,
+                        duration_ms: run.duration_ms,
+                    },
+                );
             }
 
             // Охлаждение после прогона, кроме самого последнего в плане.
             if !is_last_planned_run(plan, round, &scheme_id) {
-                note(observer, events, SessionEvent::Cooling { seconds: plan.cooling_seconds });
+                note(
+                    observer,
+                    events,
+                    SessionEvent::Cooling {
+                        seconds: plan.cooling_seconds,
+                    },
+                );
                 if !user_wants_stop(user_cancel) && plan.cooling_seconds > 0 {
                     std::thread::sleep(Duration::from_secs(plan.cooling_seconds));
                 }
@@ -978,9 +1133,7 @@ fn run_session_loop(
         // Раунд отработан целиком (все схемы прогона записаны): отмечаем ключ
         // раунда, чтобы повторный запуск пропустил ротацию одним махом.
         checkpoint.completed_keys.push(key.clone());
-        store
-            .save(checkpoint)
-            .map_err(|e| SessionError::Persist(e))?;
+        store.save(checkpoint).map_err(SessionError::Persist)?;
     }
 
     Ok(cancelled)
@@ -1002,24 +1155,26 @@ fn restore_original(
         // Проверяем, активна ли уже (например, браковка могла не менять схему).
         let active_guid = driver
             .list_schemes()
-            .map_err(|e| SessionError::Config(e))?
+            .map_err(SessionError::Config)?
             .into_iter()
             .find(|s| s.active)
             .map(|s| s.guid);
         if active_guid.as_deref() != Some(original.as_str()) {
             driver
                 .set_active(&original)
-                .map_err(|cause| SessionError::RestoreScheme(cause))?;
+                .map_err(SessionError::RestoreScheme)?;
         }
-        note(observer, events, SessionEvent::Restored {
-            scheme_id: original.clone(),
-            label: "после теста".to_string(),
-        });
+        note(
+            observer,
+            events,
+            SessionEvent::Restored {
+                scheme_id: original.clone(),
+                label: "после теста".to_string(),
+            },
+        );
     }
     checkpoint.original_restored = true;
-    store
-        .save(checkpoint)
-        .map_err(|e| SessionError::Persist(e))?;
+    store.save(checkpoint).map_err(SessionError::Persist)?;
     Ok(())
 }
 
@@ -1050,9 +1205,7 @@ fn build_stored_run(
         key: run.key.clone(),
         round: run.round,
         scheme_id: run.scheme_id.clone(),
-        scheme_name: name_map
-            .get(&run.scheme_id.to_ascii_lowercase())
-            .cloned(),
+        scheme_name: name_map.get(&run.scheme_id.to_ascii_lowercase()).cloned(),
         started_at_ns: run.started_at_ns,
         duration_ms: run.duration_ms,
         ticks: run.ticks,
@@ -1075,12 +1228,19 @@ fn build_stored_run(
     }
 }
 
+/// Итог агрегации: агрегаты по схемам, карта «guid → имя», рекомендация.
+type AggregationOutcome = (
+    Vec<(String, AggregateResult)>,
+    BTreeMap<String, String>,
+    Option<Recommendation>,
+);
+
 /// Агрегация по схемам и формирование рекомендации.
 fn build_aggregation(
     checkpoint: &Checkpoint,
     signature: &CompatibilitySignature,
     expected_runs: usize,
-) -> (Vec<(String, AggregateResult)>, BTreeMap<String, String>, Option<Recommendation>) {
+) -> AggregationOutcome {
     let mut rejection_reasons = BTreeMap::new();
     let mut aggregates: Vec<(String, AggregateResult)> = Vec::new();
     let mut items: Vec<SchemeAggregate> = Vec::new();
@@ -1089,7 +1249,10 @@ fn build_aggregation(
     // Схемы, отсутствующие в плане, но имеющие прогоны, добавляем в конец
     // (поиск по guid, регистронезависимый; имена не участвуют).
     for run in &checkpoint.runs {
-        if !scheme_ids.iter().any(|s| s.eq_ignore_ascii_case(&run.scheme_id)) {
+        if !scheme_ids
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(&run.scheme_id))
+        {
             scheme_ids.push(run.scheme_id.clone());
         }
     }
@@ -1168,7 +1331,9 @@ fn build_aggregation(
             .map(|r| RunCompact::from_stats(&r.combined))
             .collect();
         let first_det = DeterminismSignature::new(
-            runs.first().map(|r| r.first_tick_checksums.to_vec()).unwrap_or_default(),
+            runs.first()
+                .map(|r| r.first_tick_checksums.to_vec())
+                .unwrap_or_default(),
         );
         items.push(SchemeAggregate {
             scheme_id: scheme_id.clone(),
@@ -1267,14 +1432,19 @@ mod tests {
             }
         }
         let seen: Arc<Mutex<Vec<SessionEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let obs: Option<Arc<dyn TelemetryObserver>> =
-            Some(Arc::new(Probe { received: Arc::clone(&seen) }));
+        let obs: Option<Arc<dyn TelemetryObserver>> = Some(Arc::new(Probe {
+            received: Arc::clone(&seen),
+        }));
         let mut events = Vec::new();
-        note(&obs, &mut events, SessionEvent::Started {
-            plan_guid: "g".to_string(),
-            rounds: 1,
-            schemes: 1,
-        });
+        note(
+            &obs,
+            &mut events,
+            SessionEvent::Started {
+                plan_guid: "g".to_string(),
+                rounds: 1,
+                schemes: 1,
+            },
+        );
         assert_eq!(events.len(), 1);
         assert_eq!(seen.lock().unwrap().len(), 1);
         note(&None, &mut events, SessionEvent::Finished);
@@ -1296,8 +1466,9 @@ mod tests {
         let monitor_map: Arc<Mutex<BTreeMap<u64, Vec<ProcessSample>>>> =
             Arc::new(Mutex::new(BTreeMap::new()));
         let recorded: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
-        let obs: Option<Arc<dyn TelemetryObserver>> =
-            Some(Arc::new(TickRecorder { ticks: Arc::clone(&recorded) }));
+        let obs: Option<Arc<dyn TelemetryObserver>> = Some(Arc::new(TickRecorder {
+            ticks: Arc::clone(&recorded),
+        }));
         let result = run_measured_phase(
             &mut engine,
             Arc::new(AtomicBool::new(false)),

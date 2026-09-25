@@ -9,15 +9,22 @@ pub struct XorShift64 {
 const MULTIPLIER: u64 = 0x2545F4914F6CDD1D;
 
 impl XorShift64 {
-    /// Создать генератор от заданного seed.
+    /// Создать генератор от заданного seed. Нулевое состояние залипает
+    /// (xorshift из нуля всегда даёт ноль) — отображаем в фиксированное.
     #[inline]
     pub fn new(state: u64) -> Self {
-        Self { state }
+        Self {
+            state: if state == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                state
+            },
+        }
     }
 
     /// Следующее 64-битное значение.
     #[inline]
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.state ^= self.state >> 12;
         self.state ^= self.state << 25;
         self.state ^= self.state >> 27;
@@ -58,7 +65,7 @@ mod tests {
         let _g = crate::tests::lock();
         for v in [0u64, 1, 0xFFFF_FFFF_FFFF_FFFF, u64::MAX] {
             let s = unit_signed(v);
-            assert!(s >= -1.0 && s < 1.0, "unit_signed({v:#x}) = {s}");
+            assert!((-1.0..1.0).contains(&s), "unit_signed({v:#x}) = {s}");
         }
     }
 
@@ -68,7 +75,7 @@ mod tests {
         for p in [-2.0, -1.1, -1.0, -0.5, 0.0, 0.5, 1.0, 1.1, 1.99, -1.99] {
             let w = wrap_position(p);
             assert!(
-                w >= -1.0 && w <= 1.0,
+                (-1.0..=1.0).contains(&w),
                 "wrap({p}) = {w} (одношаговый перенос, как в спецификации)"
             );
         }
@@ -85,7 +92,7 @@ mod tests {
         let mut a = XorShift64::new(0xC52A202600000001);
         let mut b = XorShift64::new(0xC52A202600000001);
         for _ in 0..1000 {
-            assert_eq!(a.next(), b.next());
+            assert_eq!(a.next_u64(), b.next_u64());
         }
     }
 }

@@ -125,9 +125,7 @@ pub fn build_session_report(s: &SessionJson) -> String {
         format!("рекомендована <b>{rec_name}</b>", rec_name = winner_name)
     } else {
         match rec.level.as_str() {
-            "Equivalent" => {
-                "схемы эквивалентны — значимых различий не выявлено".to_string()
-            }
+            "Equivalent" => "схемы эквивалентны — значимых различий не выявлено".to_string(),
             "KeepCurrent" => "оставить текущую схему".to_string(),
             _ => "данных недостаточно для рекомендации".to_string(),
         }
@@ -140,7 +138,11 @@ pub fn build_session_report(s: &SessionJson) -> String {
                 "<span class=\"badge err\">{0}</span>",
                 esc(sch.rejection_reason.as_deref().unwrap_or("забракована"))
             )
-        } else if has_winner && winner.map(|w| w.scheme_id == sch.scheme_id).unwrap_or(false) {
+        } else if has_winner
+            && winner
+                .map(|w| w.scheme_id == sch.scheme_id)
+                .unwrap_or(false)
+        {
             "<span class=\"badge ok\">рекомендована</span>".to_string()
         } else {
             "<span class=\"badge acc\">допущена</span>".to_string()
@@ -234,7 +236,7 @@ fn render_header(sessions: &[&SessionJson]) -> String {
             }
         }
     }
-let sum_html = if by_scheme.is_empty() {
+    let sum_html = if by_scheme.is_empty() {
         "<div class=\"note\">Нет данных по схемам — завершите первую сессию.</div>".to_string()
     } else {
         let cards: String = by_scheme
@@ -384,7 +386,7 @@ fn render_chart(sessions: &[&SessionJson]) -> String {
                 color
             ));
         }
-// Легенда с цветом серии выводится отдельно; точки — с подписью.
+        // Легенда с цветом серии выводится отдельно; точки — с подписью.
         for (col, score) in pts {
             let label = esc(&short_date(sessions[*col]));
             shapes.push_str(&format!(
@@ -420,10 +422,15 @@ fn render_sessions(sessions: &[&SessionJson]) -> String {
             .and_then(|b| b.name.clone().or(Some(b.scheme_id.clone())))
             .unwrap_or_default();
         let score = best
-            .and_then(|b| (b.median_throughput.is_finite() && b.median_throughput > 0.0).then_some(b.median_throughput))
+            .and_then(|b| {
+                (b.median_throughput.is_finite() && b.median_throughput > 0.0)
+                    .then_some(b.median_throughput)
+            })
             .unwrap_or(f64::NAN);
         let stability = best
-            .and_then(|b| (b.median_consistency_percent.is_finite()).then_some(b.median_consistency_percent))
+            .and_then(|b| {
+                (b.median_consistency_percent.is_finite()).then_some(b.median_consistency_percent)
+            })
             .unwrap_or(f64::NAN);
         let lvl = &s.recommendation;
         let detail = scheme_detail_block(s, &stamp);
@@ -440,7 +447,7 @@ fn render_sessions(sessions: &[&SessionJson]) -> String {
             detail = detail,
         ));
     }
-format!(
+    format!(
         "<h2>Сессии ({n})</h2><table><thead><tr><th>Дата (UTC)</th><th>Лучшая схема</th>\
          <th class=\"num\">Медиана, тик/с</th><th class=\"num\">Стабильность</th><th>Уровень</th></tr></thead>\
          <tbody>{rows}</tbody></table>",
@@ -461,9 +468,15 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
     let has_winner = !tie && winner.is_some();
     for sch in &s.schemes {
         let status = if sch.rejected {
-            format!("<span class=\"badge err\">{0}</span>", esc(sch.rejection_reason.as_deref().unwrap_or("забракована")))
+            format!(
+                "<span class=\"badge err\">{0}</span>",
+                esc(sch.rejection_reason.as_deref().unwrap_or("забракована"))
+            )
         } else {
-            let is_win = has_winner && winner.map(|w| w.scheme_id == sch.scheme_id).unwrap_or(false);
+            let is_win = has_winner
+                && winner
+                    .map(|w| w.scheme_id == sch.scheme_id)
+                    .unwrap_or(false);
             if is_win {
                 "<span class=\"badge ok\">рекомендована</span>".to_string()
             } else {
@@ -471,7 +484,7 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
             }
         };
         let name = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
-sch_rows.push_str(&format!(
+        sch_rows.push_str(&format!(
             "<tr><td>{name}</td><td class=\"num\">{runs}</td><td class=\"num\">{median}</td>\
              <td class=\"num\">{cv}</td><td class=\"num\">{cons}</td><td class=\"num\">{worst}</td>\
              <td class=\"num\">{purity}</td><td class=\"num\">{mean}</td><td>{status}</td></tr>",
@@ -492,7 +505,10 @@ sch_rows.push_str(&format!(
     let winner_name = winner
         .map(|w| esc(&w.name.clone().unwrap_or_else(|| w.scheme_id.clone())))
         .unwrap_or_else(|| "—".to_string());
-    let margin = rec.expected_margin_percent.map(f2).unwrap_or_else(|| "—".to_string());
+    let margin = rec
+        .expected_margin_percent
+        .map(f2)
+        .unwrap_or_else(|| "—".to_string());
     let pbest = rec.probabilities.map(|p| p[0]).unwrap_or(f64::NAN);
     let pgt0 = rec.probabilities.map(|p| p[1]).unwrap_or(f64::NAN);
     let pgt1 = rec.probabilities.map(|p| p[2]).unwrap_or(f64::NAN);
@@ -504,7 +520,9 @@ sch_rows.push_str(&format!(
         prob_bar("P(перевес > 1%)", &pct_str(pgt1)),
     );
     let mode_line = match (&rec.bootstrap_mode, &rec.tie_criterion) {
-        (Some(mode), Some(tie)) if tie != "None" => format!("bootstrap: {} · ничья: {}", esc(mode), esc(tie)),
+        (Some(mode), Some(tie)) if tie != "None" => {
+            format!("bootstrap: {} · ничья: {}", esc(mode), esc(tie))
+        }
         (Some(mode), _) => format!("bootstrap: {}", esc(mode)),
         _ => String::new(),
     };
@@ -514,18 +532,23 @@ sch_rows.push_str(&format!(
         format!("<div class=\"note\">{mode_line}</div>")
     };
 
-let rec_line = if has_winner {
-        format!("Рекомендована: <b>{winner_name}</b> · перевес {margin}% · {lvl_label}",
+    let rec_line = if has_winner {
+        format!(
+            "Рекомендована: <b>{winner_name}</b> · перевес {margin}% · {lvl_label}",
             winner_name = winner_name,
             margin = margin,
-            lvl_label = esc(&rec.level_label))
+            lvl_label = esc(&rec.level_label)
+        )
     } else {
         let verb = match rec.level.as_str() {
             "Equivalent" => "схемы эквивалентны — значимых различий не выявлено",
             "KeepCurrent" => "оставить текущую схему",
             _ => "данных недостаточно для рекомендации",
         };
-        format!("Вердикт: {verb} · {lvl_label}", lvl_label = esc(&rec.level_label))
+        format!(
+            "Вердикт: {verb} · {lvl_label}",
+            lvl_label = esc(&rec.level_label)
+        )
     };
 
     format!(
@@ -713,15 +736,24 @@ fn lvl_class(level: &str) -> &'static str {
 
 /// Лучшая (незабракованная) схема сессии по median throughput.
 fn best_scheme(s: &SessionJson) -> Option<&crate::result::SchemeJson> {
-    let accepted: Vec<&crate::result::SchemeJson> = s.schemes.iter().filter(|x| !x.rejected).collect();
+    let accepted: Vec<&crate::result::SchemeJson> =
+        s.schemes.iter().filter(|x| !x.rejected).collect();
     let pool: Vec<&crate::result::SchemeJson> = if accepted.is_empty() {
         s.schemes.iter().collect()
     } else {
         accepted
     };
     pool.into_iter().max_by(|a, b| {
-        let av = if a.median_throughput.is_finite() { a.median_throughput } else { f64::MIN };
-        let bv = if b.median_throughput.is_finite() { b.median_throughput } else { f64::MIN };
+        let av = if a.median_throughput.is_finite() {
+            a.median_throughput
+        } else {
+            f64::MIN
+        };
+        let bv = if b.median_throughput.is_finite() {
+            b.median_throughput
+        } else {
+            f64::MIN
+        };
         av.total_cmp(&bv)
     })
 }
@@ -730,9 +762,20 @@ fn periods(sessions: &[&SessionJson]) -> (String, String) {
     if sessions.is_empty() {
         return ("—".to_string(), "—".to_string());
     }
-    let min = sessions.iter().filter_map(|s| session_started_at_ns(s)).min().unwrap_or(0);
-    let max = sessions.iter().filter_map(|s| session_started_at_ns(s)).max().unwrap_or(0);
-    (date_slice(&date_time_stamp(min), 6, 8), date_slice(&date_time_stamp(max), 6, 8))
+    let min = sessions
+        .iter()
+        .filter_map(|s| session_started_at_ns(s))
+        .min()
+        .unwrap_or(0);
+    let max = sessions
+        .iter()
+        .filter_map(|s| session_started_at_ns(s))
+        .max()
+        .unwrap_or(0);
+    (
+        date_slice(&date_time_stamp(min), 6, 8),
+        date_slice(&date_time_stamp(max), 6, 8),
+    )
 }
 
 /// `дд.мм.гггг` из UTC-метки `YYYYMMDDTHHMMSSZ###`.
@@ -773,7 +816,7 @@ fn now_unix_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::{save_result_in, RESULTS_DIR_NAME};
+    use crate::history::{RESULTS_DIR_NAME, save_result_in};
     use crate::result::{IdentityJson, RecommendationJson, SchemeJson};
 
     fn sample_session(id: &str, median: f64) -> SessionJson {
@@ -811,7 +854,7 @@ mod tests {
                 bootstrap_mode: Some("PairedByRun".into()),
                 tie_criterion: Some("None".into()),
             },
-warnings: Vec::new(),
+            warnings: Vec::new(),
             rounds_planned: 3,
             rounds_completed: 3,
             early_stop_reason: None,

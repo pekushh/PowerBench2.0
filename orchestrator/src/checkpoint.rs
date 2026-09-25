@@ -45,7 +45,9 @@ impl Checkpoint {
 
     /// Ключ раунда выполнен? Сравнение ординарное, регистронезависимое.
     pub fn is_completed(&self, key: &str) -> bool {
-        self.completed_keys.iter().any(|k| k.eq_ignore_ascii_case(key))
+        self.completed_keys
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(key))
     }
 
     /// Схема забракована? Сравнение по guid, регистронезависимое.
@@ -147,7 +149,11 @@ impl StoredRun {
         let mut stats = self.combined;
         stats.consistency_percent = self.cross_phase_consistency;
         let background_purity = {
-            let correlated: f64 = self.background.iter().map(|p| p.correlated_spike_windows as f64).sum();
+            let correlated: f64 = self
+                .background
+                .iter()
+                .map(|p| p.correlated_spike_windows as f64)
+                .sum();
             let total = self.spike_windows as f64;
             if total > 0.0 {
                 Some((1.0 - (correlated / total).min(1.0)) * 100.0)
@@ -180,10 +186,18 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::{
-            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
         };
-        let from = tmp.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
-        let to = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let from = tmp
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+        let to = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
         let ok = unsafe {
             MoveFileExW(
                 from.as_ptr(),
@@ -242,9 +256,18 @@ mod tests {
             first_tick_checksums: [1, 2, 3],
             run_checksums: [4, 5, 6],
             phases: vec![
-                PhaseStats { phase_index: 0, stats: stats(10, 1.0) },
-                PhaseStats { phase_index: 1, stats: stats(10, 1.0) },
-                PhaseStats { phase_index: 2, stats: stats(10, 1.0) },
+                PhaseStats {
+                    phase_index: 0,
+                    stats: stats(10, 1.0),
+                },
+                PhaseStats {
+                    phase_index: 1,
+                    stats: stats(10, 1.0),
+                },
+                PhaseStats {
+                    phase_index: 2,
+                    stats: stats(10, 1.0),
+                },
             ],
             combined: stats(30, 1.0),
             cross_phase_consistency: 99.0,
@@ -278,7 +301,10 @@ mod tests {
         assert!(!cp.is_rejected("s1"));
         assert!(!cp.has_run(0, "s1"));
         cp.completed_keys.push("0:g1".to_string());
-        cp.rejections.insert("s9".to_string(), "нет прогресса более 30 секунд".to_string());
+        cp.rejections.insert(
+            "s9".to_string(),
+            "нет прогресса более 30 секунд".to_string(),
+        );
         cp.runs.push(run("0:g1"));
         assert!(cp.is_completed("0:g1"));
         assert!(cp.is_rejected("s9"));
@@ -290,7 +316,10 @@ mod tests {
         assert!(cp.has_run(0, "s1"));
         assert!(cp.has_run(0, "S1"));
         assert!(!cp.has_run(1, "s1"));
-        assert_eq!(cp.rejection_reason("S9").map(String::as_str), Some("нет прогресса более 30 секунд"));
+        assert_eq!(
+            cp.rejection_reason("S9").map(String::as_str),
+            Some("нет прогресса более 30 секунд")
+        );
         assert_eq!(cp.rejection_reason("s1"), None);
         // Имя схемы — только отображение, не участвует в матчинге.
         assert!(cp.has_run(0, "S1"));

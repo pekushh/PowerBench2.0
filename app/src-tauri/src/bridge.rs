@@ -5,9 +5,11 @@ use std::sync::{Arc, Mutex};
 
 use powerbench_core::engine::Engine;
 use powerbench_orchestrator::appsettings::{self, AppSettings};
-use powerbench_orchestrator::checkpoint::{load_checkpoint, Checkpoint};
-use powerbench_orchestrator::config::{validate_config, SessionConfig};
-use powerbench_orchestrator::history::{self, export_csv_to, export_json, list_results, load_result};
+use powerbench_orchestrator::checkpoint::{Checkpoint, load_checkpoint};
+use powerbench_orchestrator::config::{SessionConfig, validate_config};
+use powerbench_orchestrator::history::{
+    self, export_csv_to, export_json, list_results, load_result,
+};
 use powerbench_orchestrator::report::build_report;
 use powerbench_orchestrator::result::{SchemeJson, SessionJson};
 use powerbench_windows::disk;
@@ -33,7 +35,11 @@ pub struct SchemeRow {
 pub fn scheme_rows(schemes: &[PowerScheme]) -> Vec<SchemeRow> {
     schemes
         .iter()
-        .map(|s| SchemeRow { guid: s.guid.clone(), name: s.name.clone(), active: s.active })
+        .map(|s| SchemeRow {
+            guid: s.guid.clone(),
+            name: s.name.clone(),
+            active: s.active,
+        })
         .collect()
 }
 
@@ -51,7 +57,9 @@ pub struct TestRequestDto {
     /// Продолжить текущую контрольную точку (план берётся из неё).
     pub resume: bool,
     /// Сохранять сырые выборки в результат сессии (новый UI).
+    /// Поле контракта API: читается внешним фронтендом, бэкенд пока игнорирует.
     #[serde(default)]
+    #[allow(dead_code)]
     pub export_raw_samples: bool,
 }
 
@@ -65,8 +73,9 @@ fn preset_of(name: &str) -> Option<powerbench_orchestrator::config::Preset> {
 
 fn build_plan(req: &TestRequestDto) -> Result<SessionConfig, String> {
     if req.resume {
-        let cp = load_checkpoint()
-            .ok_or_else(|| "нет сохранённой контрольной точки (запустите тест сначала)".to_string())?;
+        let cp = load_checkpoint().ok_or_else(|| {
+            "нет сохранённой контрольной точки (запустите тест сначала)".to_string()
+        })?;
         return Ok(cp.plan);
     }
     let p = match preset_of(&req.preset) {
@@ -98,7 +107,9 @@ fn build_plan(req: &TestRequestDto) -> Result<SessionConfig, String> {
 
 #[tauri::command]
 pub fn list_schemes() -> Result<Vec<SchemeRow>, String> {
-    powercfg::list_schemes().map(|s| scheme_rows(&s)).map_err(|e| e.message)
+    powercfg::list_schemes()
+        .map(|s| scheme_rows(&s))
+        .map_err(|e| e.message)
 }
 
 #[tauri::command]
@@ -113,7 +124,11 @@ pub fn ac_power_online() -> Result<bool, String> {
 
 /// Действия со схемой питания.
 #[tauri::command]
-pub fn scheme_action(action: String, guid: Option<String>, path: Option<String>) -> Result<Option<String>, String> {
+pub fn scheme_action(
+    action: String,
+    guid: Option<String>,
+    path: Option<String>,
+) -> Result<Option<String>, String> {
     match action.as_str() {
         "activate" => {
             let g = guid.ok_or_else(|| "activate требует guid".to_string())?;
@@ -129,11 +144,13 @@ pub fn scheme_action(action: String, guid: Option<String>, path: Option<String>)
         }
         "import" => {
             let p = path.ok_or_else(|| "import требует путь к .pow".to_string())?;
-            powercfg::import(std::path::Path::new(&p)).map(Some).map_err(|e| e.message)
+            powercfg::import(std::path::Path::new(&p))
+                .map(Some)
+                .map_err(|e| e.message)
         }
-        "restore_defaults" => {
-            powercfg::restore_defaults().map(|_| None).map_err(|e| e.message)
-        }
+        "restore_defaults" => powercfg::restore_defaults()
+            .map(|_| None)
+            .map_err(|e| e.message),
         other => Err(format!("неизвестное действие «{other}»")),
     }
 }
@@ -189,7 +206,8 @@ pub fn set_settings(mut settings: SettingsDto) -> Result<(), String> {
     s.favorite_schemes = std::mem::take(&mut settings.favorite_schemes);
     s.excluded_schemes = std::mem::take(&mut settings.excluded_schemes);
     s.benchmark.background_threshold_percent = settings.background_threshold_percent;
-    s.save().map_err(|e| format!("не удалось сохранить настройки: {e}"))
+    s.save()
+        .map_err(|e| format!("не удалось сохранить настройки: {e}"))
 }
 
 #[derive(serde::Serialize)]
@@ -234,10 +252,20 @@ pub fn identity_info() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn start_test(app: tauri::AppHandle, state: tauri::State<'_, AppState>, req: TestRequestDto) -> Result<String, String> {
+pub fn start_test(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    req: TestRequestDto,
+) -> Result<String, String> {
     let plan = build_plan(&req)?;
-    state.log.append("info", &format!("запуск сессии: план {}", plan.plan_guid));
-    runner::emit_log(&app, "info", &format!("запуск сессии: план {}", plan.plan_guid));
+    state
+        .log
+        .append("info", &format!("запуск сессии: план {}", plan.plan_guid));
+    runner::emit_log(
+        &app,
+        "info",
+        &format!("запуск сессии: план {}", plan.plan_guid),
+    );
     runner::start(&app, &state.runner, plan)
 }
 
@@ -245,7 +273,11 @@ pub fn start_test(app: tauri::AppHandle, state: tauri::State<'_, AppState>, req:
 pub fn stop_test(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let running = runner::running(&state.runner);
     let level = if running { "info" } else { "warn" };
-    let text = if running { "запрос остановки сессии" } else { "сессия не выполняется" };
+    let text = if running {
+        "запрос остановки сессии"
+    } else {
+        "сессия не выполняется"
+    };
     state.log.append(level, text);
     runner::emit_log(&app, level, text);
     Ok(runner::stop(&state.runner))
@@ -289,8 +321,14 @@ pub struct HistoryRow {
 /// Лучшая схема сессии для лида строки: рекомендованная, иначе лучшая
 /// среди допущенных, иначе первая из схем.
 fn best_scheme(s: &SessionJson) -> Option<&SchemeJson> {
+    // MSRV 1.85: схлопывание через let-цепочки требует Rust 1.88+.
+    #[allow(clippy::collapsible_if)]
     if let Some(g) = s.recommendation.recommended_scheme.as_deref() {
-        if let Some(sch) = s.schemes.iter().find(|x| x.scheme_id.eq_ignore_ascii_case(g)) {
+        if let Some(sch) = s
+            .schemes
+            .iter()
+            .find(|x| x.scheme_id.eq_ignore_ascii_case(g))
+        {
             return Some(sch);
         }
     }
@@ -375,7 +413,7 @@ fn handled_history_rows() -> Result<Vec<HistoryRow>, String> {
                 level: String::new(),
                 level_label: String::new(),
                 readable: false,
-                error: Some(format!("{e}")),
+                error: Some(e.to_string()),
                 scheme_name: String::new(),
                 score: None,
                 margin: None,
@@ -427,7 +465,11 @@ pub fn history_open(plan_guid: String) -> Result<SessionJson, String> {
 /// Экспорт одной записи или всей истории в выбранный пользователем каталог.
 /// Возвращает пути записанных файлов.
 #[tauri::command]
-pub fn history_export_to(plan_guid: String, format: String, out_dir: String) -> Result<Vec<String>, String> {
+pub fn history_export_to(
+    plan_guid: String,
+    format: String,
+    out_dir: String,
+) -> Result<Vec<String>, String> {
     let format = if format == "csv" { "csv" } else { "json" };
     if format == "json" || format == "csv" {
         // допустимо
@@ -460,14 +502,19 @@ pub fn history_export_to(plan_guid: String, format: String, out_dir: String) -> 
         };
         match r {
             Ok(()) => written.push(file.display().to_string()),
-            Err(e) => last_error = Some(format!("не удалось экспортировать «{}»: {e}", file.display())),
+            Err(e) => {
+                last_error = Some(format!(
+                    "не удалось экспортировать «{}»: {e}",
+                    file.display()
+                ))
+            }
         }
     }
-    if !skipped.is_empty() {
-        if last_error.is_none() {
-            last_error = Some(format!("некоторые записи пропущены:\n{skipped}"));
-        }
+    if !skipped.is_empty() && last_error.is_none() {
+        last_error = Some(format!("некоторые записи пропущены:\n{skipped}"));
     }
+    // MSRV 1.85: схлопывание через let-цепочки требует Rust 1.88+.
+    #[allow(clippy::collapsible_if)]
     if let Some(e) = last_error {
         if written.is_empty() {
             return Err(e);
@@ -522,8 +569,7 @@ pub fn history_delete(file_name: String) -> Result<(), String> {
     if !canon.starts_with(&canon_dir) {
         return Err("недопустимое имя файла".to_string());
     }
-    std::fs::remove_file(&canon)
-        .map_err(|e| format!("не удалось удалить «{file_name}»: {e}"))
+    std::fs::remove_file(&canon).map_err(|e| format!("не удалось удалить «{file_name}»: {e}"))
 }
 
 /// Сведения о доступном месте и размере истории.
@@ -601,48 +647,15 @@ pub struct Readiness {
 
 #[tauri::command]
 pub fn system_ready(requested_schemes: Option<u32>) -> Readiness {
-    let requested = requested_schemes.unwrap_or(2).max(1);
-    let mut issues: Vec<String> = Vec::new();
-
-    match powercfg::list_schemes() {
-        Ok(s) => {
-            let available: Vec<&PowerScheme> = s.iter().filter(|x| !x.name.is_empty()).collect();
-            if available.len() < requested as usize {
-                issues.push(format!(
-                    "доступно только {} схем питания, а для теста нужно не менее {}",
-                    available.len(),
-                    requested
-                ));
-            } else if available.is_empty() {
-                issues.push("не найдено ни одной схемы питания".to_string());
-            }
-        }
-        Err(e) => issues.push(format!("не удалось получить список схем: {}", e.message)),
+    // Единая реализация — в orchestrator::diagnostics (там же юнит-тесты).
+    let report = powerbench_orchestrator::diagnostics::system_ready(
+        &powerbench_orchestrator::session::RealSchemeDriver,
+        requested_schemes.unwrap_or(2).max(1) as usize,
+    );
+    Readiness {
+        ok: report.ok,
+        issues: report.issues,
     }
-
-    match power::ac_power_online() {
-        Ok(true) => {}
-        Ok(false) => issues.push("ноутбук работает от аккумулятора — тест требует сети 220 В".to_string()),
-        Err(e) => issues.push(format!("не удалось проверить питание: {e:?}")),
-    }
-
-    let dir = history::results_dir();
-    match disk::free_space_bytes(&dir) {
-        Ok(free) if free < 250 * 1024 * 1024 => {
-            issues.push(format!(
-                "мало свободного места на диске: {}",
-                disk::format_bytes(free)
-            ));
-        }
-        Ok(_) => {}
-        Err(e) => issues.push(format!("не удалось проверить диск: {e}")),
-    }
-
-    if !power::is_admin() {
-        issues.push("запустите PowerBench от имени администратора для переключения схем".to_string());
-    }
-
-    Readiness { ok: issues.is_empty(), issues }
 }
 
 // --- Вспомогательные ---
@@ -650,6 +663,8 @@ pub fn system_ready(requested_schemes: Option<u32>) -> Readiness {
 fn find_session(plan_guid: &str) -> Result<SessionJson, String> {
     let entries = list_results().map_err(|e| format!("не удалось прочитать историю: {e}"))?;
     for entry in entries {
+        // MSRV 1.85: схлопывание через let-цепочки требует Rust 1.88+.
+        #[allow(clippy::collapsible_if)]
         if let Ok(s) = load_result(&entry.path) {
             if s.plan_guid.eq_ignore_ascii_case(plan_guid) {
                 return Ok(s);

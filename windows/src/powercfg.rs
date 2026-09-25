@@ -86,17 +86,24 @@ pub fn parse_scheme_line(line: &str) -> Option<PowerScheme> {
 
 /// Выполнить powercfg с аргументами; вернуть перекодированный вывод.
 fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError> {
-    let output = Command::new("powercfg")
-        .args(args)
-        .output()
-        .map_err(|e| PowerCfgError::new(operation, format!("не удалось запустить powercfg: {e}")))?;
+    let output = Command::new("powercfg").args(args).output().map_err(|e| {
+        PowerCfgError::new(operation, format!("не удалось запустить powercfg: {e}"))
+    })?;
     let stdout = decode_oem(&output.stdout);
     if !output.status.success() {
         let stderr = decode_oem(&output.stderr);
-        let detail = if stderr.trim().is_empty() { stdout } else { stderr };
+        let detail = if stderr.trim().is_empty() {
+            stdout
+        } else {
+            stderr
+        };
         return Err(PowerCfgError::new(
             operation,
-            format!("код возврата {}: {}", output.status.code().unwrap_or(-1), detail.trim()),
+            format!(
+                "код возврата {}: {}",
+                output.status.code().unwrap_or(-1),
+                detail.trim()
+            ),
         ));
     }
     Ok(stdout)
@@ -124,12 +131,16 @@ pub fn duplicate(guid: &str) -> Result<String, PowerCfgError> {
         uuids.push(&rest[r.clone()]);
         rest = &rest[r.end..];
     }
+    let want = guid.to_ascii_lowercase();
     let new_guid = uuids
         .iter()
-        .find(|u| **u != guid.to_ascii_lowercase())
+        .find(|u| u.to_ascii_lowercase() != want)
         .or_else(|| uuids.first());
     new_guid.map(|u| u.to_ascii_lowercase()).ok_or_else(|| {
-        PowerCfgError::new("duplicatescheme", "в выводе powercfg не найден GUID новой схемы")
+        PowerCfgError::new(
+            "duplicatescheme",
+            "в выводе powercfg не найден GUID новой схемы",
+        )
     })
 }
 
@@ -141,9 +152,9 @@ pub fn delete(guid: &str) -> Result<(), PowerCfgError> {
 
 /// Импортировать схему из файла `.pow`; возвращает GUID импортированной схемы.
 pub fn import(path: &Path) -> Result<String, PowerCfgError> {
-    let arg = path.to_str().ok_or_else(|| {
-        PowerCfgError::new("import", "путь к .pow имеет неверную кодировку")
-    })?;
+    let arg = path
+        .to_str()
+        .ok_or_else(|| PowerCfgError::new("import", "путь к .pow имеет неверную кодировку"))?;
     let stdout = run_powercfg("import", &["/import", arg])?;
     match find_uuid(&stdout) {
         Some(r) => Ok(stdout[r].to_ascii_lowercase()),
@@ -167,14 +178,16 @@ mod tests {
     #[test]
     fn parse_scheme_line_extracts_guid_name_and_active() {
         // Русская локаль: необязательная метка активности в конце строки.
-        let ru_active = "GUID схемы питания: 381b4222-f694-41f0-9685-ff5bb260df2e  (Сбалансированная) *";
+        let ru_active =
+            "GUID схемы питания: 381b4222-f694-41f0-9685-ff5bb260df2e  (Сбалансированная) *";
         let s = parse_scheme_line(ru_active).unwrap();
         assert_eq!(s.guid, "381b4222-f694-41f0-9685-ff5bb260df2e");
         assert_eq!(s.name, "Сбалансированная");
         assert!(s.active);
 
         // Английская локаль: «(Balanced)» без звёздочки.
-        let en = parse_scheme_line("GUID scheme: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)").unwrap();
+        let en = parse_scheme_line("GUID scheme: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)")
+            .unwrap();
         assert_eq!(en.name, "Balanced");
         assert!(!en.active);
     }

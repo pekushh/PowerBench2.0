@@ -5,7 +5,7 @@
 //! (производительность, стабильность, худшая секунда). Нормировка — «лучшая
 //! среди допущенных = 100» по каждой метрике; отвергнутые схему получают 0.
 
-use crate::result::{default_score_weights, SchemeJson};
+use crate::result::{SchemeJson, default_score_weights};
 
 /// Веса скоринга (производительность / стабильность / худшая секунда, %).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -135,10 +135,11 @@ pub fn score_schemes(schemes: &[SchemeJson], weights: &ScoreWeights) -> Vec<Sche
 
 /// Балл лидера среди допущенных (None — нет ни одного допущенного).
 pub fn score_leader(scores: &[SchemeScore]) -> Option<&SchemeScore> {
-    scores
-        .iter()
-        .filter(|s| !s.rejected)
-        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+    scores.iter().filter(|s| !s.rejected).max_by(|a, b| {
+        a.score
+            .partial_cmp(&b.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
 }
 
 #[cfg(test)]
@@ -178,7 +179,10 @@ mod tests {
 
     #[test]
     fn equal_schemes_get_equal_50_scores_by_default_weights() {
-        let schemes = vec![scheme("a", false, 100.0, 50.0, 40.0), scheme("b", false, 100.0, 50.0, 40.0)];
+        let schemes = vec![
+            scheme("a", false, 100.0, 50.0, 40.0),
+            scheme("b", false, 100.0, 50.0, 40.0),
+        ];
         let scores = score_schemes(&schemes, &ScoreWeights::default());
         assert_eq!(scores.len(), 2);
         // Обе схемы лучшие по всем метрикам → 100, никаких перекосов в весах.
@@ -210,17 +214,23 @@ mod tests {
             scheme("a", false, 300.0, 40.0, 40.0),
             scheme("b", false, 150.0, 100.0, 40.0),
         ];
-        let perf_only = score_schemes(&schemes, &ScoreWeights {
-            performance: 100.0,
-            stability: 0.0,
-            worst_second: 0.0,
-        });
+        let perf_only = score_schemes(
+            &schemes,
+            &ScoreWeights {
+                performance: 100.0,
+                stability: 0.0,
+                worst_second: 0.0,
+            },
+        );
         assert!(perf_only[0].score > perf_only[1].score);
-        let stab_only = score_schemes(&schemes, &ScoreWeights {
-            performance: 0.0,
-            stability: 100.0,
-            worst_second: 0.0,
-        });
+        let stab_only = score_schemes(
+            &schemes,
+            &ScoreWeights {
+                performance: 0.0,
+                stability: 100.0,
+                worst_second: 0.0,
+            },
+        );
         assert!(stab_only[1].score > stab_only[0].score);
     }
 
@@ -232,13 +242,22 @@ mod tests {
             scheme("b", true, 300.0, 100.0, 200.0),
         ];
         let scores = score_schemes(&schemes, &ScoreWeights::default());
-        assert_eq!(scores[0].score, 100.0, "базовая линия — единственная допущенная");
-        assert_eq!(scores[1].score, 0.0, "отвергнутая — 0, в нормировке не участвует");
+        assert_eq!(
+            scores[0].score, 100.0,
+            "базовая линия — единственная допущенная"
+        );
+        assert_eq!(
+            scores[1].score, 0.0,
+            "отвергнутая — 0, в нормировке не участвует"
+        );
     }
 
     #[test]
     fn degenerate_weights_fall_back_to_defaults() {
-        let schemes = vec![scheme("a", false, 100.0, 50.0, 40.0), scheme("b", false, 50.0, 100.0, 40.0)];
+        let schemes = vec![
+            scheme("a", false, 100.0, 50.0, 40.0),
+            scheme("b", false, 50.0, 100.0, 40.0),
+        ];
         let weights = ScoreWeights {
             performance: 0.0,
             stability: 0.0,

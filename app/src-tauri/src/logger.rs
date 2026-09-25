@@ -51,7 +51,11 @@ impl Logger {
             Ok(g) => g,
             Err(_) => return,
         };
-        g.entries.push(LogEntry { ts_ms: now_ms(), level: level.to_string(), text: text.to_string() });
+        g.entries.push(LogEntry {
+            ts_ms: now_ms(),
+            level: level.to_string(),
+            text: text.to_string(),
+        });
         if g.entries.len() > MAX_ENTRIES {
             let drop = g.entries.len() - MAX_ENTRIES;
             g.entries.drain(0..drop);

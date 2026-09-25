@@ -4,21 +4,19 @@
 //! Главный поток бенчмарка — поток вызывающего кода: он живёт от вызова к
 //! вызову и не пересоздаётся между фазами. Воркеры и их пул — persistent.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::buffers::{EntityBuffers, RawShared};
 use crate::checksum::{finalize_tick, mix, start_run_checksum};
 use crate::config::{
-    profile_params, response_profile, Profile, Phase, ProfileParams,
+    DT_SECONDS, ENTITY_CAPACITY, MAXIMUM_JOBS, RESPONSE_SUPERCYCLE, SEED, VERSION, config_hash,
 };
-use crate::config::{
-    config_hash, ENTITY_CAPACITY, MAXIMUM_JOBS, RESPONSE_SUPERCYCLE, SEED, VERSION, DT_SECONDS,
-};
+use crate::config::{Phase, Profile, ProfileParams, profile_params, response_profile};
 use crate::pool::{JobDescriptor, Pool};
 use crate::prng::wrap_position;
-use crate::sample::{capacity_for_ticks, SampleBuffer};
+use crate::sample::{SampleBuffer, capacity_for_ticks};
 
 /// Число тиков в коротких прогонах самопроверки ядра.
 const SELF_CHECK_TICKS: u64 = 32;
@@ -86,9 +84,7 @@ impl Scoreboard {
             ticks_done: self.ticks_done.load(Ordering::Relaxed),
             elapsed_secs: self.elapsed_secs.load(Ordering::Relaxed),
             last_tick_ns: self.last_tick_ns.load(Ordering::Relaxed),
-            current_ticks_per_sec: self
-                .current_ticks_per_sec
-                .load(Ordering::Relaxed),
+            current_ticks_per_sec: self.current_ticks_per_sec.load(Ordering::Relaxed),
         }
     }
 }
@@ -116,8 +112,9 @@ impl Engine {
     /// Создать движок. `worker_count = None` → `max(1, logical_cpus − 2)`.
     /// Число воркеров фиксируется на запуск и сохраняется во все результаты.
     pub fn new(worker_count: Option<usize>) -> Self {
-        let logical_cpus =
-            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let logical_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
         let worker_count = worker_count.unwrap_or_else(|| default_worker_count(logical_cpus));
         let entities = Arc::new(RawShared::new(EntityBuffers::from_seed(SEED)));
         let pool = Pool::new(worker_count, entities.clone());
@@ -203,8 +200,7 @@ impl Engine {
                     self.sample_buffer = Some(SampleBuffer::with_capacity(capacity));
                 }
                 RunTarget::Duration(d) => {
-                    self.sample_buffer =
-                        Some(SampleBuffer::new(phase, d.as_secs().max(1)));
+                    self.sample_buffer = Some(SampleBuffer::new(phase, d.as_secs().max(1)));
                 }
             }
         }
@@ -220,11 +216,7 @@ impl Engine {
         result
     }
 
-    fn run_inner(
-        &mut self,
-        phase: Phase,
-        target: RunTarget,
-    ) -> Result<RunReport, RunError> {
+    fn run_inner(&mut self, phase: Phase, target: RunTarget) -> Result<RunReport, RunError> {
         let started = Instant::now();
         let buffer = self.sample_buffer.as_mut().ok_or(RunError::WorkerFailed)?;
         let mut run_checksum = start_run_checksum();
@@ -264,18 +256,16 @@ impl Engine {
             self.pool.dispatch(params.worker_jobs, &descriptors);
 
             // 3. Синхронизация (bounded, кооперативная отмена).
-            self.pool
-                .wait_batch()
-                .map_err(|e| match e {
-                    crate::pool::BatchError::Cancelled => RunError::Cancelled,
-                    crate::pool::BatchError::WorkerFailed => RunError::WorkerFailed,
-                })?;
+            self.pool.wait_batch().map_err(|e| match e {
+                crate::pool::BatchError::Cancelled => RunError::Cancelled,
+                crate::pool::BatchError::WorkerFailed => RunError::WorkerFailed,
+            })?;
 
             // 4. Финализация: объединение слотов по возрастанию номера задачи.
             let slots = self.pool.job_slots_snapshot(params.worker_jobs);
             let mut tick_checksum = mix(main_checksum, phase_index);
-            for j in 0..params.worker_jobs {
-                tick_checksum = mix(tick_checksum, slots[j]);
+            for slot in slots.iter().take(params.worker_jobs) {
+                tick_checksum = mix(tick_checksum, *slot);
             }
             let run_elapsed = tick_started.elapsed();
             tick_checksum = finalize_tick(tick_checksum, global_tick);
@@ -287,11 +277,19 @@ impl Engine {
             buffer.push(run_elapsed.as_secs_f64() * 1000.0);
 
             let last_ns = run_elapsed.as_nanos() as u64;
-            self.scoreboard.ticks_done.store(global_tick + 1, Ordering::Relaxed);
-            self.scoreboard.last_tick_ns.store(last_ns, Ordering::Relaxed);
-            self.scoreboard.elapsed_secs.store(started.elapsed().as_secs(), Ordering::Relaxed);
-            let tps = if last_ns > 0 { 1_000_000_000u64 / last_ns } else { 0 };
-            self.scoreboard.current_ticks_per_sec.store(tps, Ordering::Relaxed);
+            self.scoreboard
+                .ticks_done
+                .store(global_tick + 1, Ordering::Relaxed);
+            self.scoreboard
+                .last_tick_ns
+                .store(last_ns, Ordering::Relaxed);
+            self.scoreboard
+                .elapsed_secs
+                .store(started.elapsed().as_secs(), Ordering::Relaxed);
+            let tps = 1_000_000_000u64.checked_div(last_ns).unwrap_or(0);
+            self.scoreboard
+                .current_ticks_per_sec
+                .store(tps, Ordering::Relaxed);
 
             global_tick += 1;
             phase_index += 1;
@@ -348,11 +346,7 @@ impl Engine {
     /// Эталон контрольной суммы первого тика профиля (после self_check).
     pub fn first_tick_reference(&self, profile: Profile) -> Option<u64> {
         let v = self.first_tick_references[profile.index()];
-        if v == 0 {
-            None
-        } else {
-            Some(v)
-        }
+        if v == 0 { None } else { Some(v) }
     }
 
     /// Сверка фактической контрольной суммы первого тика с эталоном.
@@ -397,7 +391,11 @@ fn main_stage(entities: &RawShared<EntityBuffers>, params: &ProfileParams) -> u6
         };
         let vz_new = {
             let base = p.vz[e] * 0.999;
-            if f & 8 != 0 { base + 0.000_5 } else { base - 0.000_5 }
+            if f & 8 != 0 {
+                base + 0.000_5
+            } else {
+                base - 0.000_5
+            }
         };
 
         p.vx[e] = vx_new;
@@ -409,7 +407,7 @@ fn main_stage(entities: &RawShared<EntityBuffers>, params: &ProfileParams) -> u6
         p.z[e] = wrap_position(p.z[e] + vz_new * DT_SECONDS);
 
         // Ограниченная арифметика над флагами (ротация + соль).
-        let f_new = (f << 1) | (f >> 63);
+        let f_new = f.rotate_left(1);
         let f_new = f_new ^ (e as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         p.flags[e] = f_new;
 
@@ -428,8 +426,8 @@ fn build_descriptors(params: &ProfileParams) -> [JobDescriptor; MAXIMUM_JOBS] {
     let probes_per_job = params.visibility_probes / active;
     let anim_per_job = params.animation_items / active;
     let mut out = [JobDescriptor::dummy(); MAXIMUM_JOBS];
-    for j in 0..active {
-        out[j] = JobDescriptor {
+    for (j, slot) in out.iter_mut().enumerate().take(active) {
+        *slot = JobDescriptor {
             job_index: j as u32,
             visibility_start: (j * probes_per_job) as u32,
             visibility_count: probes_per_job as u32,

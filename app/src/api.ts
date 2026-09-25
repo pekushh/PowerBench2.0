@@ -23,10 +23,10 @@ export interface SettingsDto {
   sidebar_collapsed: boolean;
   favorite_schemes: string[];
   excluded_schemes: string[];
-  scoring_performance: number;
-  scoring_stability: number;
-  scoring_worst_second: number;
-  retention_max_sessions: number;
+  score_performance: number;
+  score_stability: number;
+  score_worst_second: number;
+  max_sessions: number;
 }
 
 export interface CheckpointDto {
@@ -55,11 +55,17 @@ export interface HistoryRow {
   file_name: string;
   plan_guid: string;
   started_label: string;
+  started_at_ns: number;
   schemes: number;
   level: string;
   level_label: string;
   readable: boolean;
   error: string | null;
+  scheme_name: string;
+  score: number | null;
+  margin: number | null;
+  stability: number | null;
+  early_stopped: boolean;
 }
 
 export interface StoredRun {
@@ -152,6 +158,10 @@ export interface SessionJson {
   schemes: SchemeJson[];
   recommendation: RecommendationJson;
   warnings: string[];
+  rounds_planned: number;
+  rounds_completed: number;
+  early_stop_reason: string | null;
+  score_weights: [number, number, number];
 }
 
 export interface TestRequestDto {
@@ -164,6 +174,25 @@ export interface TestRequestDto {
   worker_count: number | null;
   scheme_ids: string[];
   resume: boolean;
+  export_raw_samples?: boolean;
+}
+
+export interface StorageStats {
+  free_bytes: number;
+  total_bytes: number;
+  history_bytes: number;
+  max_sessions: number;
+}
+
+export interface Readiness {
+  ok: boolean;
+  issues: string[];
+}
+
+export interface LoggerEntry {
+  level: string;
+  text: string;
+  ts_ms: number;
 }
 
 // ---------- Телеметрия ----------
@@ -220,6 +249,16 @@ export const commands = {
   historyOpen: (planGuid: string) => invoke<SessionJson>("history_open", { planGuid }),
   historyExportTo: (planGuid: string, format: "json" | "csv", outDir: string) =>
     invoke<string[]>("history_export_to", { planGuid, format, outDir }),
+  historyReport: (outDir: string) => invoke<string>("history_report", { outDir }),
+  sessionReport: (planGuid: string) => invoke<string>("session_report", { planGuid }),
+  historyDelete: (fileName: string) => invoke<void>("history_delete", { fileName }),
+  historyOpenFolder: () => invoke<void>("history_open_folder"),
+  openFolder: (path: string) => invoke<void>("open_folder", { path }),
+  openFile: (path: string) => invoke<void>("open_file", { path }),
+  storageStats: () => invoke<StorageStats>("storage_stats"),
+  logHistory: () => invoke<LoggerEntry[]>("log_history"),
+  systemReady: (requestedSchemes?: number | null) =>
+    invoke<Readiness>("system_ready", { requestedSchemes: requestedSchemes ?? null }),
   resultsDir: () => invoke<string>("results_dir"),
   appsettingsPath: () => invoke<string>("appsettings_path"),
 };

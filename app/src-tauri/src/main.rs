@@ -6,16 +6,16 @@ mod logger;
 mod runner;
 
 use crate::bridge::{
-    ac_power_online, appsettings_path, checkpoint_status, get_settings, history_delete,
-    history_export_to, history_list, history_open, history_open_folder, history_report, identity_info,
-    is_admin, list_schemes, log_history, open_file, open_folder, results_dir, scheme_action,
-    session_report, set_settings, start_test, stop_test, storage_stats, system_ready, test_running,
-    AppState,
+    AppState, ac_power_online, appsettings_path, checkpoint_status, get_settings, history_delete,
+    history_export_to, history_list, history_open, history_open_folder, history_report,
+    identity_info, is_admin, list_schemes, log_history, open_file, open_folder, results_dir,
+    scheme_action, session_report, set_settings, start_test, stop_test, storage_stats,
+    system_ready, test_running,
 };
 use tauri::{
+    Manager,
     menu::{Menu, MenuItem},
     tray::{TrayIcon, TrayIconBuilder},
-    Manager,
 };
 
 // Хранит дескриптор трея, чтобы он не был удалён до завершения приложения.
@@ -48,6 +48,19 @@ fn rand_u64() -> u64 {
 }
 
 fn main() {
+    // Если прошлая сессия была прервана (kill/падение), исходная схема могла
+    // остаться переключённой — восстанавливаем до старта интерфейса.
+    {
+        use powerbench_orchestrator::recovery::recover_interrupted_session;
+        use powerbench_orchestrator::session::RealSchemeDriver;
+        let outcome = recover_interrupted_session(&RealSchemeDriver);
+        if outcome.interrupted_checkpoint && !outcome.already_ok {
+            eprintln!(
+                "PowerBench: восстановление после прерывания: restored={} {:?}",
+                outcome.restored, outcome.error
+            );
+        }
+    }
     let state = bridge::AppState {
         runner: std::sync::Arc::new(std::sync::Mutex::new(None)),
         log: std::sync::Arc::new(logger::Logger::new()),

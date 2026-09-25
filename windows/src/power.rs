@@ -8,8 +8,8 @@ use windows_sys::Win32::Globalization::MultiByteToWideChar;
 use windows_sys::Win32::System::Performance::QueryPerformanceFrequency;
 #[cfg(windows)]
 use windows_sys::Win32::System::Power::{
-    GetSystemPowerStatus, SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED,
-    ES_SYSTEM_REQUIRED, EXECUTION_STATE, SYSTEM_POWER_STATUS,
+    ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, EXECUTION_STATE, GetSystemPowerStatus,
+    SYSTEM_POWER_STATUS, SetThreadExecutionState,
 };
 #[cfg(windows)]
 use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
@@ -39,11 +39,7 @@ pub fn qpc_frequency() -> u64 {
         // Вызов успешен: QueryPerformanceFrequency не документирует природу
         // возвращаемого BOOL — при нуле принимаем консервативное значение.
         unsafe { QueryPerformanceFrequency(&mut freq) };
-        if freq > 0 {
-            freq as u64
-        } else {
-            10_000_000
-        }
+        if freq > 0 { freq as u64 } else { 10_000_000 }
     }
     #[cfg(not(windows))]
     {

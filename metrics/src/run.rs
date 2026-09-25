@@ -63,7 +63,11 @@ pub fn consistency_percent(times_by_phase: &[(u32, &[f64])]) -> f64 {
     let mut weighted = 0.0;
     let mut total_weight = 0.0;
     for &(_, times) in times_by_phase {
-        let throughput: Vec<f64> = times.iter().map(|ms| 1000.0 / ms).collect();
+        // Фильтр первым: 1000/0 или 1000/NaN дали бы inf/NaN в скор.
+        let throughput: Vec<f64> = filter_valid_times(times)
+            .iter()
+            .map(|ms| 1000.0 / ms)
+            .collect();
         let n = throughput.len() as f64;
         weighted += n * consistency_score(&throughput);
         total_weight += n;
@@ -78,13 +82,11 @@ pub fn consistency_percent(times_by_phase: &[(u32, &[f64])]) -> f64 {
 /// TickJitterP99Ms: перцентиль 0.99 попарных разностей времён соседних тиков.
 /// Если данных нет (меньше двух сэмплов) — 0 (спецификация).
 pub fn jitter_p99_ms(times_ms: &[f64]) -> f64 {
-    if times_ms.len() < 2 {
+    let times = filter_valid_times(times_ms);
+    if times.len() < 2 {
         return 0.0;
     }
-    let diffs: Vec<f64> = times_ms
-        .windows(2)
-        .map(|w| (w[1] - w[0]).abs())
-        .collect();
+    let diffs: Vec<f64> = times.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
     percentile(&diffs, 0.99)
 }
 
@@ -99,7 +101,8 @@ pub fn burst_retention_percent(average_heavy: f64, average_light: f64) -> f64 {
 }
 
 /// Худшая секунда прогона: минимум AverageThroughput по 1-секундным окнам
-/// (целочисленные границы). Окно без валидных сэмплов не участвует.
+/// кумулятивного времени (целочисленные границы). Окно без валидных
+/// сэмплов не участвует.
 pub fn worst_second_throughput(times_ms: &[f64]) -> f64 {
     use std::collections::BTreeMap;
     let times = filter_valid_times(times_ms);
@@ -107,8 +110,12 @@ pub fn worst_second_throughput(times_ms: &[f64]) -> f64 {
         return 0.0;
     }
     let mut buckets: BTreeMap<u64, (u64, f64)> = BTreeMap::new();
+    let mut elapsed_ms = 0.0;
     for ms in &times {
-        let second = (*ms / 1000.0).floor().max(0.0) as u64;
+        elapsed_ms += ms;
+        // Окно — по накопленному времени, а не по длительности тика
+        // (иначе все тики короче секунды падают в бакет 0).
+        let second = (elapsed_ms / 1000.0).floor().max(0.0) as u64;
         let e = buckets.entry(second).or_insert((0, 0.0));
         e.0 += 1;
         e.1 += ms;

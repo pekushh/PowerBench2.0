@@ -92,12 +92,15 @@ fn empty_aggregate(median: f64, margin: f64) -> powerbench_metrics::AggregateRes
 fn session_report_is_deterministic() {
     // Штамп генерации берётся из реального времени; всё остальное обязано
     // быть побайтово одинаковым между двумя независимыми построениями.
-    let strip =
-        |html: &str| html.split("Сгенерировано").next().unwrap().to_string();
+    let strip = |html: &str| html.split("Сгенерировано").next().unwrap().to_string();
     let s = snapshot_session("AAA", 500.0, 12.5);
     let first = build_session_report(&s);
     let again = build_session_report(&s);
-    assert_eq!(strip(&first), strip(&again), "повторный прогон обязан дать побайтово тот же HTML");
+    assert_eq!(
+        strip(&first),
+        strip(&again),
+        "повторный прогон обязан дать побайтово тот же HTML"
+    );
     let html = first.as_str();
     // Золотые маркеры: вердикт, лидер со счётчиком тик/с, перевес и имя плана.
     assert!(html.contains("Подтверждено"));
@@ -117,8 +120,7 @@ fn session_report_is_sensitive_to_input() {
 
 #[test]
 fn history_report_is_deterministic_modulo_timestamp() {
-    let strip =
-        |html: &str| html.split("Сгенерировано").next().unwrap().to_string();
+    let strip = |html: &str| html.split("Сгенерировано").next().unwrap().to_string();
     let a = snapshot_session("CCC", 720.0, 8.0);
     let b = snapshot_session("DDD", 690.0, 6.0);
     let one = build_report(&[a.clone(), b.clone()]);
@@ -134,8 +136,15 @@ fn history_report_is_deterministic_modulo_timestamp() {
 fn edge_corpus() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut fragments: Vec<String> = vec![
-        "".into(), " ".into(), "{".into(), "}".into(), "[]]{}".into(), "null".into(),
-        "true".into(), "false".into(), "42".into(),
+        "".into(),
+        " ".into(),
+        "{".into(),
+        "}".into(),
+        "[]]{}".into(),
+        "null".into(),
+        "true".into(),
+        "false".into(),
+        "42".into(),
         r#"{"round":0}"#.into(),
         r#"{"round":1e999}"#.into(),
         r#"{"round":-5}"#.into(),
@@ -149,9 +158,8 @@ fn edge_corpus() -> Vec<String> {
     fragments.push(format!(r#"{{"pad":"{}"}}"#, "a".repeat(50_000)));
     fragments.push("{\"a\":\"\\u0000\"}".into());
     fragments.push("{\"a\":\"\\uD800\"}".into());
-    fragments.push(
-        "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]".into(),
-    );
+    fragments
+        .push("[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]".into());
     fragments.push("{\"identity\":{\"worker_count\":-1,\"logical_cpus\":0}}".into());
     for f in fragments {
         out.push(f.to_string());
@@ -169,7 +177,7 @@ fn edge_corpus() -> Vec<String> {
 /// Простой битовый RNG (xorshift64*).
 struct XorRng(u64);
 impl XorRng {
-    fn next(&mut self) -> u64 {
+    fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x >> 12;
         x ^= x << 25;
@@ -182,13 +190,13 @@ impl XorRng {
 /// Псевдослучайная строка на основе равномерно искажённых токенов.
 fn mutate(seed: &mut XorRng) -> String {
     let tokens = [
-        "{", "}", "[", "]", ",", ":", "\"", "n", "u", "l", "t", "r", "e", "0", "1", "2", ".",
-        "-", "+", "e", " ", "\n", "\\", "a", "b", "c", "d", "plan", "guid", "_",
+        "{", "}", "[", "]", ",", ":", "\"", "n", "u", "l", "t", "r", "e", "0", "1", "2", ".", "-",
+        "+", "e", " ", "\n", "\\", "a", "b", "c", "d", "plan", "guid", "_",
     ];
-    let len = (seed.next() % 220) as usize;
+    let len = (seed.next_u64() % 220) as usize;
     let mut text = String::with_capacity(len + 1);
     for _ in 0..len {
-        let idx = (seed.next() as usize) % tokens.len();
+        let idx = (seed.next_u64() as usize) % tokens.len();
         text.push_str(tokens[idx]);
     }
     text
@@ -233,7 +241,10 @@ fn fuzz_respects_serialize_roundtrip() {
         .zip(scheme_floats(&s))
         .map(|(x, y)| (x - y).abs() / y.abs().max(1e-9))
         .fold(0.0, f64::max);
-    assert!(max_rel < 1e-12, "чтение собственной записи без потери точности: {max_rel}");
+    assert!(
+        max_rel < 1e-12,
+        "чтение собственной записи без потери точности: {max_rel}"
+    );
 }
 
 fn scheme_floats(s: &SessionJson) -> Vec<f64> {

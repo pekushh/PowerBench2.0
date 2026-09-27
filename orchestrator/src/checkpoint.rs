@@ -139,6 +139,19 @@ pub fn save_checkpoint(checkpoint: &Checkpoint) -> io::Result<()> {
     atomic_write(&dir.join(CHECKPOINT_FILE_NAME), &bytes)
 }
 
+/// Удалить контрольную точку. Отсутствие файла — не ошибка.
+///
+/// Вызывается после успешного сохранения результата и перед стартом новой
+/// сессии: без этого новый план всегда падал бы с `CheckpointPlanMismatch`,
+/// потому что на диске лежит точка прошлого плана.
+pub fn clear_checkpoint() -> io::Result<()> {
+    match std::fs::remove_file(checkpoint_path()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 impl StoredRun {
     /// Собрать `RunSummary` для агрегации: `stats` с пересчитанной
     /// cross-фазовой стабильностью, burst и сигнатуры из источника.
@@ -323,6 +336,19 @@ mod tests {
         assert_eq!(cp.rejection_reason("s1"), None);
         // Имя схемы — только отображение, не участвует в матчинге.
         assert!(cp.has_run(0, "S1"));
+    }
+
+    #[test]
+    fn clear_checkpoint_is_idempotent() {
+        // Регресс: без очистки новый план падал бы с CheckpointPlanMismatch.
+        clear_checkpoint();
+        let cp = Checkpoint::new(plan());
+        save_checkpoint(&cp).unwrap();
+        assert!(load_checkpoint().is_some());
+        clear_checkpoint().unwrap();
+        assert!(load_checkpoint().is_none());
+        // Повторный вызов на отсутствующем файле — не ошибка.
+        clear_checkpoint().unwrap();
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { commands, fmtTime, onLog, type LoggerEntry } from "../api";
-import { Badge, Panel, Seg } from "../components/ui";
+import { Badge, FadeScroll, Panel, Seg } from "../components/ui";
 import { SearchIcon } from "../components/icons";
 
 type Level = "all" | "info" | "success" | "warn" | "error";
@@ -58,7 +58,7 @@ export default function LogPage() {
   });
 
   return (
-    <div className="page">
+    <div className="page fill">
       <div className="page-head">
         <h1>Логи</h1>
         <span className="sub">старт приложения, ошибки и события сессий</span>
@@ -96,8 +96,9 @@ export default function LogPage() {
       <Panel
         title="Журнал"
         hint={entries ? `показаны последние ${shown.length} записей — с фильтром обновляются` : undefined}
+        className="fill-grow"
       >
-        <div className={`log log-box${entries ? " fade-bottom" : ""}`}>
+        <FadeScroll className="log log-box">
           {!entries ? (
             <div className="muted">Загрузка журнала…</div>
           ) : shown.length === 0 ? (
@@ -111,7 +112,7 @@ export default function LogPage() {
               </div>
             ))
           )}
-        </div>
+        </FadeScroll>
       </Panel>
     </div>
   );

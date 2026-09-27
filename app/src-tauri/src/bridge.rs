@@ -10,6 +10,7 @@ use powerbench_orchestrator::config::{SessionConfig, validate_config};
 use powerbench_orchestrator::history::{
     self, export_csv_to, export_json, list_results, load_result,
 };
+use powerbench_orchestrator::quarantine::{self, QuarantineEntry};
 use powerbench_orchestrator::report::build_report;
 use powerbench_orchestrator::result::{SchemeJson, SessionJson};
 use powerbench_windows::disk;
@@ -257,7 +258,19 @@ pub fn start_test(
     state: tauri::State<'_, AppState>,
     req: TestRequestDto,
 ) -> Result<String, String> {
+    // Сначала план: если он невалиден, точку прошлой сессии трогать нельзя —
+    // иначе пользователь потеряет возможность продолжить её.
     let plan = build_plan(&req)?;
+    // Запуск второй сессии недопустим: восстановление ниже переключило бы
+    // схему питания посреди измерений.
+    if runner::running(&state.runner) {
+        return Err("сессия уже выполняется — сначала остановите её".to_string());
+    }
+    // Новый запуск обязан выбросить точку прошлого плана, иначе run_session
+    // отвергнет план как «чужой». Исходная схема при этом возвращается.
+    if !req.resume {
+        discard_stale_checkpoint(&app, &state);
+    }
     state
         .log
         .append("info", &format!("запуск сессии: план {}", plan.plan_guid));
@@ -267,6 +280,67 @@ pub fn start_test(
         &format!("запуск сессии: план {}", plan.plan_guid),
     );
     runner::start(&app, &state.runner, plan)
+}
+
+/// Убрать контрольную точку чужого плана, вернув исходную схему питания.
+/// Точка удаляется всегда (иначе новый план не запустится), но схема
+/// восстанавливается гарантированно — это требование безопасности ОС.
+fn discard_stale_checkpoint(app: &tauri::AppHandle, state: &AppState) {
+    use powerbench_orchestrator::checkpoint::{clear_checkpoint, load_checkpoint};
+    use powerbench_orchestrator::recovery::recover_interrupted_session;
+    use powerbench_orchestrator::session::RealSchemeDriver;
+
+    let Some(cp) = load_checkpoint() else {
+        return;
+    };
+    // Восстановление исходной схемы (если её не вернули) — до удаления точки:
+    // после удаления теряется original_scheme_guid.
+    if !cp.original_restored {
+        let outcome = recover_interrupted_session(&RealSchemeDriver);
+        if let Some(cause) = outcome.error {
+            runner::emit_log(
+                app,
+                "warn",
+                &format!("при сбросе прошлой сессии: {cause}"),
+            );
+        }
+    }
+    match clear_checkpoint() {
+        Ok(()) => {
+            let text = "прошлая сессия сброшена: контрольная точка очищена";
+            state.log.append("info", text);
+            runner::emit_log(app, "info", text);
+        }
+        Err(e) => {
+            let text = format!("не удалось очистить контрольную точку: {e}");
+            state.log.append("warn", &text);
+            runner::emit_log(app, "warn", &text);
+        }
+    }
+}
+
+/// Забыть прерванную сессию: вернуть исходную схему и удалить точку.
+#[tauri::command]
+pub fn checkpoint_discard(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    use powerbench_orchestrator::checkpoint::clear_checkpoint;
+    use powerbench_orchestrator::recovery::recover_interrupted_session;
+    use powerbench_orchestrator::session::RealSchemeDriver;
+
+    let outcome = recover_interrupted_session(&RealSchemeDriver);
+    if let Some(cause) = outcome.error.as_deref() {
+        // Замечание не теряем: оно объясняет, почему схема могла остаться.
+        let text = format!("точка удалена, но есть замечание: {cause}");
+        state.log.append("warn", &text);
+        runner::emit_log(&app, "warn", &text);
+        return Err(text);
+    }
+    clear_checkpoint().map_err(|e| format!("не удалось удалить контрольную точку: {e}"))?;
+    state.log.append("info", "прерванная сессия забыта");
+    runner::emit_log(&app, "info", "прерванная сессия забыта");
+    Ok(())
 }
 
 #[tauri::command]
@@ -309,6 +383,9 @@ pub struct HistoryRow {
     pub readable: bool,
     pub error: Option<String>,
     pub scheme_name: String,
+    /// Медианный throughput лидера сессии, тик/с (НЕ балл).
+    pub throughput: Option<f64>,
+    /// Балл лидера 0..=100 по весам из настроек (настоящая метрика).
     pub score: Option<f64>,
     pub margin: Option<f64>,
     pub stability: Option<f64>,
@@ -354,9 +431,22 @@ fn best_scheme(s: &SessionJson) -> Option<&SchemeJson> {
 fn history_row(entry: &history::HistoryEntry, s: &SessionJson) -> HistoryRow {
     let start = history::session_started_at_ns(s).unwrap_or(0);
     let best = best_scheme(s);
-    let score = best
+    let throughput = best
         .filter(|b| b.median_throughput.is_finite() && b.median_throughput > 0.0)
         .map(|b| b.median_throughput);
+    // Настоящий балл 0..=100 по весам из настроек: `throughput` (тик/с)
+    // для сравнения между схемами, `score` — для сравнения сессий.
+    let settings = AppSettings::load();
+    let weights = powerbench_orchestrator::score::ScoreWeights {
+        performance: settings.scoring.performance,
+        stability: settings.scoring.stability,
+        worst_second: settings.scoring.worst_second,
+    };
+    let score = powerbench_orchestrator::score::score_leader(
+        &powerbench_orchestrator::score::score_schemes(&s.schemes, &weights),
+    )
+    .map(|l| l.score)
+    .filter(|v| v.is_finite());
     let margin = best.filter(|b| b.margin.is_finite()).map(|b| b.margin);
     let stability = best
         .filter(|b| b.median_consistency_percent.is_finite())
@@ -388,6 +478,7 @@ fn history_row(entry: &history::HistoryEntry, s: &SessionJson) -> HistoryRow {
         readable: true,
         error: None,
         scheme_name,
+        throughput,
         score,
         margin,
         stability,
@@ -415,6 +506,7 @@ fn handled_history_rows() -> Result<Vec<HistoryRow>, String> {
                 readable: false,
                 error: Some(e.to_string()),
                 scheme_name: String::new(),
+                throughput: None,
                 score: None,
                 margin: None,
                 stability: None,
@@ -546,12 +638,25 @@ pub fn history_report(out_dir: String) -> Result<String, String> {
     Ok(path.display().to_string())
 }
 
-/// HTML-отчёт по одной сессии (сохраняется рядом с результатами).
+/// Список схем в карантине (браковка: зависания, нестабильность, деградация).
+#[tauri::command]
+pub fn quarantine_list() -> Vec<QuarantineEntry> {
+    quarantine::load_quarantine()
+}
+
+/// Вернуть схему из карантина в бенчмарк. `Ok(true)` — запись была и удалена.
+#[tauri::command]
+pub fn quarantine_clear(scheme_id: String) -> Result<bool, String> {
+    quarantine::quarantine_remove(&scheme_id)
+        .map_err(|e| format!("не удалось убрать из карантина: {e}"))
+}
+
+/// HTML-отчёт по одной сессии (сохраняется рядом с результатами и
+/// открывается в браузере по умолчанию).
 #[tauri::command]
 pub fn session_report(plan_guid: String) -> Result<String, String> {
     let s = find_session(&plan_guid)?;
-    crate::runner::write_session_report(&s)
-        .ok_or_else(|| "не удалось записать отчёт по сессии".to_string())
+    crate::runner::write_session_report_strict(&s)
 }
 
 /// Удалить запись истории по имени файла.
@@ -613,13 +718,14 @@ pub fn open_folder(path: String) -> Result<(), String> {
     open_in_explorer(&path)
 }
 
+/// Открыть файл приложением по умолчанию (HTML — в браузере).
 #[tauri::command]
 pub fn open_file(path: String) -> Result<(), String> {
     let p = std::path::PathBuf::from(&path);
     if !p.is_file() {
         return Err(format!("файл не существует: {path}"));
     }
-    open_in_explorer(&path)
+    crate::runner::open_with_default_app(&p)
 }
 
 #[tauri::command]

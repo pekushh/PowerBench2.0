@@ -10,79 +10,125 @@ const COLORS: &[&str] = &[
     "#dc2626", "#475569",
 ];
 
+/// Потолок числа линий сетки: страховка от бесконечного цикла при
+/// вырожденных значениях в данных.
+const MAX_GRID_LINES: usize = 24;
+
 const HTML_CSS: &str = r##"<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Отчёт PowerBench</title><style>
-:root{--bg:#f3f5f9;--panel:#ffffff;--line:#e3e8ef;--fg:#1b2430;--dim:#4d5a68;--mute:#8794a5;
---ok:#0f7d4b;--okbg:#e8f6ee;--acc:#0e7490;--accbg:#e7f4f8;--warn:#a35d00;--warnbg:#fdf0e0;
---err:#b3261e;--errbg:#fbecec;--shadow:0 1px 2px rgba(24,32,48,.05),0 10px 30px -18px rgba(24,32,48,.22)}
-*{box-sizing:border-box}body{margin:0;padding:32px 20px 48px;background:var(--bg);color:var(--fg);
-font:14px/1.55 -apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
-body>*{max-width:960px;margin-left:auto;margin-right:auto}
-header{background:linear-gradient(180deg,#fff,#fbfcfe);border:1px solid var(--line);border-radius:16px;
-padding:26px 30px;box-shadow:var(--shadow);position:relative;overflow:hidden}
-header::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;
-background:linear-gradient(180deg,var(--acc),var(--ok))}
-.brand{display:inline-block;font-size:11px;letter-spacing:2.2px;text-transform:uppercase;color:var(--acc);
-font-weight:700;background:var(--accbg);padding:4px 11px;border-radius:999px}
-h1{font-size:25px;margin:12px 0 4px;letter-spacing:-.3px;line-height:1.2}
-h2{font-size:16px;margin:30px 0 12px;letter-spacing:-.2px;display:flex;align-items:center;gap:9px}
-h2::before{content:"";width:4px;height:16px;border-radius:2px;background:var(--acc)}
-header+h2{margin-top:22px}
+:root{--bg:#0b0c0f;--card:#141519;--card2:#1a1c22;--line:#23262e;--line2:#333845;
+--fg:#f3f3f3;--dim:#c9cdd6;--mute:#7e7e7e;
+--ok:#6fd0a0;--okbg:rgba(111,208,160,.12);--okline:rgba(111,208,160,.45);
+--warn:#e4b46f;--warnbg:rgba(228,180,111,.10);--warnline:rgba(228,180,111,.42);
+--err:#e57979;--errbg:rgba(229,121,121,.10);--errline:rgba(229,121,121,.42);
+--shadow:0 30px 70px -30px rgba(0,0,0,.8)}
+*{box-sizing:border-box}body{margin:0;padding:36px 16px 60px;color:var(--fg);
+background:radial-gradient(1000px 420px at 50% -6%,#17181d,var(--bg) 72%);
+font:14px/1.6 -apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+body>*{max-width:1000px;margin-left:auto;margin-right:auto}
+.sheet{background:var(--card);border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:var(--shadow)}
+.topbar{display:flex;align-items:center;gap:10px;padding:16px 28px;border-bottom:1px solid var(--line)}
+.logo{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#8fe3b4,#3f9e6e);
+display:inline-grid;place-items:center;flex:0 0 auto}
+.wordmark{font-size:15px;font-weight:650;letter-spacing:-.2px}
+.pad{padding:28px 30px 8px}
+h1{font-size:30px;margin:0;letter-spacing:-.5px;line-height:1.15}
+.title-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.chips{margin-left:auto;display:flex;align-items:center;gap:14px}
+.chip{display:inline-flex;align-items:center;gap:8px;padding:7px 15px;border:1px solid var(--line2);
+border-radius:999px;background:var(--card2);font-size:13px;font-weight:600}
+.chip svg{color:var(--mute)}
+.workers{font-size:13px;color:var(--mute)}
+.workers b{color:var(--fg);font-weight:650;font-variant-numeric:tabular-nums}
+.dateline{color:var(--mute);font-size:13.5px;margin:8px 0 20px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0 0 14px}
+.stat{background:var(--card2);border:1px solid var(--line);border-radius:14px;padding:16px 18px;min-width:0}
+.stat .k{font-size:10.5px;letter-spacing:1.6px;color:var(--mute);font-weight:600}
+.stat .v{font-size:27px;font-weight:750;margin-top:6px;font-variant-numeric:tabular-nums;letter-spacing:-.4px;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stat .v small{font-size:13px;color:var(--mute);font-weight:500}
+.stat .v.green{color:var(--ok)}
+.stat .s{font-size:12.5px;color:var(--mute);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rec-card{background:var(--card2);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:0 0 6px}
+.rec-label{display:flex;align-items:center;gap:8px;font-size:10.5px;letter-spacing:1.6px;color:var(--mute);font-weight:600}
+.rec-label svg{color:var(--ok)}
+.rec-title{font-size:19px;font-weight:700;margin:10px 0 0;letter-spacing:-.2px}
+.rec-title b{color:var(--ok)}
+.rec-notes{margin:8px 0 0;color:var(--mute);font-size:13px;font-style:italic;line-height:1.6}
+.rec-notes div{margin-top:2px}
+.rec-why{margin:8px 0 0;color:var(--mute);font-size:12px}
+h2{font-size:12px;margin:28px 0 12px;letter-spacing:1.6px;color:var(--dim);font-weight:700;text-transform:uppercase}
+table{width:100%;border-collapse:collapse;margin:0 0 8px;font-size:13.5px;color:var(--fg);
+background:var(--card2);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+thead th{color:var(--mute);font-weight:600;text-align:left;padding:12px 16px;background:rgba(255,255,255,.02);
+border-bottom:1px solid var(--line);font-size:10.5px;letter-spacing:1.2px;white-space:nowrap}
+td{padding:13px 16px;border-bottom:1px solid var(--line);vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+tbody tr.win td{background:rgba(111,208,160,.05)}
+tbody tr.out td{opacity:.5}
+.pill{display:inline-block;padding:4px 12px;border-radius:8px;font-size:10.5px;font-weight:700;letter-spacing:1px;
+border:1px solid transparent;white-space:nowrap}
+.pill.ok{color:var(--ok);background:var(--okbg);border-color:var(--okline)}
+.pill.dim{color:var(--dim);background:rgba(255,255,255,.05);border-color:var(--line2)}
+.pill.err{color:var(--err);background:var(--errbg);border-color:var(--errline)}
+.pbar{display:grid;grid-template-columns:minmax(150px,230px) 1fr auto auto;align-items:center;gap:14px;margin:12px 0}
+.plab{color:var(--dim);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plab small{color:var(--mute)}
+.ptrack{height:7px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;min-width:60px}
+.ptrack i{display:block;height:100%;border-radius:999px;background:#4a4e5a}
+.pbar.lead .ptrack i{background:linear-gradient(90deg,#4ea87f,var(--ok))}
+.pval{color:var(--fg);font-variant-numeric:tabular-nums;font-weight:700;font-size:13.5px;min-width:44px;text-align:right}
 .meta{color:var(--mute);font-size:12.5px;line-height:1.6;margin-bottom:2px}
 .muted{color:var(--mute)}
-.note{color:var(--mute);font-size:12.5px;margin-top:6px;line-height:1.5}
+.note{color:var(--mute);font-size:12.5px;margin-top:8px;line-height:1.55}
 .note-stat{font-size:12.5px;color:var(--mute)}
-.mono{font-family:Consolas,Menlo,monospace;font-size:12px;color:#566170;background:#f2f5f8;padding:1.5px 6px;border-radius:6px}
+.mono{font-family:Consolas,Menlo,monospace;font-size:12px;color:var(--dim);background:rgba(255,255,255,.05);
+padding:2px 7px;border-radius:6px;border:1px solid var(--line)}
 .sumcards{display:flex;flex-wrap:wrap;gap:12px}
-.sumcard{flex:1 1 200px;min-width:170px;background:var(--panel);border:1px solid var(--line);
-border-radius:14px;padding:16px 18px;box-shadow:var(--shadow)}
+.sumcard{flex:1 1 200px;min-width:170px;background:var(--card2);border:1px solid var(--line);
+border-radius:14px;padding:16px 18px}
 .sc-name{font-size:11.5px;color:var(--mute);font-weight:700;letter-spacing:.4px;text-transform:uppercase;
 overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sc-num{font-size:22px;font-weight:700;margin-top:5px;font-variant-numeric:tabular-nums;letter-spacing:-.3px}
 .sc-num small{font-size:12.5px;color:var(--mute);font-weight:500;margin-left:4px}
 .sc-sub{font-size:12px;color:var(--mute);margin-top:3px}
-table{width:100%;border-collapse:separate;border-spacing:0;margin:4px 0 22px;font-size:13px;
-background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
-th{color:#5c6774;font-weight:600;text-align:left;padding:10px 12px;background:#f8fafc;
-border-bottom:1px solid var(--line);font-size:12px;white-space:nowrap}
-td{padding:9px 12px;border-bottom:1px solid #eef1f5;vertical-align:top}
-tbody tr:last-child td{border-bottom:0}
-tbody tr:nth-child(even) td{background:#fafbfd}
-td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-tr.detail td{background:#fbfcfe;padding:16px 20px;border-top:1px solid var(--line)}
-.detail-body{margin:0 0 18px}
-.dhead{color:#5c6774;font-weight:700;font-size:12px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.5px}
-table.sub{border-radius:10px;box-shadow:none;margin:10px 0 14px}
-table.sub th{background:transparent;border-bottom:1px solid var(--line)}
-.rec{margin-top:12px;padding:10px 14px;background:var(--accbg);border:1px solid #cde6ee;border-radius:10px;
-font-size:13px;color:#0b4455}
-.rec b{color:#0b6f8a}
-.verdict{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;background:var(--panel);
-border:1px solid var(--line);border-left:3px solid var(--acc);border-radius:12px;padding:14px 18px;
-box-shadow:var(--shadow);font-size:14px}
-.badge{display:inline-block;padding:2.5px 9px;border-radius:999px;font-size:11.5px;font-weight:600;
-border:1px solid transparent;white-space:nowrap}
-.badge.ok{color:#0f7d4b;background:var(--okbg);border-color:#cfeadd}
-.badge.acc{color:#0b6f8a;background:var(--accbg);border-color:#cde6ee}
-.badge.warn{color:#a35d00;background:var(--warnbg);border-color:#f3d9bd}
-.badge.err{color:#b3261e;background:var(--errbg);border-color:#f3cfcf}
-.pbar{display:flex;align-items:center;gap:12px;margin:7px 0;font-size:12.5px;flex-wrap:wrap}
-.plab{width:212px;min-width:160px;flex:0 1 auto;color:var(--dim)}
-.ptrack{flex:1 1 80px;max-width:340px;height:7px;border-radius:999px;background:#eef1f6;overflow:hidden}
-.ptrack i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--acc),#17a2b8)}
-.pval{width:64px;text-align:right;color:var(--fg);font-variant-numeric:tabular-nums;font-weight:600}
-.chart{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 6px 6px 6px;
-box-shadow:var(--shadow);margin-bottom:22px}
+header.hero{background:var(--card2);border:1px solid var(--line);border-radius:16px;padding:24px 28px}
+.brand{display:inline-flex;align-items:center;gap:8px;font-size:11px;letter-spacing:2.2px;text-transform:uppercase;
+color:var(--ok);font-weight:700;background:var(--okbg);border:1px solid var(--okline);
+padding:5px 13px;border-radius:999px}
+header.hero h1{margin-top:12px}
+.chart{background:var(--card2);border:1px solid var(--line);border-radius:14px;padding:14px 6px 6px 6px;margin-bottom:22px}
 .chart svg{display:block}
-.panel{fill:var(--panel)}
-.grid{stroke:#e6eaf0;stroke-width:1}
-.axis{stroke:#9aa4b2;stroke-width:1}
-.ylab,.xlab{fill:#7c8696;font-size:11px;font-variant-numeric:tabular-nums}
-.legend{fill:#5c6774;font-size:11px}
-.foot{margin-top:34px;color:var(--mute);font-size:11.5px;text-align:center;padding-top:18px;border-top:1px solid var(--line)}
-@media (max-width:640px){body{padding:18px 12px 40px}header{padding:20px}h1{font-size:21px}
-.plab{width:auto;flex:1 1 100%}table{display:block;overflow-x:auto}.sumcards{flex-direction:column}}
+.panel{fill:var(--card2)}
+.grid{stroke:var(--line);stroke-width:1}
+.axis{stroke:var(--mute);stroke-width:1}
+.ylab,.xlab{fill:var(--mute);font-size:11px;font-variant-numeric:tabular-nums}
+.legend{fill:var(--dim);font-size:11px}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:3px 11px;border-radius:999px;font-size:11.5px;
+font-weight:600;border:1px solid var(--line2);background:rgba(255,255,255,.05);color:var(--dim);white-space:nowrap}
+.badge.ok{color:var(--ok);background:var(--okbg);border-color:var(--okline)}
+.badge.acc{color:var(--dim);background:rgba(255,255,255,.05);border-color:var(--line2)}
+.badge.warn{color:var(--warn);background:var(--warnbg);border-color:var(--warnline)}
+.badge.err{color:var(--err);background:var(--errbg);border-color:var(--errline)}
+tr.detail td{background:rgba(255,255,255,.015);padding:16px 20px;border-top:1px solid var(--line)}
+.detail-body{margin:0 0 18px}
+.dhead{color:var(--dim);font-weight:700;font-size:12px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.5px}
+table.sub{border-radius:10px;margin:10px 0 14px;background:transparent;border:0}
+table.sub th{background:transparent;border-bottom:1px solid var(--line)}
+.rec{margin-top:12px;padding:12px 16px;background:rgba(255,255,255,.03);border:1px solid var(--line);
+border-radius:12px;font-size:13px;color:var(--dim)}
+.rec b{color:var(--ok)}
+.verdict{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;background:var(--card2);
+border:1px solid var(--line);border-left:4px solid var(--ok);border-radius:14px;padding:18px 22px;font-size:15px}
+.verdict .who{font-size:20px;font-weight:700;letter-spacing:-.3px}
+.foot{color:var(--mute);font-size:12px;text-align:center;padding:20px 20px 24px;border-top:1px solid var(--line)}
+.foot .prov{display:block;margin-top:4px;font-size:11px;opacity:.75}
+@media (max-width:640px){body{padding:20px 10px 44px}.pad{padding:20px 16px 6px}h1{font-size:23px}
+.stats{grid-template-columns:1fr 1fr}.pbar{grid-template-columns:1fr auto}table{display:block;overflow-x:auto}
+.sumcards{flex-direction:column}.chips{margin-left:0}}
+@media print{body{background:#fff;color:#111}.sheet{box-shadow:none}}
 </style></head><body>
 "##;
 
@@ -103,8 +149,7 @@ pub fn build_report(sessions: &[SessionJson]) -> String {
 
 /// Компактный HTML-отчёт по одной сессии: вердикт, рекомендация и сравнение
 /// схем — без «лишней» информации (без сырых прогонов и bootstrap-вероятностей).
-pub fn build_session_report(s: &SessionJson) -> String {
-    let start = session_started_at_ns(s).unwrap_or(0);
+pub fn build_session_report(s: &SessionJson) -> String {    let start = session_started_at_ns(s).unwrap_or(0);
     let stamp = date_time_stamp(start);
     let rec = &s.recommendation;
     let id = &s.identity;
@@ -121,86 +166,183 @@ pub fn build_session_report(s: &SessionJson) -> String {
         .unwrap_or_else(|| "—".to_string());
     let tie = matches!(rec.level.as_str(), "Equivalent" | "KeepCurrent");
     let has_winner = !tie && winner.is_some();
-    let verdict_text = if has_winner {
-        format!("рекомендована <b>{rec_name}</b>", rec_name = winner_name)
+
+    // Робастный лидер (по медиане) — второе мнение поверх recommend/.
+    let robust = crate::leader::robust_leader(&s.schemes);
+    let robust_id = robust.as_ref().map(|r| r.scheme_id.clone());
+    // Строка подсвечивается, если это рекомендованная схема либо (при ничьей
+    // или отсутствии рекомендации) лидер по медиане.
+    let win_id: Option<&str> = winner.map(|w| w.scheme_id.as_str()).or(if tie {
+        robust_id.as_deref()
     } else {
-        match rec.level.as_str() {
-            "Equivalent" => "схемы эквивалентны — значимых различий не выявлено".to_string(),
-            "KeepCurrent" => "оставить текущую схему".to_string(),
-            _ => "данных недостаточно для рекомендации".to_string(),
-        }
-    };
+        None
+    });
 
     let mut sch_rows = String::new();
     for sch in &s.schemes {
+        let is_win = win_id.map(|w| w == sch.scheme_id).unwrap_or(false);
         let status = if sch.rejected {
             format!(
-                "<span class=\"badge err\">{0}</span>",
+                "<span class=\"pill err\" title=\"{0}\">ЗАБРАКОВАНА</span>",
                 esc(sch.rejection_reason.as_deref().unwrap_or("забракована"))
             )
-        } else if has_winner
-            && winner
-                .map(|w| w.scheme_id == sch.scheme_id)
-                .unwrap_or(false)
-        {
-            "<span class=\"badge ok\">рекомендована</span>".to_string()
+        } else if is_win {
+            "<span class=\"pill ok\">ЛИДЕР</span>".to_string()
         } else {
-            "<span class=\"badge acc\">допущена</span>".to_string()
+            "<span class=\"pill dim\">ДОПУЩЕНА</span>".to_string()
+        };
+        let row_cls = if is_win {
+            " class=\"win\""
+        } else if sch.rejected {
+            " class=\"out\""
+        } else {
+            ""
+        };
+        // CV по одному прогону — всегда 0 по определению: честнее прочерк.
+        let deviation = if sch.runs < 2 {
+            "—".to_string()
+        } else {
+            pct1(sch.run_variation_percent)
         };
         let name = esc(&sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone()));
         sch_rows.push_str(&format!(
-            "<tr><td>{name}</td><td class=\"num\">{runs}</td><td class=\"num\">{median}</td>\
-             <td class=\"num\">{cv}</td><td class=\"num\">{cons}</td><td class=\"num\">{worst}</td>\
+            "<tr{cls}><td>{name}</td><td class=\"num\">{runs}</td><td class=\"num\">{median}</td>\
+             <td class=\"num\">{dev}</td><td class=\"num\">{cons}</td>\
              <td>{status}</td></tr>",
+            cls = row_cls,
             name = name,
             runs = sch.runs,
             median = f1(sch.median_throughput),
-            cv = pct1(sch.run_variation_percent),
+            dev = deviation,
             cons = pct1(sch.median_consistency_percent),
-            worst = f1(sch.median_worst_window_throughput),
             status = status,
         ));
     }
     if sch_rows.is_empty() {
-        sch_rows = "<tr><td colspan=\"7\">Нет данных по схемам.</td></tr>".to_string();
+        sch_rows = "<tr><td colspan=\"6\">Нет данных по схемам.</td></tr>".to_string();
     }
 
-    let day_before = date_slice(&stamp, 6, 8);
-    let mut stamp2 = stamp.clone();
-    stamp2.truncate(15);
-    let header_day = format!("{0} {1}", esc(&day_before), esc(&stamp2[9..]));
+    // Карточка рекомендации: заголовок + курсивные пометки качества.
+    let rec_title = if has_winner {
+        format!("Рекомендуем: <b>{rec_name}</b>", rec_name = winner_name)
+    } else {
+        match rec.level.as_str() {
+            "Equivalent" => "Схемы эквивалентны".to_string(),
+            "KeepCurrent" => "Оставляем текущую схему".to_string(),
+            _ => "Лидер не определён".to_string(),
+        }
+    };
+    let mut rec_notes: Vec<String> = match &robust {
+        None => vec!["Все схемы забракованы — сравнивать нечего.".to_string()],
+        Some(r)
+            if r.flags.is_empty()
+                && r.confidence == crate::leader::LeaderConfidence::Normal =>
+        {
+            vec!["Лидер устойчив по медиане, выбросов и шума нет.".to_string()]
+        }
+        Some(r) => {
+            let mut v = r.flags.clone();
+            // Расхождение двух методов выбора — отдельная пометка.
+            // MSRV 1.85: схлопывание через let-цепочки требует Rust 1.88+.
+            #[allow(clippy::collapsible_if)]
+            if let (Some(rid), Some(w)) = (&robust_id, winner) {
+                if rid != &w.scheme_id {
+                    v.push(format!(
+                        "методы расходятся: по среднему лидирует «{}», по медиане — «{}» (среднее искажено выбросами)",
+                        w.name.clone().unwrap_or_else(|| w.scheme_id.clone()),
+                        r.name.clone().unwrap_or_else(|| r.scheme_id.clone()),
+                    ));
+                }
+            }
+            v
+        }
+    };
+    if !rec.reason.is_empty() {
+        rec_notes.push(rec.reason.clone());
+    }
+    let rec_notes_html: String = rec_notes
+        .iter()
+        .map(|n| format!("<div>{}</div>", esc(n)))
+        .collect();
+
+    let admitted = s.schemes.iter().filter(|x| !x.rejected).count();
+    let rejected_n = s.schemes.len() - admitted;
+    let total_runs: usize = s.schemes.iter().map(|x| x.runs).sum();
+    let (lead_value, lead_sub) = match &robust {
+        Some(r) => (
+            format!("{:.0} <small>тик/с</small>", r.median),
+            r.name.clone().unwrap_or_else(|| r.scheme_id.clone()),
+        ),
+        None => ("—".to_string(), "нет данных".to_string()),
+    };
+    let schemes_sub = if rejected_n > 0 {
+        format!("Допущено · брак: {rejected_n}")
+    } else {
+        "Допущено".to_string()
+    };
 
     format!(
-        "{HTML_CSS}<header><div class=\"brand\">PowerBench</div>\
-         <h1>Отчёт по сессии</h1>\
-         <div class=\"meta\">{day} · план <span class=\"mono\">{plan}</span></div>\
-         <div class=\"meta\">нагрузка {wl} · воркеров {wc} / ядер {lcpus} · хэш {hash} · seed {seed}</div></header>\
-         <h2>Вердикт</h2>\
-         <div class=\"verdict\"><span class=\"badge {cls}\">{level_label}</span>\
-         <span>{verdict}</span><span class=\"note-stat\">перевес {margin}</span></div>\
-         <div class=\"note\">{reason}</div>\
-         <h2>Схемы</h2>\
-         <table><thead><tr><th>Схема</th><th class=\"num\">Прогоны</th>\
-         <th class=\"num\">Медиана, тик/с</th><th class=\"num\">CV</th>\
-         <th class=\"num\">Стабильность</th><th class=\"num\">Худш. секунда</th><th>Статус</th></tr></thead>\
+        "{HTML_CSS}<div class=\"sheet\">\
+         <div class=\"topbar\"><span class=\"logo\">\
+         <svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\"><path d=\"M13 2 4 14h6l-1 8 9-12h-6l1-8z\" fill=\"#141519\"/></svg>\
+         </span><span class=\"wordmark\">PowerBench</span></div>\
+         <div class=\"pad\">\
+         <div class=\"title-row\"><h1>Отчёт по сессии</h1>\
+         <div class=\"chips\"><span class=\"chip\">\
+         <svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\">\
+         <rect x=\"2\" y=\"7\" width=\"20\" height=\"11\" rx=\"5.5\"/>\
+         <circle cx=\"8.5\" cy=\"12.5\" r=\"1.2\" fill=\"currentColor\" stroke=\"none\"/>\
+         <circle cx=\"15.5\" cy=\"12.5\" r=\"1.2\" fill=\"currentColor\" stroke=\"none\"/></svg>\
+         {wl}</span><span class=\"workers\">Воркеры: <b>{wc} / {lcpus}</b></span></div></div>\
+         <div class=\"dateline\">{day}</div>\
+         <div class=\"stats\">\
+         <div class=\"stat\"><div class=\"k\">ЛИДЕР</div><div class=\"v green\">{lead_value}</div>\
+         <div class=\"s\">{leader_name}</div></div>\
+         <div class=\"stat\"><div class=\"k\">ПЕРЕВЕС</div><div class=\"v\">{margin}</div>\
+         <div class=\"s\">{level_label}</div></div>\
+         <div class=\"stat\"><div class=\"k\">СХЕМ</div><div class=\"v\">{admitted}</div>\
+         <div class=\"s\">{schemes_sub}</div></div>\
+         <div class=\"stat\"><div class=\"k\">ПРОГОНОВ</div><div class=\"v\">{runs}</div>\
+         <div class=\"s\">Всего</div></div>\
+         </div>\
+         <div class=\"rec-card\">\
+         <div class=\"rec-label\">\
+         <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\">\
+         <path d=\"M12 3l2.7 5.6 6.1.8-4.5 4.2 1.1 6-5.4-3-5.4 3 1.1-6L3.2 9.4l6.1-.8L12 3z\"/></svg>\
+         РЕКОМЕНДАЦИЯ</div>\
+         <div class=\"rec-title\">{rec_title}</div>\
+         <div class=\"rec-notes\">{rec_notes}</div>\
+         </div>\
+         <h2>СХЕМЫ</h2>\
+         <table><thead><tr><th>Схема</th><th class=\"num\">Прогонов</th>\
+         <th class=\"num\">Медиана, тик/с</th><th class=\"num\">Отклонение</th>\
+         <th class=\"num\">Стабильность</th><th>Статус</th></tr></thead>\
          <tbody>{rows}</tbody></table>\
          {score}\
-         <div class=\"foot\">Сгенерировано {now_stamp} (UTC)</div></body></html>",
-        day = header_day,
-        plan = esc(&s.plan_guid),
+         </div>\
+         <div class=\"foot\">Сгенерировано {now_stamp} · PowerBench\
+         <span class=\"prov\">план <span class=\"mono\">{plan}</span> · хэш \
+         <span class=\"mono\">{hash}</span> · seed <span class=\"mono\">{seed}</span></span></div>\
+         </div></body></html>",
         wl = esc(&id.workload_version),
         wc = id.worker_count,
         lcpus = id.logical_cpus,
-        hash = esc(&id.config_hash),
-        seed = esc(&id.seed_hex),
-        cls = lvl_class(&rec.level),
-        level_label = esc(&rec.level_label),
-        verdict = verdict_text,
+        day = esc(&pretty_dt(&stamp)),
+        lead_value = lead_value,
+        leader_name = esc(&lead_sub),
         margin = margin,
-        reason = esc(&rec.reason),
+        level_label = esc(&rec.level_label),
+        admitted = admitted,
+        schemes_sub = esc(&schemes_sub),
+        runs = total_runs,
+        rec_title = rec_title,
+        rec_notes = rec_notes_html,
         rows = sch_rows,
         score = score_section(s),
-        now_stamp = esc(&date_time_stamp(now_unix_ns())),
+        now_stamp = esc(&pretty_dt(&date_time_stamp(now_unix_ns()))),
+        plan = esc(&s.plan_guid),
+        hash = esc(&id.config_hash),
+        seed = esc(&id.seed_hex),
     )
 }
 
@@ -263,7 +405,7 @@ fn render_header(sessions: &[&SessionJson]) -> String {
         String::new()
     };
     format!(
-        "<header><div class=\"brand\">PowerBench</div><h1>Отчёт по истории измерений</h1>\
+        "<header class=\"hero\"><div class=\"brand\"><i></i>PowerBench</div><h1>Отчёт по истории измерений</h1>\
          <div class=\"meta\">{count} сессий · период {first} — {last}{identity_line}</div>\
          {empty_note}</header>\
          <h2>Сводка</h2>{sum_html}"
@@ -315,13 +457,24 @@ fn render_chart(sessions: &[&SessionJson]) -> String {
     let n = sessions.len();
     let inner_h = H - T - B;
     let step = nice_step((y_max - y_min) / 5.0);
+    // Защита от бесконечного цикла: при огромных/вырожденных значениях
+    // (например, битая запись истории) `start` мог стать inf/NaN, а шаг —
+    // слишком мелким, и `v += step` переставал менять v. Ограничиваем и
+    // шаг, и число линий.
+    let step = if step.is_finite() && step > 0.0 {
+        step.max((y_max - y_min) / MAX_GRID_LINES as f64)
+    } else {
+        1.0
+    };
     let start = (y_min / step).ceil() * step;
     let y = |v: f64| T + inner_h - ((v - y_min) / (y_max - y_min)) * inner_h;
     let x = |col: usize| L + (col as f64 + 0.5) * ((W - L - R) / n as f64);
 
     let mut gridlines = String::new();
     let mut v = start;
-    while v <= y_max + 1e-9 {
+    let mut drawn = 0usize;
+    while v <= y_max + 1e-9 && drawn < MAX_GRID_LINES {
+        drawn += 1;
         gridlines.push_str(&format!(
             "<line class=\"grid\" x1=\"{0:.0}\" y1=\"{1:.1}\" x2=\"{2:.1}\" y2=\"{3:.1}\"/>",
             L,
@@ -588,37 +741,27 @@ fn score_section(s: &SessionJson) -> String {
         let name = sc.name.clone().unwrap_or_else(|| sc.scheme_id.clone());
         let is_leader = leader.map(|l| l.scheme_id == sc.scheme_id).unwrap_or(false);
         let badge = if sc.rejected {
-            "<span class=\"badge err\">забракована</span>".to_string()
+            "<span class=\"badge err\">ЗАБРАКОВАНА</span>".to_string()
         } else if is_leader {
-            "<span class=\"badge ok\">лидер по баллу</span>".to_string()
+            "<span class=\"badge ok\">ЛИДЕР</span>".to_string()
         } else {
-            "<span class=\"badge\">допущена</span>".to_string()
+            "<span class=\"badge\">ДОПУЩЕНА</span>".to_string()
         };
         if !sc.rejected && sc.score.is_finite() {
             admitted.push(sc.score);
         }
-        let mean = s
-            .schemes
-            .iter()
-            .find(|sch| sch.scheme_id.eq_ignore_ascii_case(&sc.scheme_id))
-            .and_then(|sch| {
-                (sch.mean_average_throughput.is_finite() && sch.mean_average_throughput > 0.0)
-                    .then_some(sch.mean_average_throughput)
-            });
-        let mean_html = mean
-            .map(|m| format!(" · <span class=\"muted\">{m:.0} тик/с</span>"))
-            .unwrap_or_default();
         let p = if sc.score.is_finite() && sc.score > 0.0 {
             sc.score.min(100.0)
         } else {
             0.0
         };
+        let lead_cls = if is_leader { " lead" } else { "" };
         bars.push_str(&format!(
-            "<div class=\"pbar\"><span class=\"plab\">{name}{mean_html}</span>\
+            "<div class=\"pbar{lead}\"><span class=\"plab\">{name}</span>\
              <div class=\"ptrack\"><i style=\"width:{p:.0}%\"></i></div>\
              <span class=\"pval\">{score:.1}</span>{badge}</div>",
+            lead = lead_cls,
             name = esc(&name),
-            mean_html = mean_html,
             p = p,
             score = sc.score,
             badge = badge,
@@ -778,6 +921,21 @@ fn periods(sessions: &[&SessionJson]) -> (String, String) {
     )
 }
 
+/// `27.09.2026 в 03:02` из UTC-метки `YYYYMMDDTHHMMSSZ###`.
+fn pretty_dt(stamp: &str) -> String {
+    if stamp.len() < 13 {
+        return stamp.to_string();
+    }
+    format!(
+        "{}.{}.{} в {}:{}",
+        &stamp[6..8],
+        &stamp[4..6],
+        &stamp[0..4],
+        &stamp[9..11],
+        &stamp[11..13]
+    )
+}
+
 /// `дд.мм.гггг` из UTC-метки `YYYYMMDDTHHMMSSZ###`.
 fn date_slice(stamp: &str, day0: usize, day1: usize) -> String {
     if stamp.len() < 8 {
@@ -907,6 +1065,18 @@ mod tests {
     fn report_empty_history() {
         let html = build_report(&[]);
         assert!(html.contains("История пуста"));
+    }
+
+    /// Регресс: огромные значения в истории вешали генератор отчёта
+    /// (бесконечный цикл построения сетки).
+    #[test]
+    fn report_survives_absurd_throughput() {
+        let a = sample_session("AAA", 1e300);
+        let b = sample_session("BBB", 5e299);
+        let html = build_report(&[a, b]);
+        assert!(html.ends_with("</body></html>"));
+        let lines = html.matches("<line class=\"grid\"").count();
+        assert!(lines <= MAX_GRID_LINES + 2, "слишком много линий: {lines}");
     }
 
     #[test]

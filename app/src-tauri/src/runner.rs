@@ -404,6 +404,14 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
             None
         }
     };
+    // Сессия записана в историю — точка долетала своё, иначе следующий
+    // новый запуск упрётся в «контрольная точка другого плана».
+    if let Err(e) = powerbench_orchestrator::checkpoint::clear_checkpoint() {
+        warn_of(
+            &app,
+            &format!("не удалось очистить контрольную точку: {e}"),
+        );
+    }
     let winner = json
         .recommendation
         .recommended_scheme
@@ -437,11 +445,78 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
     );
 }
 
-/// Сформировать HTML-отчёт по сессии рядом с результатами истории.
+/// Открыть файл приложением по умолчанию (для HTML — браузер).
+/// На Windows пробует несколько способов: rundll32 (надёжнее всего для
+/// URL/file-протокола), затем `cmd /C start`, затем проводник.
+pub fn open_with_default_app(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let arg = path.to_string_lossy().to_string();
+        // Способ 1: rundll32 — штатный запуск ассоциации файла.
+        if std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", &arg])
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+        // Способ 2: cmd /C start "" <path> (пустой заголовок обязателен,
+        // иначе путь в кавычках трактуется как заголовок окна).
+        if std::process::Command::new("cmd")
+            .args(["/C", "start", "", &arg])
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+        // Способ 3: explorer делегирует открытие ассоциированному приложению.
+        std::process::Command::new("explorer")
+            .arg(&arg)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("не удалось открыть «{}»: {e}", path.display()))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("не удалось открыть «{}»: {e}", path.display()));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("не удалось открыть «{}»: {e}", path.display()));
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = path;
+        return Err("открытие файлов не поддерживается на этой ОС".to_string());
+    }
+}
+
+/// Сформировать HTML-отчёт по сессии рядом с результатами истории и открыть в браузере.
 pub fn write_session_report(json: &SessionJson) -> Option<String> {
+    match write_session_report_strict(json) {
+        Ok(path) => Some(path),
+        Err(e) => {
+            eprintln!("PowerBench: {e}");
+            None
+        }
+    }
+}
+
+/// То же, но с причиной ошибки: файл всегда создаётся, открытие браузера —
+/// best-effort с понятным сообщением при неудаче.
+pub fn write_session_report_strict(json: &SessionJson) -> Result<String, String> {
     let html = powerbench_orchestrator::report::build_session_report(json);
     let dir = powerbench_orchestrator::history::results_dir();
-    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("не удалось создать каталог «{}»: {e}", dir.display()))?;
     let start = powerbench_orchestrator::history::session_started_at_ns(json).unwrap_or(0);
     let stamp = powerbench_orchestrator::history::date_time_stamp(start);
     let plan_part = powerbench_orchestrator::history::sanitize(&json.plan_guid);
@@ -453,8 +528,15 @@ pub fn write_session_report(json: &SessionJson) -> Option<String> {
         ));
         suffix += 1;
     }
-    std::fs::write(&candidate, html).ok()?;
-    Some(candidate.display().to_string())
+    std::fs::write(&candidate, &html)
+        .map_err(|e| format!("не удалось записать «{}»: {e}", candidate.display()))?;
+    if let Err(e) = open_with_default_app(&candidate) {
+        return Err(format!(
+            "отчёт сохранён ({}), но браузер открыть не удалось: {e}",
+            candidate.display()
+        ));
+    }
+    Ok(candidate.display().to_string())
 }
 
 fn empty_finished() -> FinishedPayload {

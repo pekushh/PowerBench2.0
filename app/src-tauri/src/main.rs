@@ -6,11 +6,11 @@ mod logger;
 mod runner;
 
 use crate::bridge::{
-    AppState, ac_power_online, appsettings_path, checkpoint_status, get_settings, history_delete,
-    history_export_to, history_list, history_open, history_open_folder, history_report,
-    identity_info, is_admin, list_schemes, log_history, open_file, open_folder, results_dir,
-    scheme_action, session_report, set_settings, start_test, stop_test, storage_stats,
-    system_ready, test_running,
+    AppState, ac_power_online, appsettings_path, checkpoint_discard, checkpoint_status,
+    get_settings, history_delete, history_export_to, history_list, history_open,
+    history_open_folder, history_report, identity_info, is_admin, list_schemes, log_history,
+    open_file, open_folder, quarantine_clear, quarantine_list, results_dir, scheme_action,
+    session_report, set_settings, start_test, stop_test, storage_stats, system_ready, test_running,
 };
 use tauri::{
     Manager,
@@ -101,6 +101,7 @@ fn main() {
             get_settings,
             set_settings,
             checkpoint_status,
+            checkpoint_discard,
             identity_info,
             start_test,
             stop_test,
@@ -112,6 +113,8 @@ fn main() {
             session_report,
             history_delete,
             history_open_folder,
+            quarantine_list,
+            quarantine_clear,
             storage_stats,
             open_folder,
             open_file,

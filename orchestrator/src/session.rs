@@ -30,6 +30,11 @@ use powerbench_windows::powercfg::PowerScheme;
 
 use crate::checkpoint::{Checkpoint, PhaseStats, StoredRun};
 use crate::config::{SessionConfig, phase_durations, round_order, run_key, validate_config};
+use crate::quarantine::{
+    DEGRADED_MIN_RUNS, DEGRADED_SHARE, QuarantineKind, TestingMarker, UNSTABLE_CV_LIMIT,
+    UNSTABLE_MIN_RUNS, clear_testing_marker, degraded_share, load_quarantine, preflight_filter,
+    quarantine_add, unstable_cv, write_testing_marker,
+};
 
 /// Период опроса сторожевого таймера.
 pub const WATCHDOG_POLL_MS: u64 = 250;
@@ -630,6 +635,28 @@ pub fn run_session(
     if let Some(reason) = validate_config(&plan) {
         return Err(SessionError::Config(reason));
     }
+    // Карантин (префлайт): забракованные схемы не допускаются к прогонам.
+    // Фильтруем здесь, а не в UI, чтобы работало и для CLI.
+    let plan = {
+        let (admitted, skipped) = preflight_filter(&plan.scheme_ids, &load_quarantine());
+        for (id, why) in &skipped {
+            note(
+                &observer,
+                &mut events,
+                SessionEvent::Warn(format!("Схема «{id}» пропущена: {why}")),
+            );
+        }
+        if admitted.is_empty() {
+            return Err(SessionError::Config(
+                "все выбранные схемы находятся в карантине — верните их в бенчмарк вручную"
+                    .to_string(),
+            ));
+        }
+        SessionConfig {
+            scheme_ids: admitted,
+            ..plan
+        }
+    };
     if !driver.is_admin() {
         return Err(SessionError::NotAdmin);
     }
@@ -742,6 +769,15 @@ pub fn run_session(
     let (aggregates, rejection_reasons, recommendation) =
         build_aggregation(&checkpoint, &signature, expected_runs);
 
+    // Пост-сессия: карантин нестабильных и деградировавших схем.
+    quarantine_post_session(
+        &checkpoint,
+        &plan.plan_guid,
+        &name_map,
+        &observer,
+        &mut events,
+    );
+
     note(&observer, &mut events, SessionEvent::Finished);
     Ok(SessionOutcome {
         checkpoint,
@@ -827,6 +863,25 @@ fn run_session_loop(
                     scheme_id: scheme_id.clone(),
                     cause,
                 })?;
+            // Маркер активного прогона: переживает убийство процесса.
+            // Если следующий запуск найдёт его — схема уйдёт в карантин
+            // как подозрение на жёсткое зависание ПК.
+            if let Err(e) = write_testing_marker(&TestingMarker {
+                scheme_id: scheme_id.clone(),
+                scheme_name: name_map
+                    .get(&scheme_id.to_ascii_lowercase())
+                    .cloned(),
+                plan_guid: plan.plan_guid.clone(),
+                started_at_ns: now_unix_ns(),
+            }) {
+                note(
+                    observer,
+                    events,
+                    SessionEvent::Warn(format!(
+                        "не удалось записать маркер прогона «{scheme_id}»: {e}"
+                    )),
+                );
+            }
             note(
                 observer,
                 events,
@@ -883,6 +938,7 @@ fn run_session_loop(
                         || verdict == Some(WatchdogVerdict::UserCancelled)
                     {
                         cancelled = true;
+                        clear_testing_marker();
                         break 'outer;
                     }
                     note(
@@ -896,14 +952,29 @@ fn run_session_loop(
                             ),
                         },
                     );
-                    checkpoint.rejections.insert(
-                        scheme_id.clone(),
-                        format!("нет прогресса более {} секунд", WATCHDOG_NO_PROGRESS_SECS),
+                    let reason = format!(
+                        "нет прогресса более {} секунд (зависание на разогреве)",
+                        WATCHDOG_NO_PROGRESS_SECS
                     );
+                    checkpoint.rejections.insert(scheme_id.clone(), reason.clone());
                     store.save(checkpoint).map_err(SessionError::Persist)?;
+                    // Зависание на разогреве — сразу в карантин.
+                    quarantine_scheme(
+                        &scheme_id,
+                        name_map,
+                        QuarantineKind::NoProgress,
+                        &reason,
+                        &plan.plan_guid,
+                        observer,
+                        events,
+                    );
+                    clear_testing_marker();
                     continue;
                 }
-                Err(err) => return Err(SessionError::Engine(err)),
+                Err(err) => {
+                    clear_testing_marker();
+                    return Err(SessionError::Engine(err));
+                }
                 Ok(_) => {
                     let _ = warmup_handle.join();
                 }
@@ -932,6 +1003,10 @@ fn run_session_loop(
             for (idx, (&phase, &secs)) in phases.iter().zip(phase_secs.iter()).enumerate() {
                 if user_wants_stop(user_cancel) {
                     cancelled = true;
+                    // Маркер прогона обязательно снимаем: иначе при следующем
+                    // старте схема попадёт в карантин как «зависшая по вине
+                    // пользователя».
+                    clear_testing_marker();
                     break 'outer;
                 }
                 let label = phase_label(phase);
@@ -973,6 +1048,7 @@ fn run_session_loop(
                         #[allow(clippy::collapsible_if)]
                         if let Some(expected) = reference {
                             if report.first_tick_checksum != expected {
+                                clear_testing_marker();
                                 return Err(SessionError::ChecksumMismatch {
                                     scheme_id: scheme_id.clone(),
                                     phase: label.to_string(),
@@ -1038,17 +1114,35 @@ fn run_session_loop(
                             "нет прогресса более {} секунд (фаза «{phase}»)",
                             WATCHDOG_NO_PROGRESS_SECS
                         );
-                        checkpoint.rejections.insert(scheme_id.clone(), reason);
+                        checkpoint.rejections.insert(scheme_id.clone(), reason.clone());
                         store.save(checkpoint).map_err(SessionError::Persist)?;
+                        // Зависание фазы — сразу в карантин.
+                        quarantine_scheme(
+                            &scheme_id,
+                            name_map,
+                            QuarantineKind::NoProgress,
+                            &reason,
+                            &plan.plan_guid,
+                            observer,
+                            events,
+                        );
+                        clear_testing_marker();
                         // Зависла одна схема — остальные схемы раунда идут дальше.
                         continue 'scheme;
                     }
                     Err(PhaseFailure::UserCancelled) => {
                         cancelled = true;
+                        clear_testing_marker();
                         break 'outer;
                     }
-                    Err(PhaseFailure::LoadDidNotStop) => return Err(SessionError::LoadDidNotStop),
-                    Err(PhaseFailure::Engine(err)) => return Err(SessionError::Engine(err)),
+                    Err(PhaseFailure::LoadDidNotStop) => {
+                        clear_testing_marker();
+                        return Err(SessionError::LoadDidNotStop);
+                    }
+                    Err(PhaseFailure::Engine(err)) => {
+                        clear_testing_marker();
+                        return Err(SessionError::Engine(err));
+                    }
                 }
             }
             let duration_ms = phase_started.elapsed().as_millis() as u64;
@@ -1115,6 +1209,9 @@ fn run_session_loop(
                     },
                 );
             }
+
+            // Прогон записан — маркер больше не нужен: зависания уже не будет.
+            clear_testing_marker();
 
             // Охлаждение после прогона, кроме самого последнего в плане.
             if !is_last_planned_run(plan, round, &scheme_id) {
@@ -1187,6 +1284,145 @@ fn is_last_planned_run(plan: &SessionConfig, round: u32, scheme_id: &str) -> boo
     let order = round_order(&plan.scheme_ids, last_round);
     order.last().map(|s| s == scheme_id).unwrap_or(false)
     // Совпадение «последнего ключа» и этого прогона.
+}
+
+/// Забраковать схему в карантин (best-effort: ошибка записи — предупреждение
+/// в журнал, сессия продолжается). При повторной браковке той же схемы
+/// журнал не засоряется (quarantine_add идемпотентен).
+#[allow(clippy::too_many_arguments)]
+fn quarantine_scheme(
+    scheme_id: &str,
+    name_map: &BTreeMap<String, String>,
+    kind: QuarantineKind,
+    reason: &str,
+    plan_guid: &str,
+    observer: &Option<Arc<dyn TelemetryObserver>>,
+    events: &mut Vec<SessionEvent>,
+) {
+    let name = name_map
+        .get(&scheme_id.to_ascii_lowercase())
+        .map(String::as_str);
+    match quarantine_add(scheme_id, name, kind, reason, plan_guid) {
+        Ok(true) => note(
+            observer,
+            events,
+            SessionEvent::Warn(format!(
+                "Схема «{scheme_id}» отправлена в карантин ({}): {reason}",
+                kind.label()
+            )),
+        ),
+        Ok(false) => {}
+        Err(e) => note(
+            observer,
+            events,
+            SessionEvent::Warn(format!(
+                "не удалось записать карантин схемы «{scheme_id}»: {e}"
+            )),
+        ),
+    }
+}
+
+/// Медиана массива (копия сортируется). Пустой массив — 0.0.
+fn median_of(values: &[f64]) -> f64 {
+    let mut valid: Vec<f64> = values
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    if valid.is_empty() {
+        return 0.0;
+    }
+    valid.sort_by(|a, b| a.total_cmp(b));
+    let n = valid.len();
+    if n % 2 == 1 {
+        valid[n / 2]
+    } else {
+        (valid[n / 2 - 1] + valid[n / 2]) / 2.0
+    }
+}
+
+/// Пост-сессия: карантин нестабильных и деградировавших схем по статистике
+/// всех записанных прогонов. Вызывается один раз после агрегации.
+fn quarantine_post_session(
+    checkpoint: &Checkpoint,
+    plan_guid: &str,
+    name_map: &BTreeMap<String, String>,
+    observer: &Option<Arc<dyn TelemetryObserver>>,
+    events: &mut Vec<SessionEvent>,
+) {
+    let mut means: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    let mut medians: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for r in &checkpoint.runs {
+        let avg = r.combined.average_throughput;
+        if avg.is_finite() && avg > 0.0 {
+            means
+                .entry(r.scheme_id.to_ascii_lowercase())
+                .or_default()
+                .push(avg);
+        }
+        let med = r.combined.median_throughput;
+        if med.is_finite() && med > 0.0 {
+            medians
+                .entry(r.scheme_id.to_ascii_lowercase())
+                .or_default()
+                .push(med);
+        }
+    }
+    if means.len() < 2 {
+        return;
+    }
+    let best_median = medians
+        .values()
+        .map(|v| median_of(v))
+        .fold(0.0f64, f64::max);
+    // Канонический GUID для журнала (первое встречное написание из прогонов).
+    let canon = |lower: &str| {
+        checkpoint
+            .runs
+            .iter()
+            .find(|r| r.scheme_id.eq_ignore_ascii_case(lower))
+            .map(|r| r.scheme_id.clone())
+            .unwrap_or_else(|| lower.to_string())
+    };
+    let mut keys: Vec<String> = means.keys().cloned().collect();
+    keys.sort();
+    for lower in keys {
+        let id = canon(&lower);
+        let run_means = &means[&lower];
+        if let Some(cv) = unstable_cv(run_means, UNSTABLE_MIN_RUNS, UNSTABLE_CV_LIMIT) {
+            quarantine_scheme(
+                &id,
+                name_map,
+                QuarantineKind::Unstable,
+                &format!("разброс прогонов CV={cv:.1}% при {} прогонах", run_means.len()),
+                plan_guid,
+                observer,
+                events,
+            );
+            continue;
+        }
+        // MSRV 1.85: схлопывание через let-цепочки требует Rust 1.88+.
+        #[allow(clippy::collapsible_if)]
+        if let Some(run_meds) = medians.get(&lower) {
+            if run_meds.len() >= DEGRADED_MIN_RUNS {
+                let med = median_of(run_meds);
+                if degraded_share(med, best_median, DEGRADED_SHARE) {
+                    quarantine_scheme(
+                        &id,
+                        name_map,
+                        QuarantineKind::Degraded,
+                        &format!(
+                            "медиана {med:.1} тик/с — менее {:.0}% от лучшей ({best_median:.1})",
+                            DEGRADED_SHARE * 100.0
+                        ),
+                        plan_guid,
+                        observer,
+                        events,
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn matched_stats(times: &[f64]) -> RunStats {

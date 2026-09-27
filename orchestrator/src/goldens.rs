@@ -102,9 +102,9 @@ fn session_report_is_deterministic() {
         "повторный прогон обязан дать побайтово тот же HTML"
     );
     let html = first.as_str();
-    // Золотые маркеры: вердикт, лидер со счётчиком тик/с, перевес и имя плана.
+    // Золотые маркеры: рекомендация, лидер со счётчиком тик/с, перевес и имя плана.
     assert!(html.contains("Подтверждено"));
-    assert!(html.contains("Вердикт"));
+    assert!(html.contains("РЕКОМЕНДАЦИЯ"));
     assert!(html.contains("500.0"));
     assert!(html.contains("12.50%"));
     assert!(html.contains("План AAA"));

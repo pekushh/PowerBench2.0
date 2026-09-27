@@ -119,6 +119,10 @@ pub struct SchemeJson {
 }
 
 impl SchemeJson {
+    /// Нефинитное значение (`NaN`/`inf`) в JSON пишется как `null`, а поле
+    /// объявлено как `f64` — такой файл потом не читается (`load_result`
+    /// падает, запись навсегда теряется для истории и отчёта). Поэтому все
+    /// метрики проходят через `finite_or_zero` на входе в DTO.
     pub fn from_aggregate(
         scheme_id: String,
         rejected: bool,
@@ -126,34 +130,40 @@ impl SchemeJson {
         aggregate: &AggregateResult,
         per_run: Vec<StoredRun>,
     ) -> Self {
+        let a = aggregate;
         Self {
             scheme_id,
             name: per_run.first().and_then(|r| r.scheme_name.clone()),
             rejected,
             rejection_reason,
-            runs: aggregate.runs,
-            mean_average_throughput: aggregate.mean_average_throughput,
-            sample_std: aggregate.sample_std,
-            t_value: aggregate.t_value,
-            margin: aggregate.margin,
-            ci_95: aggregate.ci_95,
-            run_variation_percent: aggregate.run_variation_percent,
-            cv_warning: aggregate.cv_warning,
-            median_throughput: aggregate.median_throughput,
-            median_p1_throughput: aggregate.median_p1_throughput,
-            median_p01_throughput: aggregate.median_p01_throughput,
-            median_p95_execution_time_ms: aggregate.median_p95_execution_time_ms,
-            median_p99_execution_time_ms: aggregate.median_p99_execution_time_ms,
-            median_consistency_percent: aggregate.median_consistency_percent,
-            median_burst_retention_percent: aggregate.median_burst_retention_percent,
-            median_jitter_p99_ms: aggregate.median_jitter_p99_ms,
-            median_worst_window_throughput: aggregate.median_worst_window_throughput,
-            median_background_purity: aggregate.median_background_purity,
-            run_duration_ms: aggregate.run_duration_ms,
-            started_at_min_ns: aggregate.started_at_min_ns,
+            runs: a.runs,
+            mean_average_throughput: finite_or_zero(a.mean_average_throughput),
+            sample_std: finite_or_zero(a.sample_std),
+            t_value: finite_or_zero(a.t_value),
+            margin: finite_or_zero(a.margin),
+            ci_95: [finite_or_zero(a.ci_95[0]), finite_or_zero(a.ci_95[1])],
+            run_variation_percent: finite_or_zero(a.run_variation_percent),
+            cv_warning: a.cv_warning,
+            median_throughput: finite_or_zero(a.median_throughput),
+            median_p1_throughput: finite_or_zero(a.median_p1_throughput),
+            median_p01_throughput: finite_or_zero(a.median_p01_throughput),
+            median_p95_execution_time_ms: finite_or_zero(a.median_p95_execution_time_ms),
+            median_p99_execution_time_ms: finite_or_zero(a.median_p99_execution_time_ms),
+            median_consistency_percent: finite_or_zero(a.median_consistency_percent),
+            median_burst_retention_percent: finite_or_zero(a.median_burst_retention_percent),
+            median_jitter_p99_ms: finite_or_zero(a.median_jitter_p99_ms),
+            median_worst_window_throughput: finite_or_zero(a.median_worst_window_throughput),
+            median_background_purity: a.median_background_purity.map(finite_or_zero),
+            run_duration_ms: a.run_duration_ms,
+            started_at_min_ns: a.started_at_min_ns,
             per_run,
         }
     }
+}
+
+/// `NaN`/`inf` → `0.0`; конечные значения проходят без изменений.
+fn finite_or_zero(v: f64) -> f64 {
+    if v.is_finite() { v } else { 0.0 }
 }
 
 /// Рекомендация в результате.
@@ -290,5 +300,61 @@ mod tests {
             p_margin_gt_0: 0.8,
             p_margin_gt_1pct: 0.7,
         };
+    }
+
+    /// Регресс: `NaN`/`inf` в агрегате (схема без прогонов) раньше писались
+    /// в JSON как `null`, и запись истории становилась нечитаемой навсегда.
+    #[test]
+    fn non_finite_metrics_become_zero_and_survive_json() {
+        let agg = AggregateResult {
+            runs: 0,
+            mean_average_throughput: f64::NAN,
+            sample_std: f64::INFINITY,
+            t_value: f64::NEG_INFINITY,
+            margin: f64::NAN,
+            ci_95: [f64::NAN, f64::INFINITY],
+            run_variation_percent: f64::NAN,
+            cv_warning: false,
+            median_throughput: f64::NAN,
+            median_p1_throughput: f64::NAN,
+            median_p01_throughput: f64::NAN,
+            median_p95_execution_time_ms: f64::NAN,
+            median_p99_execution_time_ms: f64::NAN,
+            median_consistency_percent: f64::NAN,
+            median_burst_retention_percent: f64::NAN,
+            median_jitter_p99_ms: f64::NAN,
+            median_worst_window_throughput: f64::NAN,
+            median_background_purity: Some(f64::NAN),
+            run_duration_ms: 0,
+            started_at_min_ns: 0,
+        };
+        let sch = SchemeJson::from_aggregate("g".into(), true, Some("брак".into()), &agg, Vec::new());
+        // Метрики — числа: `null` означал бы, что файл не прочитается обратно.
+        // `name` здесь `Option<String>`, его `null` допустим.
+        let text = serde_json::to_string(&sch).expect("сериализация");
+        for field in [
+            "mean_average_throughput",
+            "median_throughput",
+            "run_variation_percent",
+            "median_consistency_percent",
+            "median_background_purity",
+        ] {
+            assert!(
+                !text.contains(&format!("\"{field}\":null")),
+                "поле {field} записано как null: {text}"
+            );
+        }
+        let back: SchemeJson = serde_json::from_str(&text).expect("десериализация");
+        assert_eq!(back.median_throughput, 0.0);
+        assert_eq!(back.ci_95, [0.0, 0.0]);
+        assert_eq!(back.median_background_purity, Some(0.0));
+    }
+
+    #[test]
+    fn finite_metrics_pass_through_unchanged() {
+        assert_eq!(finite_or_zero(12.5), 12.5);
+        assert_eq!(finite_or_zero(-0.0), -0.0);
+        assert_eq!(finite_or_zero(f64::NAN), 0.0);
+        assert_eq!(finite_or_zero(f64::INFINITY), 0.0);
     }
 }

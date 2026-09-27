@@ -2,10 +2,17 @@
 // активация, удаление, экспорт, дублирование.
 
 import { useMemo, useState } from "react";
-import { commands, type SchemeRow, type SettingsDto } from "../api";
-import { Badge, Button, Modal, Seg } from "./ui";
+import {
+  QUARANTINE_LABELS,
+  commands,
+  type QuarantineEntry,
+  type SchemeRow,
+  type SettingsDto,
+} from "../api";
+import { Badge, Button, Modal, Seg, Spot } from "./ui";
 import {
   MinusCircleIcon,
+  MinusIcon,
   PowerIcon,
   SearchIcon,
   StarFilledIcon,
@@ -18,47 +25,245 @@ type Filter = "all" | "fav" | "excluded";
 
 type Confirm = { kind: "delete"; guid: string; name: string } | { kind: "restore" } | null;
 
-/** Простые карточки выбора для визарда (scheme-grid). */
-export function SchemeCards({
+/** Сравнение по алфавиту (русская локаль), безымянные — в конец. */
+function byName(a: SchemeRow, b: SchemeRow): number {
+  const an = (a.name || "").trim();
+  const bn = (b.name || "").trim();
+  if (!an && !bn) return a.guid.localeCompare(b.guid);
+  if (!an) return 1;
+  if (!bn) return -1;
+  return an.localeCompare(bn, "ru", { sensitivity: "base" });
+}
+
+/**
+ * Выбор схем для бенчмарка: та же плитка, что на странице «Схемы питания»
+ * (поиск, избранное, исключение, карантин), но клик по плитке включает
+ * схему в сравнение, а не выбирает её для экспорта.
+ */
+export function SchemePicker({
   schemes,
   selected,
-  excluded,
+  settings,
+  quarantine,
   onToggle,
+  onChanged,
 }: {
   schemes: SchemeRow[];
   selected: Set<string>;
-  excluded: Set<string>;
+  settings: SettingsDto | null;
+  quarantine: QuarantineEntry[];
   onToggle: (guid: string, active: boolean) => void;
+  onChanged: () => void;
 }) {
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
+
+  const favs = useMemo(
+    () => new Set((settings?.favorite_schemes ?? []).map((g) => g.toLowerCase())),
+    [settings],
+  );
+  const excluded = useMemo(
+    () => new Set((settings?.excluded_schemes ?? []).map((g) => g.toLowerCase())),
+    [settings],
+  );
+  const quarantined = useMemo(() => {
+    const m = new Map<string, QuarantineEntry>();
+    for (const q of quarantine) m.set(q.scheme_id.toLowerCase(), q);
+    return m;
+  }, [quarantine]);
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return [...schemes]
+      .filter((s) => {
+        if (q && !s.name.toLowerCase().includes(q) && !s.guid.toLowerCase().includes(q)) return false;
+        if (filter === "fav" && !favs.has(s.guid.toLowerCase())) return false;
+        if (filter === "excluded" && !excluded.has(s.guid.toLowerCase())) return false;
+        return true;
+      })
+      .sort(byName);
+  }, [schemes, query, filter, favs, excluded]);
+
+  const patch = async (p: Partial<SettingsDto>) => {
+    try {
+      const cur = settings ?? (await commands.getSettings());
+      await commands.setSettings({ ...cur, ...p });
+      onChanged();
+    } catch (e) {
+      pushToast("err", String(e));
+    }
+  };
+
+  const toggleFav = (guid: string) => {
+    const cur = settings?.favorite_schemes ?? [];
+    const has = cur.some((g) => g.toLowerCase() === guid.toLowerCase());
+    void patch({
+      favorite_schemes: has
+        ? cur.filter((g) => g.toLowerCase() !== guid.toLowerCase())
+        : [...cur, guid],
+    });
+  };
+
+  const toggleExcluded = (guid: string) => {
+    const cur = settings?.excluded_schemes ?? [];
+    const has = cur.some((g) => g.toLowerCase() === guid.toLowerCase());
+    void patch({
+      excluded_schemes: has
+        ? cur.filter((g) => g.toLowerCase() !== guid.toLowerCase())
+        : [...cur, guid],
+    });
+  };
+
+  const restore = (guid: string) => {
+    commands
+      .quarantineClear(guid)
+      .then((was) => {
+        pushToast("okk", was ? "Схема возвращена в бенчмарк" : "Схема уже вне карантина");
+        onChanged();
+      })
+      .catch((e) => pushToast("err", String(e)));
+  };
+
+  const activate = (s: SchemeRow) => {
+    const q = quarantined.get(s.guid.toLowerCase());
+    if (q) {
+      pushToast(
+        "err",
+        `Схема в карантине (${QUARANTINE_LABELS[q.kind] ?? q.kind}): ${q.reason}. Верните её кнопкой на плитке.`,
+      );
+      return;
+    }
+    onToggle(s.guid, s.active);
+  };
+
   return (
-    <div className="scheme-grid">
-      {schemes.map((s) => {
-        const on = selected.has(s.guid);
-        const isEx = excluded.has(s.guid.toLowerCase());
-        return (
-          <div
-            key={s.guid}
-            className={`scheme-card ${on ? "on" : ""}`}
-            role="button"
-            tabIndex={0}
-            onClick={() => onToggle(s.guid, s.active)}
-            onKeyDown={(e) => e.key === "Enter" && onToggle(s.guid, s.active)}
-          >
-            <div className="scheme-name">{s.name || "Без названия"}</div>
-            <div className="scheme-meta">
-              {s.active ? <Badge kind="ok">АКТИВНА</Badge> : null}
-              {isEx ? <Badge kind="plain">исключена</Badge> : null}
-            </div>
-            <div className="scheme-id" title="ID схемы">
-              {s.guid}
-            </div>
-            <div className="check">
-              <span className="tick">{on ? "✓" : ""}</span>
-              {on ? "Выбрано" : "Выбрать"}
-            </div>
+    <div className="scheme-picker">
+      <div className="pick-search">
+        <div className="search-box">
+          <SearchIcon />
+          <input
+            className="search"
+            placeholder="Поиск схемы по имени или GUID…"
+            aria-label="Поиск схемы питания"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {query ? (
+            <button className="search-clear" title="Очистить поиск" onClick={() => setQuery("")}>
+              ×
+            </button>
+          ) : null}
+        </div>
+        <Seg
+          options={[
+            { value: "all", label: "Все" },
+            { value: "fav", label: "Избранные" },
+            { value: "excluded", label: "Исключённые" },
+          ]}
+          value={filter}
+          onChange={setFilter}
+        />
+        <span className="pick-count">
+          {visible.length} из {schemes.length} · выбрано {selected.size}
+        </span>
+      </div>
+
+      {visible.length === 0 ? (
+        <div className="glass inset">
+          <div className="muted">
+            {query.trim()
+              ? `По запросу «${query.trim()}» ничего не найдено.`
+              : "Нет схем для отображения."}
           </div>
-        );
-      })}
+        </div>
+      ) : (
+        <div className="pick-grid">
+          {visible.map((s) => {
+            const key = s.guid.toLowerCase();
+            const isFav = favs.has(key);
+            const isEx = excluded.has(key);
+            const q = quarantined.get(key);
+            const on = selected.has(s.guid);
+            const cls = [
+              "pick-tile",
+              on ? "on" : "",
+              q ? "quarantined" : "",
+              !q && isEx ? "excluded" : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+            return (
+              <Spot
+                key={s.guid}
+                className={cls}
+                role="button"
+                tabIndex={0}
+                title={q ? `Карантин (${QUARANTINE_LABELS[q.kind] ?? q.kind}): ${q.reason}` : undefined}
+                onClick={() => activate(s)}
+                onKeyDown={(e) => e.key === "Enter" && activate(s)}
+              >
+                <div className="pick-name">{s.name || "Без названия"}</div>
+                <div className="pick-badges">
+                  {s.active ? <Badge kind="ok">АКТИВНА</Badge> : null}
+                  {q ? (
+                    <Badge kind="danger" title={q.reason}>
+                      карантин · {QUARANTINE_LABELS[q.kind] ?? q.kind}
+                    </Badge>
+                  ) : isEx ? (
+                    <Badge kind="plain">исключена</Badge>
+                  ) : null}
+                </div>
+                <div className="scheme-id" title="ID схемы">
+                  {s.guid}
+                </div>
+                {q ? <div className="pick-why">{q.reason}</div> : null}
+                <div className="pick-foot">
+                  <span className="pick-state">
+                    <span className="tick">{on && !q ? "✓" : ""}</span>
+                    {q ? "в карантине" : on ? "Выбрано" : "Выбрать"}
+                  </span>
+                  <span className="ts-grow" />
+                  {q ? (
+                    <button
+                      className="icon-btn"
+                      title="Вернуть из карантина"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        restore(s.guid);
+                      }}
+                    >
+                      <MinusIcon />
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        className={`icon-btn${isFav ? " on-fav" : ""}`}
+                        title={isFav ? "Убрать из избранного" : "В избранное"}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleFav(s.guid);
+                        }}
+                      >
+                        {isFav ? <StarFilledIcon /> : <StarOutlineIcon />}
+                      </button>
+                      <button
+                        className={`icon-btn${isEx ? " on-ex" : ""}`}
+                        title={isEx ? "Включить в бенчмарк" : "Исключить из бенчмарка"}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleExcluded(s.guid);
+                        }}
+                      >
+                        <MinusCircleIcon />
+                      </button>
+                    </>
+                  )}
+                </div>
+              </Spot>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -160,6 +160,37 @@ export function TrashIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/** Щит (права администратора). */
+export function ShieldIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinejoin="round" {...props}>
+      <path d="M12 2.5 19 5.5v6c0 4.8-3.2 7.9-7 9.5-3.8-1.6-7-4.7-7-9.5v-6l7-3Z" />
+      <path d="m9.2 11.8 2 2 3.6-3.8" strokeLinecap="round" />
+    </Base>
+  );
+}
+
+/** Розетка/вилка (питание от сети). */
+export function SocketIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" {...props}>
+      <path d="M9 2.5v5.5M15 2.5v5.5M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0V8Z" />
+      <path d="M12 17v4.5" />
+    </Base>
+  );
+}
+
+/** Экспорт (стрелка вверх из лотка). */
+export function ExportIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M12 15V3.5" />
+      <path d="M7 8.5 12 3.5l5 5" />
+      <path d="M5 15.5V19a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5" />
+    </Base>
+  );
+}
+
 /** Лупа (поиск). */
 export function SearchIcon(props: SVGProps<SVGSVGElement>) {
   return (

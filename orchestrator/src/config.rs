@@ -48,11 +48,16 @@ pub struct SessionConfig {
 
 /// Ограничения настроек (спецификация).
 pub const MIN_DURATION_SECONDS: u64 = 9;
+/// Потолок длительности измеряемой части: защита от переполнения расчёта
+/// ёмкости буфера сэмплов (`duration * ticks_per_second`).
+pub const MAX_DURATION_SECONDS: u64 = 3600;
 pub const MIN_WARMUP_SECONDS: u64 = 2;
 pub const MIN_COOLING_SECONDS: u64 = 0;
 pub const MAX_COOLING_SECONDS: u64 = 60;
 pub const MIN_REPETITIONS: u32 = 1;
 pub const MAX_REPETITIONS: u32 = 9;
+/// Потолок числа воркеров (движок всё равно упирается в число ядер).
+pub const MAX_WORKER_COUNT: usize = 256;
 /// Порог фоновой нагрузки по умолчанию.
 pub const DEFAULT_BACKGROUND_PERCENT: f64 = 5.0;
 pub const MIN_BACKGROUND_PERCENT: f64 = 0.5;
@@ -65,6 +70,14 @@ pub fn validate_config(cfg: &SessionConfig) -> Option<String> {
         return Some(format!(
             "длительность должна быть не меньше {} с, задано {}",
             MIN_DURATION_SECONDS, cfg.duration_seconds
+        ));
+    }
+    // Верхняя граница: `capacity_for` умножает длительность на оценку тиков в
+    // секунду, и без предела это переполнение (паника в debug, wrap в release).
+    if cfg.duration_seconds > MAX_DURATION_SECONDS {
+        return Some(format!(
+            "длительность должна быть не больше {} с, задано {}",
+            MAX_DURATION_SECONDS, cfg.duration_seconds
         ));
     }
     if cfg.warmup_seconds < MIN_WARMUP_SECONDS {
@@ -95,6 +108,19 @@ pub fn validate_config(cfg: &SessionConfig) -> Option<String> {
     }
     if cfg.scheme_ids.is_empty() {
         return Some("выберите хотя бы одну схему питания".to_string());
+    }
+    // `worker_count == Some(0)` доходил до `Pool::new` и ронял поток паникой
+    // «пул воркеров не может быть пустым».
+    if let Some(w) = cfg.worker_count {
+        if w == 0 {
+            return Some("число воркеров должно быть не меньше 1".to_string());
+        }
+        if w > MAX_WORKER_COUNT {
+            return Some(format!(
+                "число воркеров должно быть не больше {}, задано {}",
+                MAX_WORKER_COUNT, w
+            ));
+        }
     }
     if cfg.plan_guid.trim().is_empty() {
         return Some("идентификатор плана пуст".to_string());

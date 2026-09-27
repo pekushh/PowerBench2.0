@@ -59,49 +59,93 @@ impl RecoveryOutcome {
 /// Требует прав администратора для `set_active`; если активация не удалась,
 /// чекпоинт НЕ помечается восстановленным — следующий запуск повторит попытку.
 pub fn recover_interrupted_session(driver: &dyn SchemeDriver) -> RecoveryOutcome {
+    // Маркер незавершённого прогона: прошлый запуск не записал ни результат,
+    // ни браковку — процесс убит, ПК завис или был ребут прямо во время замера.
+    // Виновная схема уходит в карантин, маркер стирается.
+    let freeze_note = match crate::quarantine::load_testing_marker() {
+        Some(marker) => {
+            let reason = "прогон не завершился (убийство процесса, зависание ПК или ребут во время замера)";
+            let _ = crate::quarantine::quarantine_add(
+                &marker.scheme_id,
+                marker.scheme_name.as_deref(),
+                crate::quarantine::QuarantineKind::HardFreeze,
+                reason,
+                &marker.plan_guid,
+            );
+            crate::quarantine::clear_testing_marker();
+            Some(format!(
+                "схема «{}» отправлена в карантин ({}); верните её вручную, если зависание было случайным",
+                marker.scheme_id, reason
+            ))
+        }
+        None => None,
+    };
+
     let Some(mut checkpoint) = load_checkpoint() else {
-        return RecoveryOutcome::nothing();
+        // Чекпоинта нет, но маркер мог быть: сообщаем о карантине.
+        return match freeze_note {
+            Some(note) => RecoveryOutcome {
+                interrupted_checkpoint: false,
+                needed_restore: false,
+                restored: true,
+                already_ok: false,
+                error: Some(note),
+            },
+            None => RecoveryOutcome::nothing(),
+        };
     };
 
     if checkpoint.original_restored {
-        return RecoveryOutcome {
-            interrupted_checkpoint: true,
-            needed_restore: false,
-            restored: true,
-            already_ok: true,
-            error: None,
-        };
+        return with_freeze_note(
+            RecoveryOutcome {
+                interrupted_checkpoint: true,
+                needed_restore: false,
+                restored: true,
+                already_ok: true,
+                error: None,
+            },
+            freeze_note,
+        );
     }
 
     let Some(original) = checkpoint.original_scheme_guid.clone() else {
         // Исходная схема не зафиксирована (прерывание случилось до первого
         // прогона) — активная схема и есть исходная.
-        return RecoveryOutcome {
-            interrupted_checkpoint: true,
-            needed_restore: false,
-            restored: true,
-            already_ok: true,
-            error: None,
-        };
+        return with_freeze_note(
+            RecoveryOutcome {
+                interrupted_checkpoint: true,
+                needed_restore: false,
+                restored: true,
+                already_ok: true,
+                error: None,
+            },
+            freeze_note,
+        );
     };
 
     let schemes = match driver.list_schemes() {
         Ok(list) => list,
         Err(cause) => {
-            return RecoveryOutcome {
-                interrupted_checkpoint: true,
-                needed_restore: true,
-                restored: false,
-                already_ok: false,
-                error: Some(format!("не удалось получить список схем: {cause:?}")),
-            };
+            return with_freeze_note(
+                RecoveryOutcome {
+                    interrupted_checkpoint: true,
+                    needed_restore: true,
+                    restored: false,
+                    already_ok: false,
+                    error: Some(format!("не удалось получить список схем: {cause:?}")),
+                },
+                freeze_note,
+            );
         }
     };
 
     let active = schemes.iter().find(|s| s.active).map(|s| s.guid.clone());
     if active.as_deref() == Some(original.as_str()) {
         // Уже активна исходная: помечаем восстановленной и сохраняем.
-        return RecoveryOutcome::after_restore(&mut checkpoint, None);
+        return with_freeze_note(
+            RecoveryOutcome::after_restore(&mut checkpoint, None),
+            freeze_note,
+        );
     }
 
     // Исходная схема должна существовать в списке (защита от битой CT).
@@ -115,18 +159,40 @@ pub fn recover_interrupted_session(driver: &dyn SchemeDriver) -> RecoveryOutcome
             .as_deref()
             .map(|n| format!(" «{n}»"))
             .unwrap_or_default();
-        return RecoveryOutcome {
-            interrupted_checkpoint: true,
-            needed_restore: true,
-            restored: false,
-            already_ok: false,
-            error: Some(format!(
-                "не удалось восстановить исходную схему{label}: {cause:?}"
-            )),
-        };
+        return with_freeze_note(
+            RecoveryOutcome {
+                interrupted_checkpoint: true,
+                needed_restore: true,
+                restored: false,
+                already_ok: false,
+                error: Some(format!(
+                    "не удалось восстановить исходную схему{label}: {cause:?}"
+                )),
+            },
+            freeze_note,
+        );
     }
 
-    RecoveryOutcome::after_restore(&mut checkpoint, None)
+    with_freeze_note(
+        RecoveryOutcome::after_restore(&mut checkpoint, None),
+        freeze_note,
+    )
+}
+
+/// Добавить сообщение о карантине по маркеру к итогу восстановления.
+/// Без маркера итог возвращается как есть (существующие тесты не меняются).
+fn with_freeze_note(
+    mut outcome: RecoveryOutcome,
+    freeze_note: Option<String>,
+) -> RecoveryOutcome {
+    if let Some(note) = freeze_note {
+        outcome.error = Some(match outcome.error.take() {
+            Some(e) => format!("{e} {note}"),
+            None => note,
+        });
+        outcome.already_ok = false;
+    }
+    outcome
 }
 
 #[cfg(test)]

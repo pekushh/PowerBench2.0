@@ -1,4 +1,4 @@
-// Страница «Результаты»: история сессий, сравнение по истории, отчёты.
+// Страница «Результаты»: история сессий, сравнение по истории, HTML-отчёты.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -8,7 +8,7 @@ import {
   type HistoryRow,
   type SessionJson,
 } from "../api";
-import { Badge, Button, Dropdown, Modal, Panel } from "../components/ui";
+import { Badge, Button, Dropdown, FadeScroll, Modal, Panel } from "../components/ui";
 import { pushToast } from "../store";
 
 type SortKey = "started" | "level" | "score" | "stability";
@@ -51,23 +51,19 @@ export function fmtBytes(n: number): string {
   return `${n} Б`;
 }
 
-interface SeriesPoint {
-  col: number;
-  score: number;
-  lo: number;
-  hi: number;
-  file: string;
+/** Число для показа: нефинитное/отсутствующее → прочерк. */
+function f1(v: number | null | undefined, digits = 1): string {
+  return typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—";
 }
 
-interface Series {
-  id: string;
-  name: string;
-  pts: SeriesPoint[];
+/** `20260927T020233Z307` → `27.09.2026 · 02:02`. */
+export function fmtStamp(stamp: string): string {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/.exec(stamp);
+  if (!m) return stamp;
+  return `${m[3]}.${m[2]}.${m[1]} · ${m[4]}:${m[5]}`;
 }
 
-const PALETTE = ["#5aa2f2", "#6fd0a0", "#e4b46f", "#e57979", "#b8acff", "#58c7ee"];
-
-export default function ResultsPage({ active = true }: { active?: boolean }) {
+export default function ResultsPage() {
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [sort, setSort] = useState<SortKey>("started");
   const [stats, setStats] = useState<{
@@ -76,16 +72,20 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
     max_sessions: number;
   } | null>(null);
   const [detail, setDetail] = useState<SessionJson | null>(null);
-  const [series, setSeries] = useState<Series[]>([]);
-  const [hidden, setHidden] = useState<Set<string>>(new Set());
-  const [chartSessions, setChartSessions] = useState<HistoryRow[]>([]);
   const busy = useRef(false);
+  const reportBusy = useRef(false);
 
   const refresh = useCallback(() => {
     commands.historyList().then(setRows).catch((e) => pushToast("err", String(e)));
     commands
       .storageStats()
-      .then((s) => setStats({ free_bytes: s.free_bytes, history_bytes: s.history_bytes, max_sessions: s.max_sessions }))
+      .then((s) =>
+        setStats({
+          free_bytes: s.free_bytes,
+          history_bytes: s.history_bytes,
+          max_sessions: s.max_sessions,
+        }),
+      )
       .catch(() => undefined);
   }, []);
 
@@ -102,60 +102,18 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
     };
   }, [refresh]);
 
-  // График сравнения: медианный throughput схем по последним сессиям.
-  // Строится только на активной вкладке, чтобы не дёргать историю зря.
-  useEffect(() => {
-    if (!active) return;
-    const recent = [...rows]
-      .filter((r) => r.readable)
-      .sort((a, b) => (a.started_at_ns < b.started_at_ns ? 1 : -1))
-      .slice(0, 24)
-      .reverse();
-    setChartSessions(recent);
-    let alive = true;
-    Promise.all(
-      recent.map((r) => commands.historyOpen(r.plan_guid).then((s) => ({ row: r, s })).catch(() => null)),
-    ).then((all) => {
-      if (!alive) return;
-      const byScheme = new Map<string, Series>();
-      all.forEach((item, col) => {
-        if (!item) return;
-        for (const sch of item.s.schemes) {
-          if (sch.rejected) continue;
-          const name = sch.name ?? sch.scheme_id;
-          let se = byScheme.get(name);
-          if (!se) {
-            se = { id: name, name, pts: [] };
-            byScheme.set(name, se);
-          }
-          se.pts.push({
-            col,
-            score: sch.median_throughput,
-            lo: sch.ci_95[0],
-            hi: sch.ci_95[1],
-            file: item.row.plan_guid,
-          });
-        }
-      });
-      setSeries([...byScheme.values()]);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [rows, active]);
-
   const sorted = useMemo(() => {
     const arr = [...rows];
     switch (sort) {
       case "started":
-        arr.sort((a, b) => {
-          const x = a.readable ? a.started_at_ns : -Infinity;
-          const y = b.readable ? b.started_at_ns : -Infinity;
-          return y - x;
-        });
+        arr.sort((a, b) => (b.readable ? b.started_at_ns : -Infinity) - (a.readable ? a.started_at_ns : -Infinity));
         break;
       case "level":
-        arr.sort((a, b) => (a.readable ? (LEVEL_ORDER[a.level] ?? 99) : 99) - (b.readable ? (LEVEL_ORDER[b.level] ?? 99) : 99));
+        arr.sort(
+          (a, b) =>
+            (a.readable ? (LEVEL_ORDER[a.level] ?? 99) : 99) -
+            (b.readable ? (LEVEL_ORDER[b.level] ?? 99) : 99),
+        );
         break;
       case "score":
         arr.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
@@ -171,17 +129,25 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
     commands.historyOpen(guid).then(setDetail).catch((e) => pushToast("err", String(e)));
   };
 
+  // HTML-отчёт сессии: бэкенд сохраняет .html рядом с историей и открывает
+  // его в браузере, сюда возвращается путь — показываем только имя файла.
   const openReport = (guid: string) => {
+    if (reportBusy.current) return;
+    reportBusy.current = true;
     commands
       .sessionReport(guid)
-      .then((p) => pushToast("okk", `Отчёт открыт: ${p}`))
-      .catch((e) => pushToast("err", String(e)));
+      .then((p) => {
+        const name = p.split(/[/\\]/).pop() ?? p;
+        pushToast("okk", `HTML-отчёт открыт в браузере: ${name}`);
+      })
+      .catch((e) => pushToast("err", String(e)))
+      .finally(() => {
+        reportBusy.current = false;
+      });
   };
 
   const deleteRow = async (r: HistoryRow) => {
-    if (r.readable) {
-      if (!window.confirm("Удалить запись?")) return;
-    }
+    if (r.readable && !window.confirm("Удалить запись?")) return;
     try {
       await commands.historyDelete(r.file_name);
       pushToast("okk", "Запись удалена");
@@ -209,25 +175,13 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
     }
   };
 
-  const lowDisk =
-    stats != null && (stats.free_bytes < 250 * 1024 * 1024);
+  const lowDisk = stats != null && stats.free_bytes < 250 * 1024 * 1024;
 
   return (
-    <div className="page">
+    <div className="page fill">
       <div className="page-head">
         <h1>Результаты</h1>
         <span className="sub">{rows.length} записей</span>
-        <div className="page-head-line">
-          <span className="sub storage-line">
-            {lowDisk ? <Badge kind="warn">Место на диске заканчивается</Badge> : null}
-            Свободно {fmtBytes(stats?.free_bytes ?? 0)} · История {fmtBytes(stats?.history_bytes ?? 0)}
-            {stats && stats.max_sessions > 0
-              ? ` · хранится до ${stats.max_sessions}`
-              : stats
-                ? " · хранится без ограничений"
-                : ""}
-          </span>
-        </div>
         <div className="actions">
           <Dropdown
             title="Сортировка"
@@ -254,49 +208,60 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
             Обновить
           </Button>
         </div>
+        <div className="page-head-line">
+          <span className="storage-line">
+            {lowDisk ? <Badge kind="warn">Место на диске заканчивается</Badge> : null}
+            Свободно {fmtBytes(stats?.free_bytes ?? 0)} · история {fmtBytes(stats?.history_bytes ?? 0)}
+            {stats && stats.max_sessions > 0 ? ` · хранится до ${stats.max_sessions}` : ""}
+          </span>
+        </div>
       </div>
 
-      <div className="page-toolbar">
-        <Panel
-          title="Сравнение производительности схем по истории"
-          hint="Медианный throughput каждой схемы по сессиям; полосы — ДИ 95%; клик по точке — HTML-отчёт сессии"
-        >
-          <Chart series={series} sessions={chartSessions} hidden={hidden} onToggleHide={(id) =>
-            setHidden((prev) => {
-              const next = new Set(prev);
-              if (next.has(id)) next.delete(id);
-              else next.add(id);
-              return next;
-            })
-          } onDot={(file) => openReport(file)} />
-        </Panel>
-      </div>
-
-      <div className="results-list">
+      <FadeScroll className="results-list fill-list">
         {sorted.length === 0 ? (
           <Panel title="Нет сопоставимых сессий">
             <div className="muted">Завершённые сессии с данными по схемам появятся здесь.</div>
           </Panel>
         ) : (
           sorted.map((r) => (
-            <div key={r.file_name} className="glass lift rc-row" onClick={() => r.readable && openSession(r.plan_guid)}>
-              <div className="rc-main">
-                <div className="rc-line1">
-                  <span className="rc-name">{r.readable ? r.started_label : r.file_name}</span>
+            <div
+              key={r.file_name}
+              className="glass lift res-row"
+              onClick={() => r.readable && openSession(r.plan_guid)}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div className="res-name">{r.readable ? r.scheme_name || "Сессия без схемы" : r.file_name}</div>
+                <div className="res-meta">
+                  <span className="res-when">{r.readable ? fmtStamp(r.started_label) : "—"}</span>
                   {r.readable ? <Badge kind={levelKind(r.level)}>{r.level_label}</Badge> : <Badge kind="plain">Не завершено</Badge>}
+                  <span className="num">{r.schemes} сх.</span>
+                  {r.throughput != null ? (
+                    <span className="num">{f1(r.throughput, 0)} тик/с</span>
+                  ) : null}
+                  {r.margin != null && Number.isFinite(r.margin) ? (
+                    <span className="num">ДИ ±{r.margin.toFixed(1)}</span>
+                  ) : null}
                   {r.early_stopped ? <Badge kind="plain">ранняя остановка</Badge> : null}
-                </div>
-                <div className="rc-line2">
-                  <span>
-                    {r.schemes} сх. {r.scheme_name ? `· ${r.scheme_name}` : ""}
-                  </span>
-                  {r.score != null ? <span className="num">балл {r.score.toFixed(1)}</span> : null}
-                  {r.margin != null ? <span className="num">ДИ ±{r.margin.toFixed(1)}</span> : null}
-                  {!r.readable && r.error ? <span>{r.error}</span> : null}
+                  {!r.readable && r.error ? <span className="num">{r.error}</span> : null}
                 </div>
               </div>
-              <div className="rc-actions">
-                {r.score != null ? <Badge kind={scoreKind(r.score)}>{r.score.toFixed(0)}</Badge> : null}
+              <div className="res-acts">
+                {r.score != null && Number.isFinite(r.score) ? (
+                  <div className="res-score">
+                    <b style={{ color: `var(--${scoreKind(r.score) === "ok" ? "ok" : scoreKind(r.score) === "warn" ? "warn" : "err"})` }}>
+                      {r.score.toFixed(0)}
+                    </b>
+                    <span>балл</span>
+                  </div>
+                ) : null}
+                {r.readable ? (
+                  <Button sm variant="ghost" title="Открыть HTML-отчёт в браузере" onClick={(e) => {
+                    e.stopPropagation();
+                    openReport(r.plan_guid);
+                  }}>
+                    HTML
+                  </Button>
+                ) : null}
                 <Button
                   sm
                   variant="ghost"
@@ -311,9 +276,9 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
             </div>
           ))
         )}
-      </div>
+      </FadeScroll>
 
-      <Modal open={detail !== null} title="Результат сессии" onClose={() => setDetail(null)}>
+      <Modal open={detail !== null} title="Результат сессии" wide onClose={() => setDetail(null)}>
         {detail ? (
           <SessionDetail
             s={detail}
@@ -329,115 +294,6 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
   );
 }
 
-function Chart({
-  series,
-  sessions,
-  hidden,
-  onToggleHide,
-  onDot,
-}: {
-  series: Series[];
-  sessions: HistoryRow[];
-  hidden: Set<string>;
-  onToggleHide: (id: string) => void;
-  onDot: (planGuid: string) => void;
-}) {
-  const W = 720;
-  const H = 240;
-  const pad = { l: 56, r: 12, t: 12, b: 28 };
-  const shown = series.filter((s) => !hidden.has(s.id) && s.pts.length > 0);
-  if (sessions.length < 1 || shown.length === 0) {
-    return <div className="chart-empty muted">Нет данных для сравнения.</div>;
-  }
-  const vals = shown.flatMap((s) => s.pts.flatMap((p) => [p.lo, p.hi]));
-  const min = Math.min(...vals);
-  const max = Math.max(...vals);
-  const span = Math.max(1, max - min);
-  const y = (v: number) => pad.t + (1 - (v - min) / span) * (H - pad.t - pad.b);
-  const x = (col: number) =>
-    sessions.length <= 1
-      ? (W - pad.l - pad.r) / 2 + pad.l
-      : pad.l + (col / (sessions.length - 1)) * (W - pad.l - pad.r);
-  const gridVals = [0, 1, 2, 3, 4].map((i) => min + (span * i) / 4);
-  return (
-    <div>
-      <div className="chart-legend">
-        {series.map((s, i) => (
-          <button
-            key={s.id}
-            className="chart-chip"
-            title="Скрыть/показать"
-            onClick={() => onToggleHide(s.id)}
-          >
-            <i style={{ background: PALETTE[i % PALETTE.length] }} />
-            {s.name || "—"}
-          </button>
-        ))}
-        <span className="chart-note">полосы — ДИ 95%</span>
-      </div>
-      <div className="chart-wrap">
-        <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Сравнение производительности схем по истории">
-          {gridVals.map((v) => (
-            <g key={v}>
-              <line className="chart-grid" x1={pad.l} x2={W - pad.r} y1={y(v)} y2={y(v)} />
-              <text className="chart-ylab" x={pad.l - 8} y={y(v) + 3.5} textAnchor="end">
-                {v.toFixed(0)}
-              </text>
-            </g>
-          ))}
-          <line
-            className="chart-grid chart-axis"
-            x1={pad.l}
-            x2={W - pad.r}
-            y1={H - pad.b}
-            y2={H - pad.b}
-          />
-          {sessions.map((s, i) =>
-            i % Math.max(1, Math.ceil(sessions.length / 5)) === 0 ? (
-              <text key={s.file_name} className="chart-xlab" x={x(i)} y={H - 12} textAnchor="middle">
-                {s.started_label}
-              </text>
-            ) : null,
-          )}
-          {shown.map((s) => {
-            const color = PALETTE[series.indexOf(s) % PALETTE.length];
-            const d = s.pts.map((p, k) => `${k === 0 ? "M" : "L"}${x(p.col).toFixed(1)} ${y(p.score).toFixed(1)}`).join(" ");
-            return (
-              <g key={s.id}>
-                {s.pts.map((p) => (
-                  <line
-                    key={p.col}
-                    className="chart-ci"
-                    x1={x(p.col)}
-                    x2={x(p.col)}
-                    y1={y(p.hi)}
-                    y2={y(p.lo)}
-                    stroke={color}
-                  />
-                ))}
-                <path className="chart-line" d={d} fill="none" stroke={color} strokeWidth={1.8} strokeLinejoin="round" />
-                {s.pts.map((p) => (
-                  <circle
-                    key={p.col}
-                    className="chart-dot"
-                    cx={x(p.col)}
-                    cy={y(p.score)}
-                    r={4}
-                    fill={color}
-                    onClick={() => onDot(p.file)}
-                  >
-                    <title>{`${s.name}: ${p.score.toFixed(1)} тик/с (ДИ 95% ±${((p.hi - p.lo) / 2).toFixed(1)})`}</title>
-                  </circle>
-                ))}
-              </g>
-            );
-          })}
-        </svg>
-      </div>
-    </div>
-  );
-}
-
 function SessionDetail({
   s,
   fileName,
@@ -449,6 +305,8 @@ function SessionDetail({
 }) {
   const rec = s.recommendation;
   const probs = rec.probabilities;
+  const [opening, setOpening] = useState(false);
+
   const del = async () => {
     if (!fileName) {
       pushToast("err", "Файл записи не найден");
@@ -463,87 +321,167 @@ function SessionDetail({
       pushToast("err", String(e));
     }
   };
+
+  const openHtml = () => {
+    if (opening) return;
+    setOpening(true);
+    commands
+      .sessionReport(s.plan_guid)
+      .then((p) => {
+        const name = p.split(/[/\\]/).pop() ?? p;
+        pushToast("okk", `HTML-отчёт открыт в браузере: ${name}`);
+      })
+      .catch((e) => pushToast("err", String(e)))
+      .finally(() => setOpening(false));
+  };
+
+  // Лидер: рекомендованная схема, иначе лучшая по медиане среди допущенных.
+  const tie = rec.level === "Equivalent" || rec.level === "KeepCurrent";
+  const admitted = s.schemes.filter((x) => !x.rejected);
+  const leader =
+    (!tie && rec.recommended_scheme
+      ? s.schemes.find((x) => x.scheme_id === rec.recommended_scheme)
+      : undefined) ??
+    [...admitted].sort((a, b) => b.median_throughput - a.median_throughput)[0] ??
+    null;
+  const leaderName = leader ? (leader.name ?? leader.scheme_id) : null;
+  const margin = rec.expected_margin_percent;
+  const marginText =
+    margin != null && Number.isFinite(margin) ? `${margin >= 0 ? "+" : ""}${margin.toFixed(2)}%` : "—";
+  const marginKind = margin == null || !Number.isFinite(margin) ? "" : margin >= 1 ? "ok" : "warn";
+
+  // Таблица: лидер первым, затем остальные по убыванию медианы; забракованные — в конце.
+  const tableRows = [...s.schemes].sort((a, b) => {
+    if (a.rejected !== b.rejected) return a.rejected ? 1 : -1;
+    return b.median_throughput - a.median_throughput;
+  });
+  const rejectedCount = s.schemes.length - admitted.length;
+  const totalRuns = s.schemes.reduce((n, x) => n + x.runs, 0);
+
+  // Доверие к лидерству: при <2 прогонов вердикт предварительный.
+  const trustNote = !leader
+    ? { kind: "warn" as const, title: "Сравнивать нечего", items: ["Все схемы забракованы."] }
+    : (leader.runs < 2
+        ? {
+            kind: "warn" as const,
+            title: "Вердикт предварительный",
+            items: [
+              `У лидера ${leader.runs} прогон(ов) — повторите сессию в режиме «Детально» (3 повтора).`,
+            ],
+          }
+        : { kind: "ok" as const, title: "Лидеру можно верить", items: ["Прогонов достаточно, выбросов не видно."] });
+
   return (
-    <div className="result-body">
-      <div className="result-hero">
-        <div className="verdict">{rec.level_label ?? "—"}</div>
-        <Badge kind={levelKind(rec.level)} big>
-          уровень подтверждён
-        </Badge>
-      </div>
-      {s.early_stop_reason ? (
-        <div className="row wrap gap-3">
-          <Badge kind="accent" big>
-            ранняя остановка
+    <div className="rd">
+      <div className="rd-hero">
+        <div className="rd-kicker">{tie ? "ничья" : "лидер сессии"}</div>
+        <div className="rd-lead ok">{leaderName ? `«${leaderName}»` : (rec.level_label ?? "—")}</div>
+        <div className="row wrap gap-2" style={{ justifyContent: "center" }}>
+          <Badge kind={levelKind(rec.level)} big>
+            {rec.level_label ?? rec.level}
           </Badge>
-          <span className="hint">{s.early_stop_reason}</span>
+          <Badge kind="plain">раундов {s.rounds_completed}/{s.rounds_planned}</Badge>
         </div>
-      ) : null}
-      {rec.recommended_scheme ? (
-        <div className="result-rec">
-          <span className="rl">Рекомендуемая схема</span>
-          <span className="rv">«{rec.recommended_scheme}»</span>
-        </div>
-      ) : null}
-      {probs ? (
-        <div className="evid-probs">
-          <span>P(лучший)={probs[0].toFixed(2)}</span>
-          <span>P(перевес&gt;0)={probs[1].toFixed(2)}</span>
-          <span>P(перевес&gt;1%)={probs[2].toFixed(2)}</span>
-        </div>
-      ) : null}
-      {s.warnings.length > 0 ? (
-        <div className="hint">{s.warnings.join(" ")}</div>
-      ) : null}
-      <div className="rec-schemes-narrow">
-        {s.schemes.map((sch) => (
-          <div key={sch.scheme_id} className="glass inset">
-            <div className="rc-name">{sch.name ?? sch.scheme_id}</div>
-            <div className="hint">
-              медиана {sch.median_throughput.toFixed(1)} тик/с · ДИ [{sch.ci_95[0].toFixed(1)};{" "}
-              {sch.ci_95[1].toFixed(1)}] · прогонов: {sch.runs}
-            </div>
-          </div>
-        ))}
       </div>
-      <div className="results-table-wrap">
-        <table className="grid evid-table">
+
+      <div className="rd-stats">
+        <div className="rd-stat">
+          <div className="k">Медиана лидера</div>
+          <div className="v ok">{f1(leader?.median_throughput)}</div>
+          <div className="s">тик/с</div>
+        </div>
+        <div className="rd-stat">
+          <div className="k">Перевес</div>
+          <div className={`v ${marginKind}`}>{marginText}</div>
+          <div className="s">ожидаемый</div>
+        </div>
+        <div className="rd-stat">
+          <div className="k">Схем</div>
+          <div className="v">{admitted.length}</div>
+          <div className="s">{rejectedCount ? `брак: ${rejectedCount}` : "допущено"}</div>
+        </div>
+        <div className="rd-stat">
+          <div className="k">Прогонов</div>
+          <div className="v">{totalRuns}</div>
+          <div className="s">всего</div>
+        </div>
+      </div>
+
+      <div className={`rd-note ${trustNote.kind}`}>
+        <b>{trustNote.title}</b>
+        <ul>
+          {trustNote.items.map((t, i) => (
+            <li key={i}>{t}</li>
+          ))}
+        </ul>
+        {rec.reason ? <span className="why">{rec.reason}</span> : null}
+      </div>
+
+      {s.early_stop_reason ? (
+        <div className="rd-note warn">
+          <b>Ранняя остановка:</b> {s.early_stop_reason}
+        </div>
+      ) : null}
+
+      {probs ? (
+        <div className="rd-note">
+          <b>Уверенность:</b> P(лучший) = {f1(probs[0], 2)} · P(перевес &gt; 0) ={" "}
+          {f1(probs[1], 2)} · P(перевес &gt; 1%) = {f1(probs[2], 2)}
+        </div>
+      ) : null}
+
+      {s.warnings.length > 0 ? (
+        <div className="rd-note warn">{s.warnings.join(" ")}</div>
+      ) : null}
+
+      <div className="modal-scrollx">
+        <table className="grid evid-table rd-table">
           <thead>
             <tr>
               <th>Схема</th>
               <th className="num">Медиана, тик/с</th>
               <th className="num">ДИ 95%</th>
-              <th className="num">Прогоны</th>
+              <th className="num">Прогонов</th>
+              <th>Статус</th>
             </tr>
           </thead>
           <tbody>
-            {s.schemes.map((sch) => (
-              <tr key={sch.scheme_id}>
-                <td>{sch.name ?? sch.scheme_id}</td>
-                <td className="num">{sch.median_throughput.toFixed(1)}</td>
-                <td className="num">
-                  [{sch.ci_95[0].toFixed(1)}; {sch.ci_95[1].toFixed(1)}]
-                </td>
-                <td className="num">{sch.runs}</td>
-              </tr>
-            ))}
+            {tableRows.map((sch) => {
+              const isLeader = leader != null && sch.scheme_id === leader.scheme_id;
+              return (
+                <tr key={sch.scheme_id} className={isLeader ? "lead" : sch.rejected ? "dead" : undefined}>
+                  <td className="nm">
+                    {isLeader ? "★ " : ""}
+                    {sch.name ?? sch.scheme_id}
+                  </td>
+                  <td className="num">{f1(sch.median_throughput)}</td>
+                  <td className="num">
+                    {sch.ci_95[0] > 0 ? `[${f1(sch.ci_95[0])}; ${f1(sch.ci_95[1])}]` : "—"}
+                  </td>
+                  <td className="num">{sch.runs}</td>
+                  <td>
+                    {sch.rejected ? (
+                      <Badge kind="danger">забракована</Badge>
+                    ) : isLeader ? (
+                      <Badge kind="ok">лидер</Badge>
+                    ) : (
+                      <Badge kind="plain">допущена</Badge>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
-      <div className="result-actions">
-        <Button
-          variant="ghost"
-          onClick={() =>
-            commands
-              .sessionReport(s.plan_guid)
-              .then((p) => pushToast("okk", `Отчёт открыт: ${p}`))
-              .catch((e) => pushToast("err", String(e)))
-          }
-        >
-          Открыть отчёт
+
+      <div className="rd-foot">
+        <Button variant="primary" disabled={opening} onClick={openHtml}>
+          {opening ? "Открываю…" : "Открыть HTML-отчёт"}
         </Button>
+        <span className="spacer" />
         <Button variant="danger" onClick={() => void del()}>
-          Удалить
+          Удалить запись
         </Button>
       </div>
     </div>

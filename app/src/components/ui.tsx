@@ -2,6 +2,110 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
+/** Затемнение краёв только там, где реально есть скрытый скролл. */
+export function useScrollFade<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [fade, setFade] = useState({ top: false, bottom: false, right: false });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => {
+      const vCan = el.scrollHeight - el.clientHeight > 4;
+      const hCan = el.scrollWidth - el.clientWidth > 4;
+      const next = {
+        top: vCan && el.scrollTop > 4,
+        bottom: vCan && el.scrollTop + el.clientHeight < el.scrollHeight - 4,
+        right: hCan && el.scrollLeft + el.clientWidth < el.scrollWidth - 4,
+      };
+      // Без bail-out MutationObserver дёргал бы setState на каждое изменение DOM.
+      setFade((prev) =>
+        prev.top === next.top && prev.bottom === next.bottom && prev.right === next.right
+          ? prev
+          : next,
+      );
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    const mo = new MutationObserver(update);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => {
+      el.removeEventListener("scroll", update);
+      ro.disconnect();
+      mo.disconnect();
+    };
+  }, []);
+  return { ref, ...fade };
+}
+
+/**
+ * Мягкий свет за курсором (spotlight). Без ре-рендеров: координаты пишутся
+ * напрямую в CSS-переменные через rAF, уважает reduce-motion (см. CSS).
+ */
+export function useSpotlight<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let raf = 0;
+    const onMove = (e: PointerEvent) => {
+      cancelAnimationFrame(raf);
+      const r = el.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const y = e.clientY - r.top;
+      raf = requestAnimationFrame(() => {
+        el.style.setProperty("--mx", `${x}px`);
+        el.style.setProperty("--my", `${y}px`);
+        el.classList.add("spot-on");
+      });
+    };
+    const onLeave = () => {
+      cancelAnimationFrame(raf);
+      el.classList.remove("spot-on");
+    };
+    el.addEventListener("pointermove", onMove, { passive: true });
+    el.addEventListener("pointerleave", onLeave);
+    return () => {
+      cancelAnimationFrame(raf);
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerleave", onLeave);
+    };
+  }, []);
+  return ref;
+}
+
+/** Обёртка со spotlight-подсветкой за курсором. */
+export function Spot({
+  className = "",
+  children,
+  ...rest
+}: React.HTMLAttributes<HTMLDivElement>) {
+  const ref = useSpotlight<HTMLDivElement>();
+  return (
+    <div ref={ref} className={`spot ${className}`.trim()} {...rest}>
+      {children}
+    </div>
+  );
+}
+
+/** Прокручиваемый блок с умными фейдами по краям. */
+export function FadeScroll({
+  className = "",
+  children,
+  ...rest
+}: React.HTMLAttributes<HTMLDivElement>) {
+  const { ref, top, bottom, right } = useScrollFade<HTMLDivElement>();
+  const cls = [className, top ? "fade-top" : "", bottom ? "fade-bottom" : "", right ? "fade-right" : ""]
+    .filter(Boolean)
+    .join(" ");
+  return (
+    <div ref={ref} className={cls} {...rest}>
+      {children}
+    </div>
+  );
+}
+
 export function Glass({ className = "", children }: { className?: string; children: ReactNode }) {
   return <div className={`glass ${className}`.trim()}>{children}</div>;
 }
@@ -141,10 +245,20 @@ export function NumInput({
         type="number"
         min={min}
         max={max}
+        step={1}
         value={shown}
         onChange={(e) => {
-          const v = +e.target.value;
-          onChange(Number.isFinite(v) ? v : (min ?? 0));
+          // Округляем и зажимаем сразу: иначе «9.5» или «-3» уходит в бэкенд
+          // и возвращает пользователю сырую ошибку serde.
+          const raw = Number(e.target.value);
+          if (!Number.isFinite(raw)) {
+            onChange(min ?? 0);
+            return;
+          }
+          const v = Math.round(raw);
+          const lo = min ?? v;
+          const hi = max ?? v;
+          onChange(Math.min(Math.max(v, lo), hi));
         }}
       />
       {unit ? <i>{unit}</i> : null}
@@ -175,12 +289,14 @@ export function Modal({
   title,
   onClose,
   footer,
+  wide = false,
   children,
 }: {
   open: boolean;
   title: ReactNode;
   onClose: () => void;
   footer?: ReactNode;
+  wide?: boolean;
   children: ReactNode;
 }) {
   useEffect(() => {
@@ -194,7 +310,7 @@ export function Modal({
   if (!open) return null;
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className={`modal${wide ? " wide" : ""}`} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div className="modal-title">{title}</div>
           <button className="modal-close" onClick={onClose} aria-label="Закрыть">

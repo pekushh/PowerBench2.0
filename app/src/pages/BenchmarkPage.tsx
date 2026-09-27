@@ -1,22 +1,21 @@
 // Страница «Бенчмарк»: визард Режим → Схемы → Запуск.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   commands,
-  onLog,
   onTelemetry,
   onTestFinished,
   type CheckpointDto,
-  type LogMsg,
+  type QuarantineEntry,
   type Readiness,
   type SchemeRow,
   type SettingsDto,
   type TelemetryMsg,
 } from "../api";
-import { Badge, Button, Field, Glass, NumInput, Panel, Progress, Stat } from "../components/ui";
+import { Badge, Button, FadeScroll, Field, Glass, NumInput, Panel, Progress, Spot, Stat } from "../components/ui";
 import { GearIcon } from "../components/icons";
 import { pushToast, setRunning, useSession } from "../store";
-import { SchemeCards } from "../components/SchemeTiles";
+import { SchemePicker } from "../components/SchemeTiles";
 
 type Stage = "mode" | "schemes" | "run";
 type PresetKey = "quick" | "detailed" | "custom";
@@ -91,6 +90,27 @@ function earlyStopHint(reps: number): string {
 
 const CHART_POINTS = 180;
 
+/**
+ * Длительности фаз — та же формула, что в `orchestrator::config::phase_durations`:
+ * `side = 3 + (total - 9) * 3 / 10`, лёгкая и отклик по `side`,
+ * тяжёлая — остаток. Нужна для подписей в интерфейсе.
+ */
+function phaseSeconds(total: number): { name: string; seconds: number }[] {
+  const t = Math.max(9, total);
+  const side = 3 + Math.floor((t - 9) * 3 / 10);
+  return [
+    { name: "Лёгкая", seconds: side },
+    { name: "Тяжёлая", seconds: Math.max(1, t - 2 * side) },
+    { name: "Отклик", seconds: side },
+  ];
+}
+
+/** Порядковый номер фазы по имени (для «готово»/«текущая»). */
+function phaseIndex(name: string | undefined): number {
+  if (!name) return -1;
+  return ["Лёгкая", "Тяжёлая", "Отклик"].indexOf(name);
+}
+
 /** Число из любых данных: нефинитное заменяется запасным. */
 function num(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) ? v : fallback;
@@ -112,7 +132,6 @@ export default function BenchmarkPage() {
   const [rawSamples, setRawSamples] = useState(false);
   const [checkpoint, setCheckpoint] = useState<CheckpointDto | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryMsg | null>(null);
-  const [feed, setFeed] = useState<LogMsg[]>([]);
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [finished, setFinished] = useState(false);
@@ -120,8 +139,28 @@ export default function BenchmarkPage() {
   const [elapsed, setElapsed] = useState(0);
   const [chart, setChart] = useState<number[]>([]);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
+  const [quarantine, setQuarantine] = useState<QuarantineEntry[]>([]);
   const chartRef = useRef<number[]>([]);
   const t0 = useRef(0);
+
+  const loadQuarantine = useCallback(() => {
+    commands.quarantineList().then(setQuarantine).catch(() => undefined);
+  }, []);
+
+  // Настройки нужны плиткам (избранное/исключения) и после их правок.
+  const loadAll = useCallback(() => {
+    commands
+      .getSettings()
+      .then((st) => {
+        setSettings(st);
+        setDuration(num(st.duration_seconds, 30));
+        setWarmup(num(st.warmup_seconds, 6));
+        setCooling(num(st.cooling_seconds, 5));
+        setReps(num(st.repetitions, 3));
+      })
+      .catch(() => undefined);
+    loadQuarantine();
+  }, [loadQuarantine]);
 
   const activePreset: PresetKey =
     duration === PRESETS.quick.preset.duration &&
@@ -149,6 +188,10 @@ export default function BenchmarkPage() {
 
 
   useEffect(() => {
+    loadQuarantine();
+  }, [loadQuarantine, stage, finished]);
+
+  useEffect(() => {
     let alive = true;
     commands
       .checkpointStatus()
@@ -158,8 +201,29 @@ export default function BenchmarkPage() {
       .listSchemes()
       .then((s) => {
         if (!alive) return;
-        setSchemes(s);
-        setSelected(new Set(s.map((x) => x.guid)));
+        // Алфавитный порядок (русская локаль); плитки сортируют ещё раз,
+        // но так список предсказуем и в других вьюхах.
+        const sorted = [...s].sort((a, b) =>
+          (a.name || "").localeCompare(b.name || "", "ru", { sensitivity: "base" }),
+        );
+        setSchemes(sorted);
+        // Исключённые и карантинные схемы не должны попадать в выбор молча:
+        // пользователь счёл бы их отфильтрованными, а замер шёл бы по ним.
+        const excluded = new Set(
+          (settings?.excluded_schemes ?? []).map((g) => g.toLowerCase()),
+        );
+        const quarantined = new Set(quarantine.map((q) => q.scheme_id.toLowerCase()));
+        setSelected(
+          new Set(
+            sorted
+              .filter(
+                (x) =>
+                  !excluded.has(x.guid.toLowerCase()) &&
+                  !quarantined.has(x.guid.toLowerCase()),
+              )
+              .map((x) => x.guid),
+          ),
+        );
       })
       .catch(() => undefined);
     commands
@@ -184,9 +248,6 @@ export default function BenchmarkPage() {
       setChart(chartRef.current);
       setTelemetry(m);
     });
-    const unlog = onLog((m) => {
-      setFeed((f) => [...f.slice(-60), m]);
-    });
     const unfin = onTestFinished((m) => {
       setRunning(false);
       setStarting(false);
@@ -197,6 +258,8 @@ export default function BenchmarkPage() {
         .checkpointStatus()
         .then((cp) => setCheckpoint(cp))
         .catch(() => undefined);
+      // Карантин мог пополниться во время сессии — подтягиваем сразу.
+      loadQuarantine();
       if (!m.ok) {
         setFinishMsg("сессия завершилась с ошибкой");
         pushToast("err", m.error ?? "сессия завершилась с ошибкой");
@@ -210,7 +273,6 @@ export default function BenchmarkPage() {
     });
     return () => {
       untele.then((f) => f());
-      unlog.then((f) => f());
       unfin.then((f) => f());
     };
   }, []);
@@ -245,12 +307,40 @@ export default function BenchmarkPage() {
     setStage(s);
   };
 
+  /** Схемы к бенчмарку: исключённые и карантинные не выбираются по умолчанию. */
+  const eligible = useCallback(
+    (list: SchemeRow[]): string[] => {
+      const excluded = new Set((settings?.excluded_schemes ?? []).map((g) => g.toLowerCase()));
+      const quarantined = new Set(quarantine.map((q) => q.scheme_id.toLowerCase()));
+      return list
+        .filter((x) => {
+          const k = x.guid.toLowerCase();
+          return !excluded.has(k) && !quarantined.has(k);
+        })
+        .map((x) => x.guid);
+    },
+    [settings, quarantine],
+  );
+
   const start = useCallback(
     (resume: boolean) => {
       const chosen = [...selected];
       if (!resume && chosen.length === 0) {
         pushToast("err", "выберите хотя бы одну схему питания");
         return;
+      }
+      if (!resume) {
+        // Карантинные схемы бэкенд всё равно отсечёт на префлайте —
+        // предупреждаем заранее, а не в середине запуска.
+        const qset = new Set(quarantine.map((q) => q.scheme_id.toLowerCase()));
+        const admitted = chosen.filter((g) => !qset.has(g.toLowerCase()));
+        if (admitted.length === 0) {
+          pushToast("err", "все выбранные схемы в карантине — верните их кнопкой «Вернуть»");
+          return;
+        }
+        if (admitted.length < chosen.length) {
+          pushToast("info", `карантинные схемы пропущены: ${chosen.length - admitted.length}`);
+        }
       }
       setStarting(true);
       setFinished(false);
@@ -275,7 +365,6 @@ export default function BenchmarkPage() {
           setRunning(true);
           chartRef.current = [];
           setChart([]);
-          setFeed([]);
           setCheckpoint(null);
         })
         .catch((e) => {
@@ -284,7 +373,7 @@ export default function BenchmarkPage() {
         });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, preset, duration, warmup, cooling, reps, settings, rawSamples],
+    [selected, preset, duration, warmup, cooling, reps, settings, rawSamples, quarantine],
   );
 
   const stop = () => {
@@ -332,16 +421,24 @@ export default function BenchmarkPage() {
         <Button variant="ghost" onClick={() => go("schemes", "back")}>
           ← Назад
         </Button>
-        <Button variant="primary" disabled={starting || running} onClick={() => start(false)}>
+        <Button
+          variant="primary"
+          disabled={starting || running || selected.size === 0}
+          title={selected.size === 0 ? "Выберите хотя бы одну схему питания" : undefined}
+          onClick={() => start(false)}
+        >
           {starting ? "Запуск…" : "Запустить тест"}
         </Button>
       </>
     );
 
-  const phaseProgress =
-    telemetry && telemetry.phase_seconds > 0
-      ? (telemetry.phase_elapsed_ms / (telemetry.phase_seconds * 1000)) * 100
-      : 0;
+  // Прогресс фазы: телеметрия шлёт событие до конца фазы, поэтому значение
+  // может слегка превысить 100 — клампим, иначе кольцо и подписи «ломаются».
+  const phaseProgress = useMemo(() => {
+    if (!telemetry || telemetry.phase_seconds <= 0) return 0;
+    const p = (telemetry.phase_elapsed_ms / (telemetry.phase_seconds * 1000)) * 100;
+    return Math.min(100, Math.max(0, p));
+  }, [telemetry]);
 
   const chartSvg = (() => {
     if (chart.length < 2) return null;
@@ -408,7 +505,7 @@ export default function BenchmarkPage() {
                     const def = PRESETS[key];
                     const open = preset === key;
                     return (
-                      <div
+                      <Spot
                         key={key}
                         className={`mode-card ${open ? "open" : ""}`}
                         role="button"
@@ -420,7 +517,7 @@ export default function BenchmarkPage() {
                           if (e.key === "Enter" && !expanded) applyPreset(key);
                         }}
                       >
-                        <div className="face">
+                        <div className="face" style={{ textAlign: "center" }}>
                           <h3>{def.title}</h3>
                           <p className="desc">{def.desc}</p>
                           <p className="desc sub">{def.expand}</p>
@@ -435,7 +532,7 @@ export default function BenchmarkPage() {
                               <div className="ms-value">{def.accuracy}</div>
                             </div>
                           </div>
-                          <div className="mode-time">
+                          <div className="mode-time" style={{ textAlign: "center" }}>
                             Примерное время 1 плана ≈{" "}
                             <b>
                               {fmtEst(
@@ -504,7 +601,7 @@ export default function BenchmarkPage() {
                             <div className="hint mt-3">{earlyStopHint(reps)}</div>
                           </div>
                         )}
-                      </div>
+                      </Spot>
                     );
                   })}
                 </div>
@@ -533,12 +630,13 @@ export default function BenchmarkPage() {
                   выбрано {selected.size} из {schemes.length}
                 </span>
                 <div className="spacer" />
-                <Button sm variant="ghost" onClick={() => setSelected(new Set(schemes.map((s) => s.guid)))}>
+                <Button sm variant="ghost" onClick={() => setSelected(new Set(eligible(schemes)))}>
                   Выбрать все
                 </Button>
                 <Button
                   sm
                   variant="ghost"
+                  title="Оставить только активную схему"
                   onClick={() =>
                     setSelected((prev) => {
                       const active = schemes.find((s) => s.active);
@@ -549,15 +647,15 @@ export default function BenchmarkPage() {
                     })
                   }
                 >
-                  Снять выбор
+                  Только активная
                 </Button>
               </div>
-              <SchemeCards
+              <SchemePicker
                 schemes={schemes}
                 selected={selected}
-                excluded={
-                  new Set((settings?.excluded_schemes ?? []).map((g) => g.toLowerCase()))
-                }
+                settings={settings}
+                quarantine={quarantine}
+                onChanged={loadAll}
                 onToggle={(guid, active) => {
                   if (active && selected.has(guid)) {
                     pushToast("err", "Активная схема питания должна участвовать в тестировании — её нельзя снять.");
@@ -583,9 +681,27 @@ export default function BenchmarkPage() {
                     {checkpoint.plan_guid} · схем {checkpoint.scheme_ids.length} · повторов{" "}
                     {checkpoint.repetitions} · {checkpoint.completed_keys.length} выполненных раундов
                   </div>
-                  <Button variant="primary" onClick={() => start(true)}>
-                    Продолжить из контрольной точки
-                  </Button>
+                  <div className="row wrap gap-2">
+                    <Button variant="primary" disabled={running} onClick={() => start(true)}>
+                      Продолжить из контрольной точки
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={running}
+                      title="Вернуть исходную схему питания и удалить контрольную точку"
+                      onClick={() => {
+                        commands
+                          .checkpointDiscard()
+                          .then(() => {
+                            pushToast("okk", "Прерванная сессия забыта");
+                            setCheckpoint(null);
+                          })
+                          .catch((e) => pushToast("err", String(e)));
+                      }}
+                    >
+                      Забыть
+                    </Button>
+                  </div>
                 </Glass>
               ) : null}
             </>
@@ -627,45 +743,60 @@ export default function BenchmarkPage() {
                     </div>
                   </div>
                 </div>
-                <div className="grid2">
-                  <Stat
-                    label="Время тика"
-                    value={telemetry ? `${telemetry.ms_per_tick.toFixed(3)}` : "—"}
-                    suffix="мс"
-                  />
-                  <Stat label="Тиков" value={telemetry ? `${telemetry.ticks_done}` : "—"} />
-                  <Stat label="Раунд" value={telemetry ? `${telemetry.round + 1}` : "—"} />
-                  <Stat label="Фаза" value={telemetry?.phase ?? "—"} />
-                </div>
-                <Panel
-                  title="Общий ход теста"
-                  hint={`прошло ~${fmtEst(elapsed)} · осталось ~${fmtEst(
-                    Math.max(0, estSeconds * Math.max(1, selected.size) - elapsed),
-                  )}`}
-                >
-                  <Progress value={phaseProgress} />
-                </Panel>
-                <Panel title="Ход сессии" hint="живой журнал" className="inset">
-                  <div className="log run-feed fade-bottom">
-                    {feed.length === 0 ? (
-                      <div className="muted">Сессия стартует…</div>
-                    ) : (
-                      feed.map((l, i) => (
-                        <div key={i} className={`log-line ${l.level}`}>
-                          <span className="ts">{l.ts_ms % 100000}</span>
-                          <span className="tx">{l.text}</span>
-                        </div>
-                      ))
-                    )}
+                <div className="run-grid">
+                  <Panel title="Фазы замера" hint={`по ${duration} с на прогон · фазы повторяются в каждом раунде`}>
+                    <div className="run-phases">
+                      {phaseSeconds(duration).map((p) => {
+                        const active = telemetry?.phase === p.name;
+                        const done =
+                          telemetry != null && phaseIndex(telemetry.phase) > phaseIndex(p.name);
+                        const pct = active ? phaseProgress : done ? 100 : 0;
+                        return (
+                          <div
+                            key={p.name}
+                            className={`run-phase${active ? " active" : ""}${done ? " done" : ""}`}
+                          >
+                            <div className="rp-head">
+                              <span className="rp-name">{p.name}</span>
+                              <span className="rp-time">
+                                {active
+                                  ? `${phaseProgress.toFixed(0)}%`
+                                  : done
+                                    ? "готово"
+                                    : `${p.seconds} с`}
+                              </span>
+                            </div>
+                            <Progress value={pct} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="hint" style={{ marginTop: 10 }}>
+                      {running || telemetry
+                        ? `прошло ~${fmtEst(elapsed)} · осталось ~${fmtEst(
+                            Math.max(0, estSeconds * Math.max(1, selected.size) - elapsed),
+                          )}`
+                        : "Замер идёт в три фазы; первые секунды каждой фазы — разгон, они в статистику не входят."}
+                    </div>
+                  </Panel>
+                  <div className="grid2">
+                    <Stat
+                      label="Время тика"
+                      value={telemetry ? telemetry.ms_per_tick.toFixed(3) : "—"}
+                      suffix="мс"
+                    />
+                    <Stat label="Тиков" value={telemetry ? `${telemetry.ticks_done}` : "—"} />
+                    <Stat label="Раунд" value={telemetry ? `${telemetry.round + 1} / ${reps}` : "—"} />
+                    <Stat label="Прогон" value={telemetry ? `${telemetry.run_index} / ${telemetry.run_total}` : "—"} />
                   </div>
-                </Panel>
+                </div>
                 {chartSvg ?? null}
               </>
             ) : (
               <>
                 <div className="run-grid">
                   <Panel title="Схемы" hint={`в сравнении · ${selected.size}`}>
-                    <div className={`run-scroll${selSchemes.length > 6 ? " fade-bottom" : ""}`}>
+                    <FadeScroll className="run-scroll">
                       {selSchemes.map((s) => (
                         <div key={s.guid} className={`run-row${s.active ? " active" : ""}`}>
                           <span className="run-row-name">
@@ -677,7 +808,7 @@ export default function BenchmarkPage() {
                           </Badge>
                         </div>
                       ))}
-                    </div>
+                    </FadeScroll>
                   </Panel>
                   <Panel title="Параметры">
                     <div className="run-row">
@@ -717,7 +848,13 @@ export default function BenchmarkPage() {
                       автоматически.
                     </div>
                   </div>
-                  <Button variant="primary" big disabled={starting || running} onClick={() => start(false)}>
+                  <Button
+                    variant="primary"
+                    big
+                    disabled={starting || running || selected.size === 0}
+                    title={selected.size === 0 ? "Выберите хотя бы одну схему питания" : undefined}
+                    onClick={() => start(false)}
+                  >
                     {starting ? "Запуск…" : "Запустить тест"}
                   </Button>
                 </div>

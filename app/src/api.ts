@@ -11,6 +11,24 @@ export interface SchemeRow {
   active: boolean;
 }
 
+export type QuarantineKind = "HardFreeze" | "NoProgress" | "Unstable" | "Degraded";
+
+export interface QuarantineEntry {
+  scheme_id: string;
+  scheme_name: string | null;
+  kind: QuarantineKind;
+  reason: string;
+  at_ns: number;
+  plan_guid: string;
+}
+
+export const QUARANTINE_LABELS: Record<QuarantineKind, string> = {
+  HardFreeze: "зависание",
+  NoProgress: "нет прогресса",
+  Unstable: "нестабильна",
+  Degraded: "деградация",
+};
+
 export interface SettingsDto {
   duration_seconds: number;
   warmup_seconds: number;
@@ -62,10 +80,15 @@ export interface HistoryRow {
   readable: boolean;
   error: string | null;
   scheme_name: string;
+  /** Медианный throughput лидера, тик/с. */
+  throughput: number | null;
+  /** Балл лидера 0..=100 по весам из настроек. */
   score: number | null;
   margin: number | null;
   stability: number | null;
   early_stopped: boolean;
+  rounds_planned: number;
+  rounds_completed: number;
 }
 
 export interface StoredRun {
@@ -241,6 +264,7 @@ export const commands = {
   getSettings: () => invoke<SettingsDto>("get_settings"),
   setSettings: (settings: SettingsDto) => invoke<void>("set_settings", { settings }),
   checkpointStatus: () => invoke<CheckpointDto | null>("checkpoint_status"),
+  checkpointDiscard: () => invoke<void>("checkpoint_discard"),
   identityInfo: () => invoke<IdentityDto>("identity_info"),
   startTest: (req: TestRequestDto) => invoke<string>("start_test", { req }),
   stopTest: () => invoke<boolean>("stop_test"),
@@ -251,6 +275,8 @@ export const commands = {
     invoke<string[]>("history_export_to", { planGuid, format, outDir }),
   historyReport: (outDir: string) => invoke<string>("history_report", { outDir }),
   sessionReport: (planGuid: string) => invoke<string>("session_report", { planGuid }),
+  quarantineList: () => invoke<QuarantineEntry[]>("quarantine_list"),
+  quarantineClear: (schemeId: string) => invoke<boolean>("quarantine_clear", { schemeId }),
   historyDelete: (fileName: string) => invoke<void>("history_delete", { fileName }),
   historyOpenFolder: () => invoke<void>("history_open_folder"),
   openFolder: (path: string) => invoke<void>("open_folder", { path }),

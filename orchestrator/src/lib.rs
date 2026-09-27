@@ -10,6 +10,8 @@ pub mod checkpoint;
 pub mod config;
 pub mod diagnostics;
 pub mod history;
+pub mod leader;
+pub mod quarantine;
 pub mod recovery;
 pub mod report;
 pub mod result;

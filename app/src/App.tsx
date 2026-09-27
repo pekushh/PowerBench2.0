@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { commands, onTestFinished, type SettingsDto } from "./api";
 import { setRunning, useToasts } from "./store";
+import { useScrollFade } from "./components/ui";
 import TitleBar from "./components/TitleBar";
 import { CubeIcon, GearIcon, HomeIcon, ListIcon, PowerIcon } from "./components/icons";
 import BenchmarkPage from "./pages/BenchmarkPage";
@@ -21,23 +22,32 @@ const NAV: { id: PageId; label: string; icon: React.ReactNode }[] = [
   { id: "log", label: "Логи", icon: <ListIcon /> },
 ];
 
+function resolveMode(mode: string): string {
+  if (mode === "Auto") {
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? "Light" : "Dark";
+  }
+  return mode;
+}
+
 function applyAppearance(s: SettingsDto) {
   const root = document.documentElement;
   root.setAttribute("data-theme", s.theme);
-  root.setAttribute("data-mode", s.mode);
+  root.setAttribute("data-mode", resolveMode(s.mode));
   root.classList.toggle("reduce-motion", s.reduce_motion);
 }
 
 export default function App() {
   const [page, setPage] = useState<PageId>("test");
   const [collapsed, setCollapsed] = useState(false);
+  const [appearance, setAppearance] = useState<SettingsDto | null>(null);
   const toasts = useToasts();
+  const { ref: mainRef, top: mainTop, bottom: mainBottom } = useScrollFade<HTMLElement>();
 
   useEffect(() => {
     commands
       .getSettings()
       .then((s) => {
-        applyAppearance(s);
+        setAppearance(s);
         setCollapsed(s.sidebar_collapsed);
       })
       .catch(() => undefined);
@@ -47,6 +57,35 @@ export default function App() {
       unfor.then((f) => f());
     };
   }, []);
+
+  useEffect(() => {
+    if (!appearance) return;
+    // Смена темы через View Transitions: плавный кросс-фейд вместо моргания.
+    const swap = (fn: () => void) => {
+      if (document.documentElement.classList.contains("reduce-motion")) {
+        fn();
+        return;
+      }
+      const d = document as Document & {
+        startViewTransition?: (cb: () => void) => void;
+      };
+      if (typeof d.startViewTransition === "function") {
+        try {
+          d.startViewTransition(fn);
+          return;
+        } catch {
+          /* fallback ниже */
+        }
+      }
+      fn();
+    };
+    swap(() => applyAppearance(appearance));
+    if (appearance.mode !== "Auto") return;
+    const mq = window.matchMedia("(prefers-color-scheme: light)");
+    const onChange = () => appearance && swap(() => applyAppearance(appearance));
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [appearance]);
 
   const toggleCollapse = useCallback(() => {
     setCollapsed((c) => {
@@ -59,7 +98,7 @@ export default function App() {
     });
   }, []);
 
-  const onAppearance = useCallback((s: SettingsDto) => applyAppearance(s), []);
+  const onAppearance = useCallback((s: SettingsDto) => setAppearance(s), []);
 
   return (
     <div className="shell">
@@ -92,7 +131,7 @@ export default function App() {
             </div>
           </div>
         </aside>
-        <main className="main">
+        <main ref={mainRef} className={`main${mainTop ? " fade-top" : ""}${mainBottom ? " fade-bottom" : ""}`}>
           <div className={`page-host ${page === "test" ? "on" : ""}`}>
             <BenchmarkPage />
           </div>
@@ -100,7 +139,7 @@ export default function App() {
             <SchemesPage />
           </div>
           <div className={`page-host ${page === "results" ? "on" : ""}`}>
-            <ResultsPage active={page === "results"} />
+            <ResultsPage />
           </div>
           <div className={`page-host ${page === "log" ? "on" : ""}`}>
             <LogPage />

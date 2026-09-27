@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { commands, type SchemeRow, type SettingsDto } from "../api";
 import { Badge, Button, Modal } from "../components/ui";
+import { ExportIcon } from "../components/icons";
 import SchemeTiles from "../components/SchemeTiles";
 import { pushToast } from "../store";
 
@@ -98,10 +99,10 @@ export default function SchemesPage() {
         <h1>Схемы питания</h1>
         <span className="sub">схем: {schemes.length}</span>
         <div className="actions">
-          <Button variant="ghost" disabled={busy} onClick={() => void importScheme()}>
+          <Button variant="ghost" disabled={busy || !isAdmin} title={isAdmin ? undefined : "Требуются права администратора"} onClick={() => void importScheme()}>
             Импорт .pow
           </Button>
-          <Button variant="ghost" disabled={busy} onClick={() => setAskRestore(true)}>
+          <Button variant="ghost" disabled={busy || !isAdmin} title={isAdmin ? undefined : "Требуются права администратора"} onClick={() => setAskRestore(true)}>
             Вернуть стандартные схемы
           </Button>
         </div>
@@ -116,6 +117,7 @@ export default function SchemesPage() {
           <span className="ttl">Выбрана: {selName || exportTarget}</span>
           <div className="spacer" />
           <Button variant="ghost" disabled={busy} onClick={() => void exportSel()}>
+            <ExportIcon width={15} height={15} />
             Экспорт схемы (.pow)
           </Button>
           <Button variant="ghost" disabled={busy} onClick={() => void duplicateSel()}>

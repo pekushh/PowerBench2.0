@@ -94,9 +94,33 @@ pub fn session_started_at_ns(session: &SessionJson) -> Option<u64> {
 /// Прочитать результат из файла истории. Старые записи с другой версией
 /// нагрузки открываются без паники (отсутствующие новые поля опциональны);
 /// ошибка формата возвращается как `Err` — вызывающий решает, пропускать ли.
+///
+/// Имена схем, записанные до исправления декодирования, чинятся на лету:
+/// `powercfg` отдавал UTF-8, а прежний код читал его как CP866, из-за чего
+/// «Сбалансированная» превращалась в «╨б╨▒╨░╨╗╨░╨╜». Ошибка обратима,
+/// поэтому старые сессии показываются читаемо без ручной правки файлов.
 pub fn load_result(path: &Path) -> Result<SessionJson, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&text).map_err(|e| e.to_string())
+    let mut session: SessionJson = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    repair_scheme_names(&mut session);
+    Ok(session)
+}
+
+/// Починить имена схем в загруженной сессии.
+fn repair_scheme_names(session: &mut SessionJson) {
+    for sch in &mut session.schemes {
+        if let Some(name) = sch.name.take() {
+            sch.name = Some(
+                powerbench_windows::power::repair_mojibake(&name).unwrap_or(name),
+            );
+        }
+        for run in &mut sch.per_run {
+            if let Some(name) = run.scheme_name.take() {
+                run.scheme_name =
+                    Some(powerbench_windows::power::repair_mojibake(&name).unwrap_or(name));
+            }
+        }
+    }
 }
 
 /// Совместимы ли две идентичности для совместного агрегирования/ранжирования:

@@ -237,6 +237,10 @@ export interface TelemetryMsg {
   scheme_id: string;
   scheme_name: string;
   phase_elapsed_ms: number;
+  /** Фоновая нагрузка, % CPU; `null`, пока не измерена. */
+  background_percent: number | null;
+  /** Фон превысил порог — замеру стоит доверять с оговоркой. */
+  background_noisy: boolean;
 }
 
 /**

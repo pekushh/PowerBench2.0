@@ -75,7 +75,12 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .page-host.on .page>*:nth-child(n+5){animation-delay:.2s}
 /* `min-height:100%`, а не `calc(100vh - 122px)`: магическое число не совпадало с
    реальной высотой шапки, и короткая страница выходила за край окна. */
-.page{max-width:1120px;margin:0 auto;min-height:100%;display:flex;flex-direction:column;gap:var(--sp-4)}
+/* `width:100%` обязателен. `.page` — flex-элемент колоночного flex-контейнера
+   (`.page-host.on`), а у flex-элемента автоматические поперечные отступы
+   отключают растягивание: блок сжимался по содержимому и центрировался.
+   Из-за этого на пустых и коротких списках заголовок и панели «уезжали» в
+   центр, а на длинных растягивались — интерфейс дёргался при смене вкладки. */
+.page{width:100%;max-width:1120px;margin:0 auto;min-height:100%;display:flex;flex-direction:column;gap:var(--sp-4)}
 .wizard{display:flex;flex-direction:column;gap:var(--sp-4);margin-top:auto;margin-bottom:auto}
 .steps,.wizard{-webkit-user-select:none;user-select:none}
 .page-head{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;padding:var(--sp-1) 0 var(--sp-2)}
@@ -194,9 +199,9 @@ table.grid td.num,table.grid th.num{text-align:right;font-variant-numeric:tabula
 .log-search{width:240px}
 .log-counts{flex-wrap:wrap}
 .scheme-tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-3)}
-@media (max-width: 940px){.scheme-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width: 1100px){.scheme-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
-@media (max-width: 620px){.scheme-tiles{grid-template-columns:1fr}
+@media (max-width: 760px){.scheme-tiles{grid-template-columns:1fr}
 }
 .tile-scheme{display:flex;flex-direction:column;gap:var(--sp-2);padding:var(--sp-4);border-radius:var(--radius-lg);border:1px solid var(--line-1);background:var(--bg-2);cursor:pointer;-webkit-user-select:none;user-select:none;transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
 .tile-scheme:hover{border-color:var(--line-2);background:color-mix(in srgb,var(--bg-2) 90%,var(--fg) 4%);transform:translateY(-2px);box-shadow:var(--shadow-lift)}
@@ -212,7 +217,7 @@ table.grid td.num,table.grid th.num{text-align:right;font-variant-numeric:tabula
 .tile-scheme.active .icon-btn.ts-act{display:none}
 .progress{height:8px;border-radius:var(--radius-full);background:var(--bg-1);border:1px solid var(--line-1);overflow:hidden}
 .progress>i{display:block;height:100%;border-radius:var(--radius-full);background:linear-gradient(90deg,var(--accent),color-mix(in srgb,var(--accent) 72%,#fff));transition:width .18s linear}
-.chart{width:100%;height:var(--chart-h);display:block;animation:var(--motion-rise) var(--ease) backwards}
+
 .modal-overlay{position:fixed;top:0;right:0;bottom:0;left:0;z-index:70;display:grid;place-items:center;background:#0405098c;padding:var(--sp-6);animation:var(--motion-page) var(--ease) both}
 .modal{width:min(460px,92vw);max-height:min(80vh,720px);display:flex;flex-direction:column;background:var(--bg-2);border:1px solid var(--line-2);border-radius:var(--radius-lg);box-shadow:var(--shadow-modal);animation:var(--motion-pop) var(--spring) both}
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);padding:var(--sp-4) var(--sp-4) var(--sp-2)}
@@ -380,6 +385,11 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 
 
 
+/* Предупреждение о фоновой нагрузке во время замера. */
+.run-warn{background:var(--warn-bg,rgba(228,180,111,.10));border:1px solid var(--warn-line,rgba(228,180,111,.42));
+ border-radius:var(--radius-md);padding:var(--sp-3) var(--sp-4);color:var(--fg-dim);
+ font-size:var(--fs-sm);line-height:1.55}
+.run-warn b{color:var(--warn)}
 .run-hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--sp-4);padding:var(--sp-5) var(--sp-5) var(--sp-4);border-radius:var(--radius-lg);border:1px solid var(--line-1);background:radial-gradient(120% 140% at 12% -10%,color-mix(in srgb,var(--accent) 16%,transparent),transparent 60%),var(--bg-2);box-shadow:var(--shadow-card)}
 .rh-label{font-size:var(--fs-sm);color:var(--fg-mute)}
 .rh-value{font-size:clamp(38px,4.6vw,56px);font-weight:650;letter-spacing:var(--ls-tight);line-height:1.05;font-variant-numeric:tabular-nums;margin-top:4px}
@@ -509,7 +519,7 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 @keyframes pulseSoft{0%,100%{opacity:.45}50%{opacity:.65}}
 .dd-menu{animation:var(--motion-slide) var(--ease) backwards}
 .toast{animation:var(--motion-slide) var(--ease) backwards}
-.chart{animation:var(--motion-rise) var(--ease) backwards}
+
 .btn.primary:disabled{animation:pulseSoft var(--motion-pulse) ease-in-out infinite}
 .seg button:active{transform:scale(.96)}
 .spot{position:relative}
@@ -628,7 +638,14 @@ background:color-mix(in srgb,var(--ok) 6%,var(--bg-1))}
 .rd-foot{display:flex;gap:var(--sp-2);align-items:center;padding-top:var(--sp-2)}
 .rd-foot .spacer{flex:1 1 auto}
 /* --- ╨Я╨╗╨╕╤В╨║╨╕ ╨▓╤Л╨▒╨╛╤А╨░ ╤Б╤Е╨╡╨╝ ╨▓ ╨▒╨╡╨╜╤З╨╝╨░╤А╨║╨╡ (╨║╨░╨║ ╨╜╨░ ╤Б╤В╤А╨░╨╜╨╕╤Ж╨╡ ┬л╨б╤Е╨╡╨╝╤Л┬╗) --- */
-.pick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--sp-3)}
+/* Три колонки, как на странице «Схемы питания». `auto-fill` давал разное число
+   колонок на одной и той же ширине из-за дробных остатков — список на двух
+   страницах выглядел по-разному. */
+.pick-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-3)}
+@media (max-width: 1100px){.pick-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width: 760px){.pick-grid{grid-template-columns:1fr}
+}
 .pick-tile{display:flex;flex-direction:column;gap:var(--sp-2);padding:var(--sp-4);
 border-radius:var(--radius-lg);border:1px solid var(--line-1);background:var(--bg-2);
 cursor:pointer;-webkit-user-select:none;user-select:none;
@@ -672,16 +689,16 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 .run-phase.active .rp-time{color:var(--accent);font-weight:650}
 @media (max-width:760px){.rd-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
-/* Индикатор «здесь есть что прокрутить» — «scroll shadow».
-   Раньше он делался через `mask-image`, и первые 4 px контента становились
-   прозрачными: верхняя строка списка буквально исчезала. Теперь тень рисуется
-   слоем `scroll`, а маска `local` привязана к содержимому, поэтому тень
-   появляется только когда есть куда прокручивать, и ничего не перекрывает.
-   Работает без JS. */
-.scrolled-x{background-image:
- linear-gradient(to right,var(--bg-0) 40%,transparent),linear-gradient(to left,var(--bg-0) 40%,transparent),
- linear-gradient(to right,rgba(0,0,0,.28),transparent 16px),linear-gradient(to left,rgba(0,0,0,.28),transparent 16px),
- radial-gradient(farthest-side at 0 50%,rgba(0,0,0,.28),transparent),radial-gradient(farthest-side at 100% 50%,rgba(0,0,0,.28),transparent);
- background-position:0 0,100% 0,0 0,100% 0,0 0,100% 0;background-repeat:no-repeat;
- background-size:34px 100%,34px 100%,16px 100%,16px 100%,12px 100%,12px 100%;
- background-attachment:local,local,scroll,scroll,scroll,scroll}
+/* Индикатор «здесь есть что прокрутить» — только сверху и снизу.
+   Вариант с боковыми тенями (`scroll shadow` на `background-attachment`)
+   приклеивал их к рамке элемента, и они рисовались ПОВЕРХ текста: в журнале
+   и в списках появлялись тёмные полосы прямо на строках. Боковые градиенты
+   убраны. Оставшиеся вертикальные работают маской по краям, а не слоем
+   поверх содержимого, и затухание короткое — строка остаётся читаемой. */
+.fade-top{-webkit-mask-image:linear-gradient(to bottom,transparent 3px,#000 14px);
+ mask-image:linear-gradient(to bottom,transparent 3px,#000 14px)}
+.fade-bottom{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 14px),transparent calc(100% - 3px));
+ mask-image:linear-gradient(to bottom,#000 calc(100% - 14px),transparent calc(100% - 3px))}
+.fade-top.fade-bottom{-webkit-mask-image:linear-gradient(to bottom,transparent 3px,#000 14px),linear-gradient(to bottom,#000 calc(100% - 14px),transparent calc(100% - 3px));
+ -webkit-mask-composite:source-in;mask-composite:intersect;
+ mask-image:linear-gradient(to bottom,transparent 3px,#000 14px),linear-gradient(to bottom,#000 calc(100% - 14px),transparent calc(100% - 3px))}

@@ -30,19 +30,28 @@ const SUMMARY_MAX_CARDS: usize = 12;
 const HTML_CSS: &str = r##"<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Отчёт PowerBench</title><style>
-:root{--bg:#0b0c0f;--card:#141519;--card2:#1a1c22;--line:#23262e;--line2:#333845;
---fg:#f3f3f3;--dim:#c9cdd6;--mute:#7e7e7e;
---ok:#6fd0a0;--okbg:rgba(111,208,160,.12);--okline:rgba(111,208,160,.45);
---warn:#e4b46f;--warnbg:rgba(228,180,111,.10);--warnline:rgba(228,180,111,.42);
---err:#e57979;--errbg:rgba(229,121,121,.10);--errline:rgba(229,121,121,.42);
+:root{
+/* Палитра отчёта = токены темы Graphite из приложения (`app/src/styles.css`).
+   Раньше здесь стояли собственные, более сине-серые значения, — на фоне
+   приложения отчёт выглядел «синим». Значения здесь должны совпадать с
+   `:root` приложения; расхождение ловит тест `report_palette_matches_app_graphite_theme`. */
+--bg-0:#0F0F0F;--bg-1:#1B1B1B;--bg-2:#2B2B2B;--bg-3:#303030;
+--line-1:#f3f3f31c;--line-2:#f3f3f338;
+--fg:#F3F3F3;--fg-dim:#ECECEC;--fg-mute:#7E7E7E;--accent:#FDFDFD;
+--ok:#6fd0a0;--warn:#e4b46f;--err:#e57979;
+--bg:var(--bg-0);--card:var(--bg-1);--card2:var(--bg-2);--line:var(--line-1);--line2:var(--line-2);
+--dim:var(--fg-dim);--mute:var(--fg-mute);
+--okbg:rgba(111,208,160,.12);--okline:rgba(111,208,160,.45);
+--warnbg:rgba(228,180,111,.10);--warnline:rgba(228,180,111,.42);
+--errbg:rgba(229,121,121,.10);--errline:rgba(229,121,121,.42);
 --shadow:0 30px 70px -30px rgba(0,0,0,.8)}
 *{box-sizing:border-box}body{margin:0;padding:36px 16px 60px;color:var(--fg);
-background:radial-gradient(1000px 420px at 50% -6%,#17181d,var(--bg) 72%);
+background:radial-gradient(1000px 420px at 50% -6%,#1B1B1B,var(--bg) 72%);
 font:14px/1.6 -apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
 body>*{max-width:1000px;margin-left:auto;margin-right:auto}
 .sheet{background:var(--card);border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:var(--shadow)}
 .topbar{display:flex;align-items:center;gap:10px;padding:16px 28px;border-bottom:1px solid var(--line)}
-.logo{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#8fe3b4,#3f9e6e);
+.logo{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#8FE3B4,#3F9E6E);
 display:inline-grid;place-items:center;flex:0 0 auto}
 .wordmark{font-size:15px;font-weight:650;letter-spacing:-.2px}
 .pad{padding:28px 30px 8px}
@@ -90,8 +99,8 @@ border:1px solid transparent;white-space:nowrap}
 .plab{color:var(--dim);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .plab small{color:var(--mute)}
 .ptrack{height:7px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;min-width:60px}
-.ptrack i{display:block;height:100%;border-radius:999px;background:#4a4e5a}
-.pbar.lead .ptrack i{background:linear-gradient(90deg,#4ea87f,var(--ok))}
+.ptrack i{display:block;height:100%;border-radius:999px;background:#4A4A4A}
+.pbar.lead .ptrack i{background:linear-gradient(90deg,#4EA87F,var(--ok))}
 .pval{color:var(--fg);font-variant-numeric:tabular-nums;font-weight:700;font-size:13.5px;min-width:44px;text-align:right}
 .meta{color:var(--mute);font-size:12.5px;line-height:1.6;margin-bottom:2px}
 .muted{color:var(--mute)}
@@ -156,7 +165,7 @@ border:1px solid var(--line);border-left:4px solid var(--ok);border-radius:14px;
 .sch-more{background:var(--card2);color:var(--fg);border:1px solid var(--line2);border-radius:10px;
  padding:8px 14px;font:inherit;font-size:13px;cursor:pointer}
 .sch-more:hover{border-color:var(--okline)}
-table thead th{position:sticky;top:0;z-index:2;background:#16171b}
+table thead th{position:sticky;top:0;z-index:2;background:#161616}
 tr.sess-row{cursor:pointer}
 tr.sess-row:hover td{background:rgba(255,255,255,.035)}
 tr.sess-row td:first-child::before{content:"▸ ";color:var(--mute)}
@@ -502,7 +511,7 @@ pub fn build_session_report(s: &SessionJson) -> String {
     format!(
         "{HTML_CSS}<div class=\"sheet\">\
          <div class=\"topbar\"><span class=\"logo\">\
-         <svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\"><path d=\"M13 2 4 14h6l-1 8 9-12h-6l1-8z\" fill=\"#141519\"/></svg>\
+         <svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\"><path d=\"M13 2 4 14h6l-1 8 9-12h-6l1-8z\" fill=\"#1B1B1B\"/></svg>\
          </span><span class=\"wordmark\">PowerBench</span></div>\
          <div class=\"pad\">\
          <div class=\"title-row\"><h1>Отчёт по сессии</h1>\
@@ -1516,6 +1525,36 @@ mod tests {
             SUMMARY_MAX_CARDS
         );
         assert!(html.contains("Показаны"), "нет пометки о скрытых схемах в сводке");
+    }
+
+    /// Регресс: палитра отчёта обязана совпадать с темой Graphite приложения.
+    ///
+    /// Раньше у отчёта были свои значения с сине-серым оттенком, и на фоне
+    /// приложения он выглядел «синим». Тест сверяет ключевые токены напрямую.
+    #[test]
+    fn report_palette_matches_app_graphite_theme() {
+        let html = build_session_report(&sample_session("AAA", 500.0));
+        for token in [
+            "--bg-0:#0F0F0F",
+            "--bg-1:#1B1B1B",
+            "--bg-2:#2B2B2B",
+            "--bg-3:#303030",
+            "--fg:#F3F3F3",
+            "--fg-dim:#ECECEC",
+            "--fg-mute:#7E7E7E",
+            "--ok:#6fd0a0",
+            "--warn:#e4b46f",
+            "--err:#e57979",
+        ] {
+            assert!(html.contains(token), "в отчёте нет токена темы: {token}");
+        }
+        // Старые синеватые значения не должны вернуться.
+        for stale in ["#0b0c0f", "#141519", "#1a1c22", "#23262e", "#333845", "#c9cdd6"] {
+            assert!(
+                !html.contains(stale),
+                "в отчёте остался старый синеватый цвет: {stale}"
+            );
+        }
     }
 
     /// Регресс: палитра графика не должна содержать синих тонов — отчёт

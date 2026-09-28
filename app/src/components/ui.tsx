@@ -3,17 +3,46 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 /**
- * Ref на прокручиваемый контейнер.
+ * Ref на прокручиваемый контейнер + признаки «есть что прокрутить» сверху и
+ * снизу (классы `fade-top` / `fade-bottom`).
  *
- * Раньше здесь был `MutationObserver` плюс чтение `scrollHeight`/`clientHeight`
- * на каждое изменение DOM — это принудительный синхронный layout, то есть
- * десятки раз в секунду, в том числе во время замера. Само затемнение краёв
- * теперь делает CSS (`background-attachment: local`), поэтому от JS остаётся
- * только ref: подписки на прокрутку не нужны.
+ * Подписка только на `scroll` и `ResizeObserver`, обновление не чаще одного
+ * кадра. `MutationObserver` здесь раньше стоял, но он читал `scrollHeight`
+ * на каждое изменение DOM — синхронный layout, то есть лишняя работа ровно
+ * во время замера. Изменение размеров и так ловится `ResizeObserver`.
  */
 export function useScrollFade<T extends HTMLElement>() {
   const ref = useRef<T>(null);
-  return { ref };
+  const [fade, setFade] = useState({ top: false, bottom: false });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      const canScroll = el.scrollHeight - el.clientHeight > 4;
+      const next = {
+        top: canScroll && el.scrollTop > 4,
+        bottom: canScroll && el.scrollTop + el.clientHeight < el.scrollHeight - 4,
+      };
+      setFade((prev) =>
+        prev.top === next.top && prev.bottom === next.bottom ? prev : next,
+      );
+    };
+    const schedule = () => {
+      if (frame === 0) frame = requestAnimationFrame(update);
+    };
+    update();
+    el.addEventListener("scroll", schedule, { passive: true });
+    const ro = new ResizeObserver(schedule);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener("scroll", schedule);
+      ro.disconnect();
+      if (frame !== 0) cancelAnimationFrame(frame);
+    };
+  }, []);
+  return { ref, ...fade };
 }
 
 /**
@@ -81,21 +110,22 @@ export function Spot({
 
 /** Прокручиваемый блок с умными фейдами по краям. */
 /**
- * Прокручиваемый блок с индикацией «есть что прокрутить».
+ * Прокручиваемый блок с индикацией «есть что прокрутить» сверху и снизу.
  *
- * Индикатор — CSS-тень по краям (`background-attachment: local`), а не
- * `mask-image`: маска делала первые пиксели контента прозрачными, то есть
- * верхняя строка списка частично исчезала. JS-подписка на прокрутку больше не
- * нужна — тень появляется и исчезает сама.
+ * Только вертикальные края: боковые тени рисовались поверх строк и портили
+ * текст в журнале и в длинных списках.
  */
 export function FadeScroll({
   className = "",
   children,
   ...rest
 }: React.HTMLAttributes<HTMLDivElement>) {
-  const { ref } = useScrollFade<HTMLDivElement>();
+  const { ref, top, bottom } = useScrollFade<HTMLDivElement>();
+  const cls = [className, top ? "fade-top" : "", bottom ? "fade-bottom" : ""]
+    .filter(Boolean)
+    .join(" ");
   return (
-    <div ref={ref} className={`scrolled-x ${className}`.trim()} {...rest}>
+    <div ref={ref} className={cls} {...rest}>
       {children}
     </div>
   );

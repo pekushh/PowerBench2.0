@@ -64,6 +64,10 @@ struct ObsCtx {
     phase_started: Instant,
     last_ticks: u64,
     last_time: Instant,
+    /// Замеренная фоновая нагрузка, % CPU. `None` — ещё не измерялось.
+    background_percent: Option<f64>,
+    /// Фон превысил порог и влияет на результат.
+    background_noisy: bool,
 }
 
 impl Default for ObsCtx {
@@ -80,6 +84,8 @@ impl Default for ObsCtx {
             phase_started: now,
             last_ticks: 0,
             last_time: now,
+            background_percent: None,
+            background_noisy: false,
         }
     }
 }
@@ -105,6 +111,10 @@ struct TelemetryMsg {
     scheme_id: String,
     scheme_name: String,
     phase_elapsed_ms: u64,
+    /// Фоновая нагрузка, % CPU: `null`, пока не измерена.
+    background_percent: Option<f64>,
+    /// Фон превысил порог — результату стоит доверять с оговоркой.
+    background_noisy: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -148,6 +158,27 @@ impl AppObserver {
 
 impl TelemetryObserver for AppObserver {
     fn event(&self, e: &SessionEvent) {
+        // Фоновая нагрузка попадает в телеметрию: интерфейс должен прямо
+        // предупредить, что фон мешает и результат может быть занижен.
+        match e {
+            SessionEvent::BackgroundNoisy {
+                measured_total_percent,
+                ..
+            } => {
+                let mut ctx = self.lock_ctx();
+                ctx.background_percent = Some(*measured_total_percent);
+                ctx.background_noisy = true;
+            }
+            SessionEvent::BackgroundClean {
+                measured_total_percent,
+                ..
+            } => {
+                let mut ctx = self.lock_ctx();
+                ctx.background_percent = Some(*measured_total_percent);
+                ctx.background_noisy = false;
+            }
+            _ => {}
+        }
         let msg = LogMsg {
             level: log_level(e).to_string(),
             text: e.to_string(),
@@ -199,6 +230,8 @@ impl TelemetryObserver for AppObserver {
             scheme_id: ctx.scheme_id.clone(),
             scheme_name: ctx.scheme_name.clone(),
             phase_elapsed_ms: phase_started.elapsed().as_millis() as u64,
+            background_percent: ctx.background_percent,
+            background_noisy: ctx.background_noisy,
         };
         if delta > 0 && dt_ms > 0.0 {
             let tps = delta as f64 / dt_ms * 1000.0;

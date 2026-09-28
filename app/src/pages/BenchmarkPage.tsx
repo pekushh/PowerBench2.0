@@ -100,8 +100,6 @@ function earlyStopHint(reps: number): string {
   return `Ранняя остановка возможна, если перевес ≈ ${need.toFixed(0)}% и более (при разбросе прогонов ~5%). Для практичного срабатывания рекомендуем 5+ повторов.`;
 }
 
-const CHART_POINTS = 180;
-
 /** Русские склонения: 1 повтор / 2 повтора / 5 повторов. */
 function plural(n: number, one: string, few: string, many: string): string {
   const a = Math.abs(Math.trunc(n)) % 100;
@@ -159,11 +157,9 @@ export default function BenchmarkPage() {
   const [finished, setFinished] = useState(false);
   const [finishMsg, setFinishMsg] = useState("");
   const [elapsed, setElapsed] = useState(0);
-  const [chart, setChart] = useState<number[]>([]);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [quarantine, setQuarantine] = useState<QuarantineEntry[]>([]);
   const [estimate, setEstimate] = useState<string>("—");
-  const chartRef = useRef<number[]>([]);
   const t0 = useRef(0);
   // Полная оценка сессии в секундах — для расчёта «осталось» во время замера.
   const totalSecondsRef = useRef<number | null>(null);
@@ -298,8 +294,6 @@ export default function BenchmarkPage() {
 
   useEffect(() => {
     const untele = onTelemetry((m) => {
-      chartRef.current = [...chartRef.current.slice(-(CHART_POINTS - 1)), m.ticks_per_sec];
-      setChart(chartRef.current);
       setTelemetry(m);
     });
     const unfin = onTestFinished((m) => {
@@ -308,7 +302,6 @@ export default function BenchmarkPage() {
       setStopping(false);
       setTelemetry(null);
       setFinished(true);
-      setChart([]);
       commands
         .checkpointStatus()
         .then((cp) => setCheckpoint(cp))
@@ -441,8 +434,6 @@ export default function BenchmarkPage() {
         .then(() => {
           pushToast("info", "Сессия запущена");
           setRunning(true);
-          chartRef.current = [];
-          setChart([]);
           setCheckpoint(null);
         })
         .catch((e) => {
@@ -522,30 +513,6 @@ export default function BenchmarkPage() {
     const p = (el / (total * 1000)) * 100;
     return Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : 0;
   }, [telemetry]);
-
-  // График пересобирается на каждом тике телеметрии, поэтому он memoized:
-  // иначе SVG строился в главном потоке ровно тогда, когда идёт замер.
-  const chartSvg = useMemo(() => {
-    if (chart.length < 2) return null;
-    const w = 720;
-    const h = 120;
-    const max = Math.max(1, ...chart);
-    const step = w / (CHART_POINTS - 1);
-    const pts = chart
-      .map((v, i) => `${(i * step).toFixed(1)},${(h - (v / max) * (h - 8) - 4).toFixed(1)}`)
-      .join(" ");
-    return (
-      <svg viewBox={`0 0 ${w} ${h}`} className="chart" preserveAspectRatio="none">
-        <polyline
-          points={pts}
-          fill="none"
-          stroke="var(--accent)"
-          strokeWidth={2}
-          strokeLinejoin="round"
-        />
-      </svg>
-    );
-  }, [chart]);
 
   return (
     <div className="page">
@@ -895,11 +862,24 @@ export default function BenchmarkPage() {
                       suffix="мс"
                     />
                     <Stat label="Тиков" value={telemetry ? `${telemetry.ticks_done}` : "—"} />
-                    <Stat label="Раунд" value={telemetry ? `${telemetry.round + 1} / ${reps}` : "—"} />
-                    <Stat label="Прогон" value={telemetry ? `${telemetry.run_index} / ${telemetry.run_total}` : "—"} />
+                    <Stat
+                      label="Фон"
+                      value={
+                        telemetry?.background_percent != null
+                          ? tf(telemetry.background_percent, 1)
+                          : "—"
+                      }
+                      suffix={telemetry?.background_noisy ? "загружен" : "%"}
+                    />
                   </div>
                 </div>
-                {chartSvg ?? null}
+                {telemetry?.background_noisy && telemetry.background_percent != null ? (
+                  <div className="run-warn">
+                    <b>Фон загружен — {tf(telemetry.background_percent, 1)}% CPU.</b>{" "}
+                    Измерение идёт с посторонней нагрузкой: закройте тяжёлые программы
+                    и повторите тест, иначе результат может быть занижен.
+                  </div>
+                ) : null}
               </>
             ) : (
               <>

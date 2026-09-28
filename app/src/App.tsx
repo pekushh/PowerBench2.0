@@ -41,7 +41,7 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [appearance, setAppearance] = useState<SettingsDto | null>(null);
   const toasts = useToasts();
-  const { ref: mainRef } = useScrollFade<HTMLElement>();
+  const { ref: mainRef, top: mainTop, bottom: mainBottom } = useScrollFade<HTMLElement>();
   // Подписка на «идёт ли сессия» — единственный источник для отключения
   // анимаций ниже.
   const { running: sessionRunning } = useSession();
@@ -155,7 +155,7 @@ export default function App() {
             </button>
           </div>
         </aside>
-        <main ref={mainRef} className="main scrolled-x">
+        <main ref={mainRef} className={`main${mainTop ? " fade-top" : ""}${mainBottom ? " fade-bottom" : ""}`}>
           {/* BenchmarkPage всегда смонтирован: мастер хранит состояние сессии,
               и размонтирование теряло бы его при переходе на другие вкладки.
               Но показывается он ТОЛЬКО когда активен — иначе он накладывался

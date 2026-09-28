@@ -15,10 +15,13 @@
         "label": "main",
         "width": 1200,
         "height": 800,
-        "minWidth": 900,
-        "minHeight": 640,
-        "resizable": true,
-        "maximizable": true,
+        "minWidth": 1200,
+        "maxWidth": 1200,
+        "minHeight": 800,
+        "maxHeight": 800,
+        "resizable": false,
+        "maximizable": false,
+        "fullscreen": false,
         "center": true,
         "decorations": false
       }

@@ -161,6 +161,17 @@ impl Engine {
         self.pool.cancel_handle()
     }
 
+    /// Пул воркеров гарантированно не работает (никто не пишет в буферы).
+    /// Используется после отменённой фазы как проверка «нагрузка остановлена».
+    pub fn pool_quiesced(&self) -> bool {
+        self.pool.is_quiesced()
+    }
+
+    /// Дождаться завершения воркеров (в пределах разумного времени).
+    pub fn quiesce_pool(&self) -> bool {
+        self.pool.quiesce()
+    }
+
     /// Кооперативная отмена текущего прогона.
     pub fn cancel(&self) {
         self.pool.cancel();
@@ -419,12 +430,22 @@ fn main_stage(entities: &RawShared<EntityBuffers>, params: &ProfileParams) -> u6
 }
 
 /// Построить дескрипторы задач на стеке (без выделений в цикле тика).
+///
+/// Разбиение обязано оставаться непересекающимся: от него зависит
+/// `unsafe impl Sync` в `buffers::RawShared`. Диагностические проверки собраны
+/// в `debug_assert!` — в release их нет, поэтому инвариант проверяется тестами
+/// `animation_ranges_are_disjoint` и `ranges_stay_in_bounds`, а не в рантайме.
 fn build_descriptors(params: &ProfileParams) -> [JobDescriptor; MAXIMUM_JOBS] {
     let active = params.worker_jobs;
+    debug_assert!((1..=MAXIMUM_JOBS).contains(&active));
+    // Разбиение должно быть точным: неполный остаток молча потерял бы работу.
     debug_assert_eq!(params.visibility_probes % active, 0);
     debug_assert_eq!(params.animation_items % active, 0);
     let probes_per_job = params.visibility_probes / active;
     let anim_per_job = params.animation_items / active;
+    // Смещения растут монотонно и равны шагу, поэтому диапазоны соседних задач
+    // не пересекаются. В release эти проверки исчезают, а инвариант проверяется
+    // тестами `animation_ranges_are_disjoint` / `ranges_stay_in_bounds`.
     let mut out = [JobDescriptor::dummy(); MAXIMUM_JOBS];
     for (j, slot) in out.iter_mut().enumerate().take(active) {
         *slot = JobDescriptor {
@@ -436,4 +457,91 @@ fn build_descriptors(params: &ProfileParams) -> [JobDescriptor; MAXIMUM_JOBS] {
         };
     }
     out
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+    use crate::config::profile_params;
+
+    /// Все профили нагрузки. Число воркеров варьируется, но только среди
+    /// делителей объёмов работы: разбиение обязано быть точным, иначе часть
+    /// работы просто потеряется (это же проверяет `build_descriptors`).
+    fn all_profiles() -> Vec<ProfileParams> {
+        [
+            Profile::Light,
+            Profile::Heavy,
+            Profile::ResponseBase,
+            Profile::ResponseMedium,
+            Profile::ResponseMajor,
+        ]
+        .into_iter()
+        .flat_map(|p| {
+            let base = profile_params(p);
+            // Все делители числа воркеров по умолчанию, плюс сам делитель:
+            // так проверяются и «родные», и уменьшенные пулы.
+            let div = base.worker_jobs;
+            (1..=MAXIMUM_JOBS.min(div))
+                .filter(move |j| div.is_multiple_of(*j))
+                .map(move |jobs| ProfileParams {
+                    main_entity_updates: base.main_entity_updates,
+                    visibility_probes: base.visibility_probes,
+                    animation_items: base.animation_items,
+                    worker_jobs: jobs,
+                })
+        })
+        .collect()
+    }
+
+    /// Инвариант `RawShared`: ни один индекс анимации не принадлежит двум
+    /// задачам. Нарушение здесь означает гонку записи в горячем тике ядра.
+    #[test]
+    fn animation_ranges_are_disjoint() {
+        let _g = crate::tests::lock();
+        for params in all_profiles() {
+            let descs = build_descriptors(&params);
+            let mut seen = vec![0u8; ENTITY_CAPACITY];
+            for d in descs.iter().take(params.worker_jobs) {
+                let start = d.animation_start as usize;
+                let end = start + d.animation_count as usize;
+                for slot in &mut seen[start..end.min(ENTITY_CAPACITY)] {
+                    *slot = slot.saturating_add(1);
+                }
+            }
+            let total: usize = descs
+                .iter()
+                .take(params.worker_jobs)
+                .map(|d| d.animation_count as usize)
+                .sum();
+            assert_eq!(
+                total, params.animation_items,
+                "{params:?}: не все элементы анимации покрыты"
+            );
+            assert!(
+                seen.iter().all(|&c| c <= 1),
+                "{params:?}: диапазоны анимации пересеклись"
+            );
+        }
+    }
+
+    /// Границы диапазонов внутри буфера: выход за них в `run_job` — это
+    /// обращение за пределы выделенной памяти.
+    #[test]
+    fn ranges_stay_in_bounds() {
+        let _g = crate::tests::lock();
+        for params in all_profiles() {
+            for d in build_descriptors(&params).iter().take(params.worker_jobs) {
+                let a_end = d.animation_start as usize + d.animation_count as usize;
+                assert!(
+                    a_end <= ENTITY_CAPACITY,
+                    "{params:?}: диапазон анимации выходит за {ENTITY_CAPACITY}"
+                );
+                let v_end = d.visibility_start as usize + d.visibility_count as usize;
+                assert!(
+                    v_end <= ENTITY_CAPACITY,
+                    "{params:?}: диапазон проб видимости выходит за {ENTITY_CAPACITY}"
+                );
+            }
+        }
+    }
 }

@@ -28,6 +28,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// Грейс-период кооперативной отмены: ограничивает время выхода из фазы.
 const CANCEL_GRACE: Duration = Duration::from_millis(100);
 
+/// Потолок ожидания «тишины» пула (все воркеры завершили батч). Защищает от
+/// бесконечного ожидания, если воркер завис намертво.
+const QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Период опроса при ожидании тишины пула.
+const QUIESCE_POLL: Duration = Duration::from_millis(1);
+
 /// Дескриптор одной задачи воркерам.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JobDescriptor {
@@ -58,10 +65,24 @@ struct PoolInner {
     descriptors: [JobDescriptor; MAXIMUM_JOBS],
     job_slots: [u64; MAXIMUM_JOBS],
     active_jobs: usize,
-    /// Сколько воркеров уже завершили работу над текущим батчем.
+    /// Сколько воркеров отчитались о завершении **текущей** эпохи.
+    /// Отчёты по устаревшим эпохам игнорируются (см. `worker_loop`).
     workers_done: usize,
     /// Отказ одного из воркеров (падение потока) — ошибка запуска.
     faulted: bool,
+    /// Номер эпохи, для которой воркеры уже сообщили о завершении.
+    /// Позволяет отбрасывать опоздавшие отчёты и проверять «тишину» пула.
+    completed_epoch: u64,
+    /// Есть ли батч, который воркеры ещё не завершили. Именно этот признак
+    /// отвечает на вопрос «никто не пишет в буферы», а не счётчик отчётов:
+    /// после `reset_to_idle` счётчик обнуляется, но батч мог быть незавершённым.
+    busy: bool,
+}
+
+/// Мьютекс пула: отравление игнорируем — потеря блокировки в одном воркере
+/// не должна превращать панику в каскадную по всему пулу.
+fn lock_pool(shared: &PoolShared) -> std::sync::MutexGuard<'_, PoolInner> {
+    shared.lock.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[derive(Debug)]
@@ -147,7 +168,7 @@ fn process_jobs(
     let mut my_descs: [JobDescriptor; MAXIMUM_JOBS] = [JobDescriptor::dummy(); MAXIMUM_JOBS];
     let mut n = 0usize;
     {
-        let guard = shared.lock.lock().unwrap();
+        let guard = lock_pool(shared);
         debug_assert_eq!(guard.epoch, epoch, "воркер обработал не тот батч");
         let active = guard.active_jobs;
         let mut j = worker_index;
@@ -170,7 +191,7 @@ fn process_jobs(
     }
 
     if n > 0 {
-        let mut guard = shared.lock.lock().unwrap();
+        let mut guard = lock_pool(shared);
         for k in 0..n {
             guard.job_slots[my_indices[k]] = my_slots[k];
         }
@@ -192,7 +213,7 @@ fn worker_loop(
         // 1) Ожидание нового батча (ровно один сигнал на пакет задач).
         let epoch;
         {
-            let mut guard = shared.lock.lock().unwrap();
+            let mut guard = lock_pool(&shared);
             loop {
                 if shutdown.load(Ordering::Acquire) {
                     return;
@@ -205,7 +226,7 @@ fn worker_loop(
                 let waited = shared
                     .work_ready
                     .wait_timeout(guard, POLL_INTERVAL)
-                    .unwrap();
+                    .unwrap_or_else(|e| e.into_inner());
                 guard = waited.0;
             }
         }
@@ -223,11 +244,21 @@ fn worker_loop(
         }));
 
         // 3) Сообщить о завершении порции.
-        let mut guard = shared.lock.lock().unwrap();
+        let mut guard = lock_pool(&shared);
         if caught.is_err() {
             guard.faulted = true;
         }
-        guard.workers_done += 1;
+        // Отчёт принимается только для текущей эпохи. Иначе опоздавший воркер
+        // (например, после истечения грейса отмены) зачёлся бы в следующем
+        // батче, и `wait_batch` вернул бы `Ok` до реального завершения работы —
+        // сломанные контрольные суммы на живых данных.
+        if guard.epoch == epoch {
+            guard.workers_done = guard.workers_done.saturating_add(1);
+            guard.completed_epoch = epoch;
+            if guard.workers_done >= worker_count {
+                guard.busy = false;
+            }
+        }
         shared.work_done.notify_all();
         drop(guard);
     }
@@ -235,6 +266,10 @@ fn worker_loop(
 
 impl Pool {
     /// Создать пул из `worker_count` persistent-потоков.
+    ///
+    /// `worker_count == 0` — ошибка конфигурации, а не «пустой пул»: раньше
+    /// это приводило к панике в горячем потоке. Если поток запустить не удалось,
+    /// уже запущенные останавливаются, иначе они остались бы жить вечно.
     pub fn new(worker_count: usize, entities: Arc<RawShared<EntityBuffers>>) -> Self {
         assert!(worker_count >= 1, "пул воркеров не может быть пустым");
         let shared = Arc::new(PoolShared {
@@ -245,6 +280,8 @@ impl Pool {
                 active_jobs: 0,
                 workers_done: 0,
                 faulted: false,
+                completed_epoch: 0,
+                busy: false,
             }),
             work_ready: Condvar::new(),
             work_done: Condvar::new(),
@@ -254,15 +291,33 @@ impl Pool {
 
         let mut handles = Vec::with_capacity(worker_count);
         for w in 0..worker_count {
+            // Копии для остановки пула на случай частичного запуска: originals
+            // уйдут в замыкание потока, и после `spawn` их уже не достать.
+            let stop_flag = shutdown.clone();
+            let stop_cancel = cancel.clone();
+            let stop_shared = shared.clone();
             let shared = shared.clone();
             let cancel = cancel.clone();
             let shutdown = shutdown.clone();
             let entities = entities.clone();
-            let handle = std::thread::Builder::new()
+            let spawned = std::thread::Builder::new()
                 .name(format!("powerbench-worker-{w}"))
-                .spawn(move || worker_loop(shared, cancel, shutdown, w, worker_count, entities))
-                .expect("не удалось запустить воркер");
-            handles.push(handle);
+                .spawn(move || worker_loop(shared, cancel, shutdown, w, worker_count, entities));
+            match spawned {
+                Ok(handle) => handles.push(handle),
+                Err(e) => {
+                    // Частичный пул недопустим: будим и ждём уже созданные,
+                    // иначе они остались бы жить вечно (дескрипторы `JoinHandle`
+                    // в этом ветке не сохраняются и потоки отсоединяются).
+                    stop_flag.store(true, Ordering::Release);
+                    stop_cancel.store(true, Ordering::Release);
+                    stop_shared.work_ready.notify_all();
+                    for h in handles {
+                        let _ = h.join();
+                    }
+                    panic!("не удалось запустить воркер {w}: {e}");
+                }
+            }
         }
 
         Self {
@@ -299,11 +354,40 @@ impl Pool {
     }
 
     /// Пул в idle перед фазой: батча нет, счётчик завершившихся воркеров нулевой.
+    ///
+    /// Сначала дожидается «тишины» пула: если грейс отмены истёк, воркеры могут
+    /// ещё писать в буферы сущностей. Сбрасывать буферы в этот момент — гонка
+    /// памяти и рассинхрон контрольных сумм, поэтому сначала quiesce.
     pub fn reset_to_idle(&self) {
-        let mut guard = self.shared.lock.lock().unwrap();
+        self.quiesce();
+        let mut guard = lock_pool(&self.shared);
         guard.active_jobs = 0;
         guard.workers_done = 0;
         guard.faulted = false;
+    }
+
+    /// Дождаться, пока все воркеры завершат текущий батч.
+    ///
+    /// Вызывается перед `reset` (буферы сущностей перестают быть общими) и
+    /// перед `shutdown`. Отмена кооперативная, поэтому воркер завершается
+    /// быстро; ожидание ограничено сверху, чтобы зависший воркер не заблокировал
+    /// поток навсегда.
+    pub fn quiesce(&self) -> bool {
+        let deadline = Instant::now() + QUIESCE_TIMEOUT;
+        loop {
+            if self.is_quiesced() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(QUIESCE_POLL);
+        }
+    }
+
+    /// Пул гарантированно не работает: ни один воркер не пишет в буферы.
+    pub fn is_quiesced(&self) -> bool {
+        !lock_pool(&self.shared).busy
     }
 
     /// Опубликовать батч из `active_jobs` задач и разбудить воркеров.
@@ -311,11 +395,12 @@ impl Pool {
         assert!((1..=MAXIMUM_JOBS).contains(&active_jobs));
         // Короткий слайс молча оставил бы stale-дескрипторы прошлого батча.
         assert!(descriptors.len() >= active_jobs);
-        let mut guard = self.shared.lock.lock().unwrap();
+        let mut guard = lock_pool(&self.shared);
         guard.epoch = guard.epoch.wrapping_add(1);
         guard.workers_done = 0;
         guard.faulted = false;
         guard.active_jobs = active_jobs;
+        guard.busy = true;
         for (i, d) in descriptors.iter().enumerate().take(active_jobs) {
             guard.descriptors[i] = *d;
         }
@@ -326,7 +411,7 @@ impl Pool {
     /// Снимок слотов контрольных сумм задач по возрастанию номера задачи.
     pub fn job_slots_snapshot(&self, count: usize) -> [u64; MAXIMUM_JOBS] {
         let mut out = [0u64; MAXIMUM_JOBS];
-        let guard = self.shared.lock.lock().unwrap();
+        let guard = lock_pool(&self.shared);
         out[..count].copy_from_slice(&guard.job_slots[..count]);
         out
     }
@@ -343,8 +428,8 @@ impl Pool {
                 grace_start = Some(Instant::now());
             }
 
-            let mut guard = self.shared.lock.lock().unwrap();
-            if guard.faulted && guard.workers_done == self.worker_count {
+            let mut guard = lock_pool(&self.shared);
+            if guard.faulted && guard.workers_done >= self.worker_count {
                 return Err(BatchError::WorkerFailed);
             }
             if guard.workers_done == self.worker_count {
@@ -361,7 +446,7 @@ impl Pool {
                 .shared
                 .work_done
                 .wait_timeout(guard, POLL_INTERVAL)
-                .unwrap();
+                .unwrap_or_else(|e| e.into_inner());
             guard = waited.0;
         }
     }

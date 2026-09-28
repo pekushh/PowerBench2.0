@@ -43,8 +43,23 @@ function scoreKind(score: number | null): "ok" | "warn" | "danger" {
   return "danger";
 }
 
+/** Ключ сортировки по убыванию: пропуски уходят в конец, NaN не появляется. */
+function numDesc(v: number | null | undefined): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : -Infinity;
+}
+
+/** Русские склонения: 1 запись / 2 записи / 5 записей. */
+export function plural(n: number, one: string, few: string, many: string): string {
+  const a = Math.abs(Math.trunc(n)) % 100;
+  const b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
+}
+
 export function fmtBytes(n: number): string {
-  if (!n) return "0 Б";
+  if (!Number.isFinite(n) || n <= 0) return "0 Б";
   if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} ГБ`;
   if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} МБ`;
   if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} КБ`;
@@ -56,11 +71,30 @@ function f1(v: number | null | undefined, digits = 1): string {
   return typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—";
 }
 
-/** `20260927T020233Z307` → `27.09.2026 · 02:02`. */
+/** `20260927T020233Z307` → `27.09.2026 · 02:02`.
+ *
+ *  Диапазоны проверяются: иначе битая метка вида `20261345T9999` превращалась
+ *  бы в невозможное «45.13.2026 · 99:99». */
 export function fmtStamp(stamp: string): string {
   const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/.exec(stamp);
   if (!m) return stamp;
-  return `${m[3]}.${m[2]}.${m[1]} · ${m[4]}:${m[5]}`;
+  const [, y, mo, d, h, mi] = m;
+  const year = +y;
+  const month = +mo;
+  const day = +d;
+  const hour = +h;
+  const minute = +mi;
+  const valid =
+    year >= 2000 &&
+    year <= 2999 &&
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= 31 &&
+    hour <= 23 &&
+    minute <= 59;
+  if (!valid) return stamp;
+  return `${d}.${mo}.${y} · ${h}:${mi}`;
 }
 
 export default function ResultsPage() {
@@ -104,9 +138,17 @@ export default function ResultsPage() {
 
   const sorted = useMemo(() => {
     const arr = [...rows];
+    // Ключи сортировки не должны давать NaN: `-Infinity - -Infinity` = NaN, и
+    // Array.sort с таким компаратором оставляет порядок произвольным.
+    // Нечитаемые строки уходят в конец списка.
+    const time = (r: HistoryRow) =>
+      r.readable && Number.isFinite(r.started_at_ns) ? r.started_at_ns : -Infinity;
     switch (sort) {
       case "started":
-        arr.sort((a, b) => (b.readable ? b.started_at_ns : -Infinity) - (a.readable ? a.started_at_ns : -Infinity));
+        arr.sort((a, b) => {
+          const d = time(b) - time(a);
+          return Number.isNaN(d) ? 0 : d;
+        });
         break;
       case "level":
         arr.sort(
@@ -116,10 +158,10 @@ export default function ResultsPage() {
         );
         break;
       case "score":
-        arr.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+        arr.sort((a, b) => numDesc(b.score) - numDesc(a.score));
         break;
       case "stability":
-        arr.sort((a, b) => (b.stability ?? -1) - (a.stability ?? -1));
+        arr.sort((a, b) => numDesc(b.stability) - numDesc(a.stability));
         break;
     }
     return arr;
@@ -147,7 +189,12 @@ export default function ResultsPage() {
   };
 
   const deleteRow = async (r: HistoryRow) => {
-    if (r.readable && !window.confirm("Удалить запись?")) return;
+    // Подтверждение спрашиваем всегда: нечитаемый файл тоже удаляется, а
+    // раньше он удалялся молча — самое обидное было потерять его не зная почему.
+    const what = r.readable
+      ? `Удалить запись «${r.plan_guid}»? Это действие необратимо.`
+      : "Запись не читается. Удалить её файл безвозвратно?";
+    if (!window.confirm(what)) return;
     try {
       await commands.historyDelete(r.file_name);
       pushToast("okk", "Запись удалена");
@@ -181,7 +228,9 @@ export default function ResultsPage() {
     <div className="page fill">
       <div className="page-head">
         <h1>Результаты</h1>
-        <span className="sub">{rows.length} записей</span>
+        <span className="sub">
+          {rows.length} {plural(rows.length, "запись", "записи", "записей")}
+        </span>
         <div className="actions">
           <Dropdown
             title="Сортировка"
@@ -212,7 +261,14 @@ export default function ResultsPage() {
           <span className="storage-line">
             {lowDisk ? <Badge kind="warn">Место на диске заканчивается</Badge> : null}
             Свободно {fmtBytes(stats?.free_bytes ?? 0)} · история {fmtBytes(stats?.history_bytes ?? 0)}
-            {stats && stats.max_sessions > 0 ? ` · хранится до ${stats.max_sessions}` : ""}
+            {stats && stats.max_sessions > 0
+              ? ` · хранится не более ${stats.max_sessions} ${plural(
+                  stats.max_sessions,
+                  "сессии",
+                  "сессий",
+                  "сессий",
+                )}`
+              : ""}
           </span>
         </div>
       </div>
@@ -227,14 +283,27 @@ export default function ResultsPage() {
             <div
               key={r.file_name}
               className="glass lift res-row"
+              // Строка открывает сессию кликом; раньше это был `<div>` без
+              // роли и клавиатуры, то есть недоступный с клавиатуры элемент.
+              role={r.readable ? "button" : undefined}
+              tabIndex={r.readable ? 0 : undefined}
               onClick={() => r.readable && openSession(r.plan_guid)}
+              onKeyDown={(e) => {
+                if (!r.readable) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  openSession(r.plan_guid);
+                }
+              }}
             >
               <div style={{ minWidth: 0 }}>
                 <div className="res-name">{r.readable ? r.scheme_name || "Сессия без схемы" : r.file_name}</div>
                 <div className="res-meta">
                   <span className="res-when">{r.readable ? fmtStamp(r.started_label) : "—"}</span>
                   {r.readable ? <Badge kind={levelKind(r.level)}>{r.level_label}</Badge> : <Badge kind="plain">Не завершено</Badge>}
-                  <span className="num">{r.schemes} сх.</span>
+                  <span className="num">
+                    {r.schemes} {plural(r.schemes, "схема", "схемы", "схем")}
+                  </span>
                   {r.throughput != null ? (
                     <span className="num">{f1(r.throughput, 0)} тик/с</span>
                   ) : null}
@@ -242,15 +311,17 @@ export default function ResultsPage() {
                     <span className="num">ДИ ±{r.margin.toFixed(1)}</span>
                   ) : null}
                   {r.early_stopped ? <Badge kind="plain">ранняя остановка</Badge> : null}
-                  {!r.readable && r.error ? <span className="num">{r.error}</span> : null}
+                  {!r.readable && r.error ? (
+                    <span className="num break" title={r.error}>
+                      {r.error}
+                    </span>
+                  ) : null}
                 </div>
               </div>
               <div className="res-acts">
                 {r.score != null && Number.isFinite(r.score) ? (
-                  <div className="res-score">
-                    <b style={{ color: `var(--${scoreKind(r.score) === "ok" ? "ok" : scoreKind(r.score) === "warn" ? "warn" : "err"})` }}>
-                      {r.score.toFixed(0)}
-                    </b>
+                  <div className={`res-score sc-${scoreKind(r.score)}`}>
+                    <b>{r.score.toFixed(0)}</b>
                     <span>балл</span>
                   </div>
                 ) : null}
@@ -361,15 +432,20 @@ function SessionDetail({
   // Доверие к лидерству: при <2 прогонов вердикт предварительный.
   const trustNote = !leader
     ? { kind: "warn" as const, title: "Сравнивать нечего", items: ["Все схемы забракованы."] }
-    : (leader.runs < 2
-        ? {
-            kind: "warn" as const,
-            title: "Вердикт предварительный",
-            items: [
-              `У лидера ${leader.runs} прогон(ов) — повторите сессию в режиме «Детально» (3 повтора).`,
-            ],
-          }
-        : { kind: "ok" as const, title: "Лидеру можно верить", items: ["Прогонов достаточно, выбросов не видно."] });
+    : leader.runs < 2
+      ? {
+          kind: "warn" as const,
+          title: "Вердикт предварительный",
+          items: [
+            `У лидера ${leader.runs} ${plural(
+              leader.runs,
+              "прогон",
+              "прогона",
+              "прогонов",
+            )} — повторите сессию в режиме «Детально» (3 повтора).`,
+          ],
+        }
+      : { kind: "ok" as const, title: "Лидеру можно верить", items: ["Прогонов достаточно, выбросов не видно."] };
 
   return (
     <div className="rd">
@@ -391,6 +467,16 @@ function SessionDetail({
           <div className="s">тик/с</div>
         </div>
         <div className="rd-stat">
+          {/* Хэш конфигурации определяет сопоставимость сессий: без него
+              нельзя понять, что два замера мерили одно и то же. */}
+          <div className="k">Конфигурация</div>
+          <div className="v mono break">{s.identity.config_hash || "—"}</div>
+          <div className="s">
+            seed {s.identity.seed_hex || "—"} · воркеров {s.identity.worker_count} /{" "}
+            {s.identity.logical_cpus}
+          </div>
+        </div>
+        <div className="rd-stat">
           <div className="k">Перевес</div>
           <div className={`v ${marginKind}`}>{marginText}</div>
           <div className="s">ожидаемый</div>
@@ -398,7 +484,11 @@ function SessionDetail({
         <div className="rd-stat">
           <div className="k">Схем</div>
           <div className="v">{admitted.length}</div>
-          <div className="s">{rejectedCount ? `брак: ${rejectedCount}` : "допущено"}</div>
+          <div className="s">
+            {rejectedCount > 0
+              ? `забраковано: ${rejectedCount} ${plural(rejectedCount, "схема", "схемы", "схем")}`
+              : "все допущены"}
+          </div>
         </div>
         <div className="rd-stat">
           <div className="k">Прогонов</div>
@@ -416,6 +506,24 @@ function SessionDetail({
         </ul>
         {rec.reason ? <span className="why">{rec.reason}</span> : null}
       </div>
+
+      {/* Что было до и после сессии: пользователю важно знать, вернулась ли
+          система к прежней схеме питания. */}
+      {s.original_scheme_guid || s.original_restored ? (
+        <div className="rd-note">
+          <b>Системная схема:</b>{" "}
+          {s.original_scheme_guid ? (
+            <>
+              <span className="mono break">{s.original_scheme_guid}</span>{" "}
+              {s.original_restored
+                ? "— восстановлена после сессии"
+                : "— НЕ восстановлена, верните её вручную"}
+            </>
+          ) : (
+            "не менялась"
+          )}
+        </div>
+      ) : null}
 
       {s.early_stop_reason ? (
         <div className="rd-note warn">
@@ -461,7 +569,12 @@ function SessionDetail({
                   <td className="num">{sch.runs}</td>
                   <td>
                     {sch.rejected ? (
-                      <Badge kind="danger">забракована</Badge>
+                      // Причина брака — главное, ради чего строка и есть:
+                      // «забракована» без объяснения ни о чём не говорит.
+                      <Badge kind="danger" title={sch.rejection_reason ?? undefined}>
+                        забракована
+                        {sch.rejection_reason ? `: ${sch.rejection_reason}` : ""}
+                      </Badge>
                     ) : isLeader ? (
                       <Badge kind="ok">лидер</Badge>
                     ) : (

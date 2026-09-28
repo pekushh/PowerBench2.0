@@ -64,12 +64,26 @@ pub struct TestRequestDto {
     pub export_raw_samples: bool,
 }
 
+/// Имя пресета, как его знает интерфейс. `custom` — параметры заданы вручную,
+/// пресет при этом только база для незаданных полей.
+const PRESET_CUSTOM: &str = "custom";
+
 fn preset_of(name: &str) -> Option<powerbench_orchestrator::config::Preset> {
     match name {
         "quick" => Some(powerbench_orchestrator::config::QUICK_PRESET),
         "detailed" => Some(powerbench_orchestrator::config::DETAILED_PRESET),
         _ => None,
     }
+}
+
+/// Базовые значения для незаданных полей.
+///
+/// Для `custom` это `DETAILED_PRESET`, но интерфейс всегда присылает все четыре
+/// параметра явно, поэтому база фактически не влияет на результат. Раньше
+/// неизвестное имя молча трактовалось как «детальный режим», из-за чего в
+/// истории сессии мог сохраниться чужой пресет.
+fn preset_base(name: &str) -> powerbench_orchestrator::config::Preset {
+    preset_of(name).unwrap_or(powerbench_orchestrator::config::DETAILED_PRESET)
 }
 
 fn build_plan(req: &TestRequestDto) -> Result<SessionConfig, String> {
@@ -79,12 +93,22 @@ fn build_plan(req: &TestRequestDto) -> Result<SessionConfig, String> {
         })?;
         return Ok(cp.plan);
     }
-    let p = match preset_of(&req.preset) {
-        Some(p) => p,
-        None => powerbench_orchestrator::config::DETAILED_PRESET,
-    };
+    let p = preset_base(&req.preset);
     if req.scheme_ids.is_empty() {
         return Err("выберите хотя бы одну схему питания".to_string());
+    }
+    // `custom` без единого заданного параметра — это опечатка, а не выбор
+    // режима: сообщаем, вместо того чтобы молча запустить детальный режим.
+    if req.preset == PRESET_CUSTOM
+        && req.duration_seconds.is_none()
+        && req.warmup_seconds.is_none()
+        && req.cooling_seconds.is_none()
+        && req.repetitions.is_none()
+    {
+        return Err(
+            "выбран пользовательский набор, но ни один параметр не задан — проверьте настройки теста"
+                .to_string(),
+        );
     }
     let plan = SessionConfig {
         duration_seconds: req.duration_seconds.unwrap_or(p.duration_seconds),
@@ -159,6 +183,15 @@ pub fn scheme_action(
 /// Плоский DTO настроек для интерфейса (этап 7).
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SettingsDto {
+    // Параметры теста. Раньше их не было в DTO: фронтенд объявлял
+    // `duration_seconds`/`warmup_seconds`/`cooling_seconds`/`repetitions`
+    // в своём интерфейсе, получал `undefined` от бэкенда и подставлял
+    // значения по умолчанию — ручные правки теста терялись при перезапуске.
+    pub duration_seconds: u32,
+    pub warmup_seconds: u32,
+    pub cooling_seconds: u32,
+    pub repetitions: u32,
+    pub background_threshold_percent: f64,
     pub theme: String,
     pub mode: String,
     pub reduce_motion: bool,
@@ -169,11 +202,14 @@ pub struct SettingsDto {
     pub max_sessions: u32,
     pub favorite_schemes: Vec<String>,
     pub excluded_schemes: Vec<String>,
-    pub background_threshold_percent: f64,
 }
 
 fn settings_to_dto(s: &AppSettings) -> SettingsDto {
     SettingsDto {
+        duration_seconds: s.benchmark.duration_seconds,
+        warmup_seconds: s.benchmark.warmup_seconds,
+        cooling_seconds: s.benchmark.cooling_seconds,
+        repetitions: s.benchmark.repetitions,
         theme: s.appearance.theme.clone(),
         mode: s.appearance.mode.clone(),
         reduce_motion: s.appearance.reduce_motion,
@@ -193,22 +229,51 @@ pub fn get_settings() -> SettingsDto {
     settings_to_dto(&AppSettings::load())
 }
 
+/// Записать настройки из интерфейса.
+///
+/// Правка идёт **под блокировкой файла** и поверх актуального содержимого:
+/// команды Tauri выполняются на пуле потоков, поэтому «прочитать DTO → дописать
+/// своё → записать» без блокировки теряло параллельные изменения (например,
+/// отметку «избранное» для схемы, поставленную другим вызовом).
 #[tauri::command]
-pub fn set_settings(mut settings: SettingsDto) -> Result<(), String> {
-    let mut s = AppSettings::load();
-    s.appearance.theme = std::mem::take(&mut settings.theme);
-    s.appearance.mode = std::mem::take(&mut settings.mode);
-    s.appearance.reduce_motion = settings.reduce_motion;
-    s.appearance.sidebar_collapsed = settings.sidebar_collapsed;
-    s.scoring.performance = settings.score_performance;
-    s.scoring.stability = settings.score_stability;
-    s.scoring.worst_second = settings.score_worst_second;
-    s.retention.max_sessions = settings.max_sessions;
-    s.favorite_schemes = std::mem::take(&mut settings.favorite_schemes);
-    s.excluded_schemes = std::mem::take(&mut settings.excluded_schemes);
-    s.benchmark.background_threshold_percent = settings.background_threshold_percent;
-    s.save()
-        .map_err(|e| format!("не удалось сохранить настройки: {e}"))
+pub fn set_settings(settings: SettingsDto) -> Result<(), String> {
+    let mut s = settings;
+    // Значения приходят из интерфейса, поэтому проверяем их до записи: ноль в
+    // длительности или NaN в весах уронили бы планировщик или нормализацию
+    // весов уже во время сессии, а пользователь увидел бы это слишком поздно.
+    if s.duration_seconds == 0 || s.warmup_seconds == 0 || s.repetitions == 0 {
+        return Err("длительность, разогрев и число повторов должны быть больше нуля".to_string());
+    }
+    if !(s.background_threshold_percent.is_finite() && s.background_threshold_percent >= 0.0) {
+        return Err("порог фоновой нагрузки должен быть неотрицательным числом".to_string());
+    }
+    let weights_ok = s.score_performance.is_finite()
+        && s.score_stability.is_finite()
+        && s.score_worst_second.is_finite()
+        && s.score_performance >= 0.0
+        && s.score_stability >= 0.0
+        && s.score_worst_second >= 0.0;
+    if !weights_ok {
+        return Err("веса оценки должны быть неотрицательными числами".to_string());
+    }
+    AppSettings::update_locked(|cur: &mut AppSettings| {
+        cur.benchmark.duration_seconds = s.duration_seconds;
+        cur.benchmark.warmup_seconds = s.warmup_seconds;
+        cur.benchmark.cooling_seconds = s.cooling_seconds;
+        cur.benchmark.repetitions = s.repetitions;
+        cur.benchmark.background_threshold_percent = s.background_threshold_percent;
+        cur.appearance.theme = std::mem::take(&mut s.theme);
+        cur.appearance.mode = std::mem::take(&mut s.mode);
+        cur.appearance.reduce_motion = s.reduce_motion;
+        cur.appearance.sidebar_collapsed = s.sidebar_collapsed;
+        cur.scoring.performance = s.score_performance;
+        cur.scoring.stability = s.score_stability;
+        cur.scoring.worst_second = s.score_worst_second;
+        cur.retention.max_sessions = s.max_sessions;
+        cur.favorite_schemes = std::mem::take(&mut s.favorite_schemes);
+        cur.excluded_schemes = std::mem::take(&mut s.excluded_schemes);
+    })
+    .map_err(|e| format!("не удалось сохранить настройки: {e}"))
 }
 
 #[derive(serde::Serialize)]
@@ -644,6 +709,39 @@ pub fn quarantine_list() -> Vec<QuarantineEntry> {
     quarantine::load_quarantine()
 }
 
+/// Оценка длительности сессии: и готовая строка, и сырые секунды.
+///
+/// Считает на бэкенде из тех же констант, что использует планировщик, поэтому
+/// цифра в интерфейсе не расходится с фактом (включая паузу после схемы,
+/// стабилизации, проверку фона и охлаждение). Сырые секунды нужны, чтобы
+/// интерфейс считал «осталось» без разбора отформатированной строки.
+#[derive(serde::Serialize)]
+pub struct SessionEstimate {
+    pub seconds: f64,
+    pub label: String,
+}
+
+#[tauri::command]
+pub fn estimate_session(
+    duration_seconds: u64,
+    warmup_seconds: u64,
+    cooling_seconds: u64,
+    repetitions: u32,
+    scheme_count: usize,
+) -> SessionEstimate {
+    let seconds = powerbench_orchestrator::config::estimate_run_seconds(
+        duration_seconds,
+        warmup_seconds,
+        cooling_seconds,
+        repetitions,
+        scheme_count,
+    );
+    SessionEstimate {
+        seconds,
+        label: powerbench_orchestrator::config::format_estimate(seconds),
+    }
+}
+
 /// Вернуть схему из карантина в бенчмарк. `Ok(true)` — запись была и удалена.
 #[tauri::command]
 pub fn quarantine_clear(scheme_id: String) -> Result<bool, String> {
@@ -742,6 +840,16 @@ pub fn appsettings_path() -> String {
 #[tauri::command]
 pub fn log_history(state: tauri::State<'_, AppState>) -> Vec<crate::logger::LogEntry> {
     state.log.snapshot()
+}
+
+/// Команда «сохранить журнал сейчас».
+///
+/// Фоновая запись и так устроена, что свежие строки доезжают до диска за
+/// секунду, но перед выходом из приложения и перед снятием отчёта полезно
+/// дождаться файла явно — так лог не зависит от тайминга.
+#[tauri::command]
+pub fn log_flush(state: tauri::State<'_, AppState>) {
+    state.log.flush();
 }
 
 /// Готовность системы к запуску теста.

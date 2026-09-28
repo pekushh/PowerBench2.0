@@ -5,14 +5,27 @@
 use crate::history::{date_time_stamp, session_started_at_ns};
 use crate::result::SessionJson;
 
+/// Цвета серий на графике тенденций.
+///
+/// Палитра отчёта — графит с зелёным акцентом (как тема Graphite в
+/// приложении), поэтому здесь нет синих и фиолетовых тонов: линии должны
+/// читаться на тёмном фоне и различаться между собой, а не спорить с
+/// оформлением. Первый цвет — зелёный, он же акцент отчёта.
 const COLORS: &[&str] = &[
-    "#0e7490", "#2563eb", "#d97706", "#7c3aed", "#059669", "#db2777", "#ca8a04", "#0ea5e9",
-    "#dc2626", "#475569",
+    "#6fd0a0", "#e4b46f", "#e57979", "#a8c686", "#d9a066", "#9a958e", "#c9a86a", "#7fb8a0",
+    "#d98f8f", "#6b6660",
 ];
 
 /// Потолок числа линий сетки: страховка от бесконечного цикла при
 /// вырожденных значениях в данных.
 const MAX_GRID_LINES: usize = 24;
+
+/// Сколько схем одновременно рисуется на графике тенденций. Больше — уже
+/// каша из пересекающихся линий; остальные схемы видно в таблицах.
+const CHART_MAX_SERIES: usize = 8;
+
+/// Сколько схем показывать плитками в сводке отчёта по истории.
+const SUMMARY_MAX_CARDS: usize = 12;
 
 const HTML_CSS: &str = r##"<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -129,8 +142,197 @@ border:1px solid var(--line);border-left:4px solid var(--ok);border-radius:14px;
 .stats{grid-template-columns:1fr 1fr}.pbar{grid-template-columns:1fr auto}table{display:block;overflow-x:auto}
 .sumcards{flex-direction:column}.chips{margin-left:0}}
 @media print{body{background:#fff;color:#111}.sheet{box-shadow:none}}
+/* ===== Большие отчёты: 100+ схем =====
+   Инструменты над таблицей и липкая шапка решают главную проблему — длинную
+   ленту вниз. Сами строки не виртуализируются: это обычный текст, 100 `<tr>`
+   браузеру не тяжело, а данные остаются доступны Ctrl+F. */
+.sch-tools{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 12px}
+.sch-tools input[type=search],.sch-tools select{background:var(--card2);color:var(--fg);
+ border:1px solid var(--line2);border-radius:10px;padding:8px 12px;font:inherit;font-size:13px;min-width:0}
+.sch-tools input[type=search]{flex:1 1 220px}
+.sch-tools input[type=search]:focus,.sch-tools select:focus{outline:2px solid var(--okline);outline-offset:1px}
+.sch-count{color:var(--mute);font-size:12.5px;font-variant-numeric:tabular-nums;margin-left:auto}
+.sch-morewrap{display:flex;align-items:center;gap:8px;margin:0 0 12px;color:var(--mute);font-size:12.5px}
+.sch-more{background:var(--card2);color:var(--fg);border:1px solid var(--line2);border-radius:10px;
+ padding:8px 14px;font:inherit;font-size:13px;cursor:pointer}
+.sch-more:hover{border-color:var(--okline)}
+table thead th{position:sticky;top:0;z-index:2;background:#16171b}
+tr.sess-row{cursor:pointer}
+tr.sess-row:hover td{background:rgba(255,255,255,.035)}
+tr.sess-row td:first-child::before{content:"▸ ";color:var(--mute)}
+tr.sess-row.open td:first-child::before{content:"▾ ";color:var(--ok)}
+.to-top{position:fixed;right:22px;bottom:22px;width:40px;height:40px;border-radius:50%;
+ border:1px solid var(--line2);background:var(--card2);color:var(--fg);cursor:pointer;font-size:15px;
+ box-shadow:var(--shadow);display:none}
+.to-top.on{display:block}
+@media (max-width:640px){.sch-count{margin-left:0}}
 </style></head><body>
 "##;
+
+/// Ванильный JS для больших отчётов: поиск, фильтр и сортировка по схемам,
+/// сворачивание деталей сессий.
+///
+/// Без внешних зависимостей — отчёт должен открываться двойным кликом офлайн.
+/// Это прогрессивное улучшение: без JS отчёт остаётся полным и читаемым,
+/// просто без навигации.
+const HTML_JS: &str = r##"
+<script>
+(function () {
+  function initSchemes(box) {
+    var table = box.querySelector('table');
+    var body = table && table.tBodies[0];
+    if (!body || !body.rows.length) return;
+    var rows = Array.prototype.slice.call(body.rows);
+    var search = box.querySelector('.sch-search');
+    var status = box.querySelector('.sch-status');
+    var sort = box.querySelector('.sch-sort');
+    var counter = box.querySelector('.sch-count');
+    var more = box.querySelector('.sch-more');
+    var moreWrap = box.querySelector('.sch-morewrap');
+    // Порция на экране: список длиннее этого лучше листать по кнопке,
+    // чем прокручивать сотни строк.
+    var PAGE = 60;
+
+    rows.forEach(function (tr, i) { tr.dataset.order = String(i); });
+
+    function apply() {
+      var q = (search.value || '').toLowerCase().trim();
+      var st = status.value;
+      var by = sort.value;
+      var hit = rows.filter(function (tr) {
+        var okQ = !q || (tr.dataset.name || '').indexOf(q) >= 0;
+        var okS = st === 'all' || tr.dataset.status === st;
+        return okQ && okS;
+      });
+      hit.sort(function (a, b) {
+        if (by === 'name') {
+          return (a.dataset.name || '').localeCompare(b.dataset.name || '', 'ru');
+        }
+        if (by === 'median') {
+          var av = parseFloat(a.dataset.median);
+          var bv = parseFloat(b.dataset.median);
+          // Схемы без данных уходят в конец, а не считаются «нулевыми».
+          return (isNaN(bv) ? -Infinity : bv) - (isNaN(av) ? -Infinity : av);
+        }
+        if (by === 'runs') {
+          return (parseInt(b.dataset.runs, 10) || 0) - (parseInt(a.dataset.runs, 10) || 0);
+        }
+        return (+a.dataset.order) - (+b.dataset.order);
+      });
+      hit.forEach(function (tr) { body.appendChild(tr); });
+      var limit = more.checked ? hit.length : Math.min(PAGE, hit.length);
+      rows.forEach(function (tr) { tr.style.display = 'none'; });
+      hit.slice(0, limit).forEach(function (tr) { tr.style.display = ''; });
+      counter.textContent = 'Показано ' + Math.min(limit, hit.length) + ' из ' + rows.length
+        + (hit.length === rows.length ? '' : ' · найдено ' + hit.length);
+      moreWrap.style.display = hit.length > PAGE ? '' : 'none';
+      more.textContent = more.checked ? 'Показать первые ' + PAGE : 'Показать все (' + hit.length + ')';
+    }
+
+    [search, status, sort, more].forEach(function (el) {
+      el.addEventListener(el === more ? 'click' : 'input', apply);
+      if (el === status || el === sort) el.addEventListener('change', apply);
+    });
+    search.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { search.value = ''; apply(); }
+    });
+    // «/» фокусирует поиск — привычно для длинных списков.
+    box.addEventListener('keydown', function (e) {
+      if (e.key === '/' && document.activeElement !== search) { e.preventDefault(); search.focus(); }
+    });
+    box.tabIndex = -1;
+    apply();
+  }
+
+  function initSessions() {
+    var rows = Array.prototype.slice.call(document.querySelectorAll('tr.sess-row'));
+    if (!rows.length) return;
+    function pair(row) {
+      var out = [], n = row.nextElementSibling;
+      while (n && n.classList.contains('detail')) { out.push(n); n = n.nextElementSibling; }
+      return out;
+    }
+    function setOpen(row, open) {
+      pair(row).forEach(function (d) { d.style.display = open ? '' : 'none'; });
+      row.classList.toggle('open', open);
+    }
+    rows.forEach(function (row, i) {
+      // Первая сессия открыта: страница должна сразу показать, что внутри.
+      setOpen(row, i === 0);
+      row.addEventListener('click', function () {
+        setOpen(row, !row.classList.contains('open'));
+      });
+    });
+  }
+
+  function initToTop() {
+    var btn = document.querySelector('.to-top');
+    if (!btn) return;
+    window.addEventListener('scroll', function () {
+      btn.classList.toggle('on', window.scrollY > 600);
+    }, { passive: true });
+    btn.addEventListener('click', function () { window.scrollTo(0, 0); });
+  }
+
+  function init() {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-schemes]'), initSchemes);
+    initSessions();
+    initToTop();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+"##;
+
+/// Панель управления над таблицей схем: поиск, фильтр по статусу, сортировка.
+///
+/// JS (`HTML_JS`) навешивается один раз и работает с любым блоком
+/// `[data-schemes]`, поэтому панель одинаково подходит и отчёту по сессии,
+/// и сводному отчёту по истории.
+fn scheme_toolbar() -> String {
+    "<div class=\"sch-tools\">\
+     <input type=\"search\" class=\"sch-search\" placeholder=\"Поиск по названию схемы\" \
+      aria-label=\"Поиск по названию схемы\">\
+     <select class=\"sch-status\" aria-label=\"Фильтр по статусу\">\
+     <option value=\"all\">Все статусы</option>\
+     <option value=\"admitted\">Допущены</option>\
+     <option value=\"rejected\">Забракованы</option>\
+     <option value=\"lead\">Лидер / рекомендация</option></select>\
+     <select class=\"sch-sort\" aria-label=\"Сортировка\">\
+     <option value=\"order\">Как в отчёте</option>\
+     <option value=\"name\">По названию</option>\
+     <option value=\"median\">По медиане</option>\
+     <option value=\"runs\">По числу прогонов</option></select>\
+     <span class=\"sch-count\"></span></div>\
+     <div class=\"sch-morewrap\"><button type=\"button\" class=\"sch-more\"></button></div>"
+        .to_string()
+}
+
+/// Обёртка таблицы схем вместе с панелью управления и разметкой для JS.
+fn scheme_block(table_html: &str) -> String {
+    format!("<div data-schemes>{}{table_html}</div>", scheme_toolbar())
+}
+
+/// Атрибуты строки для поиска/фильтра/сортировки в браузере.
+///
+/// `data-name` — уже экранированное имя: JS читает его как текст, а не как
+/// HTML, поэтому экранирование здесь достаточно ровно один раз.
+fn scheme_row_attrs(name: &str, runs: usize, median: f64, status: &str) -> String {
+    format!(
+        " data-name=\"{}\" data-runs=\"{runs}\" data-median=\"{}\" data-status=\"{status}\"",
+        esc(&name.to_lowercase()),
+        if median.is_finite() {
+            format!("{median:.4}")
+        } else {
+            String::new()
+        },
+    )
+}
 
 /// Построить законченный HTML-документ отчёта по сессии.
 pub fn build_report(sessions: &[SessionJson]) -> String {
@@ -143,13 +345,16 @@ pub fn build_report(sessions: &[SessionJson]) -> String {
     let sessions_html = render_sessions(&ordered);
 
     format!(
-        "{HTML_CSS}{header}{chart}{sessions_html}<div class=\"foot\">Сгенерировано {now_stamp} (UTC)</div></body></html>"
+        "{HTML_CSS}{header}{chart}{sessions_html}<div class=\"foot\">Сгенерировано {now_stamp} (UTC)</div>\
+         <button type=\"button\" class=\"to-top\" aria-label=\"Наверх\">↑</button>{js}</body></html>",
+        js = HTML_JS
     )
 }
 
 /// Компактный HTML-отчёт по одной сессии: вердикт, рекомендация и сравнение
 /// схем — без «лишней» информации (без сырых прогонов и bootstrap-вероятностей).
-pub fn build_session_report(s: &SessionJson) -> String {    let start = session_started_at_ns(s).unwrap_or(0);
+pub fn build_session_report(s: &SessionJson) -> String {
+    let start = session_started_at_ns(s).unwrap_or(0);
     let stamp = date_time_stamp(start);
     let rec = &s.recommendation;
     let id = &s.identity;
@@ -181,6 +386,13 @@ pub fn build_session_report(s: &SessionJson) -> String {    let start = session_
     let mut sch_rows = String::new();
     for sch in &s.schemes {
         let is_win = win_id.map(|w| w == sch.scheme_id).unwrap_or(false);
+        let row_status = if sch.rejected {
+            "rejected"
+        } else if is_win {
+            "lead"
+        } else {
+            "admitted"
+        };
         let status = if sch.rejected {
             format!(
                 "<span class=\"pill err\" title=\"{0}\">ЗАБРАКОВАНА</span>",
@@ -192,9 +404,9 @@ pub fn build_session_report(s: &SessionJson) -> String {    let start = session_
             "<span class=\"pill dim\">ДОПУЩЕНА</span>".to_string()
         };
         let row_cls = if is_win {
-            " class=\"win\""
+            "win"
         } else if sch.rejected {
-            " class=\"out\""
+            "out"
         } else {
             ""
         };
@@ -204,12 +416,18 @@ pub fn build_session_report(s: &SessionJson) -> String {    let start = session_
         } else {
             pct1(sch.run_variation_percent)
         };
-        let name = esc(&sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone()));
+        let plain = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
+        let name = esc(&plain);
         sch_rows.push_str(&format!(
-            "<tr{cls}><td>{name}</td><td class=\"num\">{runs}</td><td class=\"num\">{median}</td>\
+            "<tr{cls}{attrs}><td>{name}</td><td class=\"num\">{runs}</td><td class=\"num\">{median}</td>\
              <td class=\"num\">{dev}</td><td class=\"num\">{cons}</td>\
              <td>{status}</td></tr>",
-            cls = row_cls,
+            cls = if row_cls.is_empty() {
+                String::new()
+            } else {
+                format!(" class=\"{row_cls}\"")
+            },
+            attrs = scheme_row_attrs(&plain, sch.runs, sch.median_throughput, row_status),
             name = name,
             runs = sch.runs,
             median = f1(sch.median_throughput),
@@ -314,16 +532,14 @@ pub fn build_session_report(s: &SessionJson) -> String {    let start = session_
          <div class=\"rec-notes\">{rec_notes}</div>\
          </div>\
          <h2>СХЕМЫ</h2>\
-         <table><thead><tr><th>Схема</th><th class=\"num\">Прогонов</th>\
-         <th class=\"num\">Медиана, тик/с</th><th class=\"num\">Отклонение</th>\
-         <th class=\"num\">Стабильность</th><th>Статус</th></tr></thead>\
-         <tbody>{rows}</tbody></table>\
+         {schemes}\
          {score}\
          </div>\
          <div class=\"foot\">Сгенерировано {now_stamp} · PowerBench\
          <span class=\"prov\">план <span class=\"mono\">{plan}</span> · хэш \
          <span class=\"mono\">{hash}</span> · seed <span class=\"mono\">{seed}</span></span></div>\
-         </div></body></html>",
+         </div><button type=\"button\" class=\"to-top\" aria-label=\"Наверх\">↑</button>\
+         {js}</body></html>",
         wl = esc(&id.workload_version),
         wc = id.worker_count,
         lcpus = id.logical_cpus,
@@ -337,12 +553,19 @@ pub fn build_session_report(s: &SessionJson) -> String {    let start = session_
         runs = total_runs,
         rec_title = rec_title,
         rec_notes = rec_notes_html,
-        rows = sch_rows,
+        schemes = scheme_block(&format!(
+            "<table><thead><tr><th>Схема</th><th class=\"num\">Прогонов</th>\
+             <th class=\"num\">Медиана, тик/с</th><th class=\"num\">Отклонение</th>\
+             <th class=\"num\">Стабильность</th><th>Статус</th></tr></thead>\
+             <tbody>{rows}</tbody></table>",
+            rows = sch_rows
+        )),
         score = score_section(s),
         now_stamp = esc(&pretty_dt(&date_time_stamp(now_unix_ns()))),
         plan = esc(&s.plan_guid),
         hash = esc(&id.config_hash),
         seed = esc(&id.seed_hex),
+        js = HTML_JS,
     )
 }
 
@@ -381,8 +604,18 @@ fn render_header(sessions: &[&SessionJson]) -> String {
     let sum_html = if by_scheme.is_empty() {
         "<div class=\"note\">Нет данных по схемам — завершите первую сессию.</div>".to_string()
     } else {
+        // Сводка показывает лидеров; при 100+ схемах полная плитка на каждую
+        // схему — это просто длинный список без пользы. Сколько скрыто, пишем
+        // явно, чтобы отчёт не выглядел полнее, чем он есть.
+        by_scheme.sort_by(|a, b| {
+            (b.2 / b.1 as f64)
+                .partial_cmp(&(a.2 / a.1 as f64))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let shown = by_scheme.len().min(SUMMARY_MAX_CARDS);
         let cards: String = by_scheme
             .iter()
+            .take(SUMMARY_MAX_CARDS)
             .map(|(id, n, sum)| {
                 let avg = *sum / *n as f64;
                 format!(
@@ -395,7 +628,16 @@ fn render_header(sessions: &[&SessionJson]) -> String {
                 )
             })
             .collect();
-        format!("<div class=\"sumcards\">{cards}</div>")
+        let more = if by_scheme.len() > shown {
+            format!(
+                "<div class=\"note\">Показаны {shown} лучших из {total}. \
+                 Остальные схемы — в таблицах сессий ниже.</div>",
+                total = by_scheme.len()
+            )
+        } else {
+            String::new()
+        };
+        format!("<div class=\"sumcards\">{cards}</div>{more}")
     };
 
     let identity_line = identity.unwrap_or_default();
@@ -417,6 +659,37 @@ fn render_chart(sessions: &[&SessionJson]) -> String {
     if sessions.len() < 2 {
         return String::new();
     }
+    // При 100+ схемах график из сотни линий не читается: сначала выбираем
+    // лидеров по средней производительности и рисуем только их. Остальные
+    // считаем и упоминаем под графиком явно, а не прячем молча.
+    let mut totals: Vec<(String, f64, usize)> = Vec::new();
+    for s in sessions.iter() {
+        for sch in s.schemes.iter().filter(|x| !x.rejected) {
+            if !(sch.median_throughput.is_finite() && sch.median_throughput > 0.0) {
+                continue;
+            }
+            let name = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
+            match totals.iter_mut().find(|(n, _, _)| *n == name) {
+                Some(e) => {
+                    e.1 += sch.median_throughput;
+                    e.2 += 1;
+                }
+                None => totals.push((name, sch.median_throughput, 1)),
+            }
+        }
+    }
+    totals.sort_by(|a, b| {
+        (b.1 / b.2 as f64)
+            .partial_cmp(&(a.1 / a.2 as f64))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let omitted_series = totals.len().saturating_sub(CHART_MAX_SERIES);
+    let top: Vec<String> = totals
+        .iter()
+        .take(CHART_MAX_SERIES)
+        .map(|(n, _, _)| n.clone())
+        .collect();
+
     let mut series: Vec<(String, Vec<(usize, f64)>)> = Vec::new();
     let mut all: Vec<f64> = Vec::new();
     for (col, s) in sessions.iter().enumerate() {
@@ -424,10 +697,13 @@ fn render_chart(sessions: &[&SessionJson]) -> String {
             if !(sch.median_throughput.is_finite() && sch.median_throughput > 0.0) {
                 continue;
             }
-            match series.iter_mut().find(|(id, _)| *id == sch.scheme_id) {
+            let name = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
+            if !top.contains(&name) {
+                continue;
+            }
+            match series.iter_mut().find(|(id, _)| *id == name) {
                 Some((_, pts)) => pts.push((col, sch.median_throughput)),
                 None => {
-                    let name = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
                     series.push((name, vec![(col, sch.median_throughput)]));
                 }
             }
@@ -555,7 +831,17 @@ fn render_chart(sessions: &[&SessionJson]) -> String {
     format!(
         "<h2>Тенденции медианной производительности (тик/с)</h2><div class=\"chart\">\
          <svg viewBox=\"0 0 {W} {H}\" width=\"100%\" height=\"{H}\" xmlns=\"http://www.w3.org/2000/svg\">\
-         <rect class=\"panel\" width=\"{W}\" height=\"{H}\" rx=\"8\"/>{legend}{gridlines}{xlabels}{shapes}</svg></div>"
+         <rect class=\"panel\" width=\"{W}\" height=\"{H}\" rx=\"8\"/>{legend}{gridlines}{xlabels}{shapes}</svg></div>{note}",
+        note = if omitted_series > 0 {
+            format!(
+                "<div class=\"note\">На графике {shown} лидеров по средней производительности. \
+                 Остальные {omitted_series} схем(ы) не показаны, чтобы линии не пересекались; \
+                 полные данные — в таблицах ниже.</div>",
+                shown = series.len(),
+            )
+        } else {
+            String::new()
+        }
     )
 }
 
@@ -588,7 +874,8 @@ fn render_sessions(sessions: &[&SessionJson]) -> String {
         let lvl = &s.recommendation;
         let detail = scheme_detail_block(s, &stamp);
         rows.push_str(&format!(
-            "<tr><td class=\"num\">{day} {time}</td><td>{name_e}</td><td class=\"num\">{score}</td>\
+            "<tr class=\"sess-row\"><td class=\"num\">{day} {time}</td><td>{name_e}</td>\
+             <td class=\"num\">{score}</td>\
              <td class=\"num\">{stability}</td><td><span class=\"badge {cls}\">{lvl_label}</span></td></tr>{detail}",
             day = day,
             time = time,
@@ -601,7 +888,10 @@ fn render_sessions(sessions: &[&SessionJson]) -> String {
         ));
     }
     format!(
-        "<h2>Сессии ({n})</h2><table><thead><tr><th>Дата (UTC)</th><th>Лучшая схема</th>\
+        "<h2>Сессии ({n})</h2>\
+         <p class=\"note\">Нажмите на строку сессии, чтобы раскрыть или скрыть её детали. \
+         Без JavaScript все детали показаны сразу.</p>\
+         <table><thead><tr><th>Дата (UTC)</th><th>Лучшая схема</th>\
          <th class=\"num\">Медиана, тик/с</th><th class=\"num\">Стабильность</th><th>Уровень</th></tr></thead>\
          <tbody>{rows}</tbody></table>",
         n = sessions.len(),
@@ -620,27 +910,33 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
     let tie = matches!(rec.level.as_str(), "Equivalent" | "KeepCurrent");
     let has_winner = !tie && winner.is_some();
     for sch in &s.schemes {
+        let is_win = has_winner
+            && winner
+                .map(|w| w.scheme_id == sch.scheme_id)
+                .unwrap_or(false);
+        let row_status = if sch.rejected {
+            "rejected"
+        } else if is_win {
+            "lead"
+        } else {
+            "admitted"
+        };
         let status = if sch.rejected {
             format!(
                 "<span class=\"badge err\">{0}</span>",
                 esc(sch.rejection_reason.as_deref().unwrap_or("забракована"))
             )
+        } else if is_win {
+            "<span class=\"badge ok\">рекомендована</span>".to_string()
         } else {
-            let is_win = has_winner
-                && winner
-                    .map(|w| w.scheme_id == sch.scheme_id)
-                    .unwrap_or(false);
-            if is_win {
-                "<span class=\"badge ok\">рекомендована</span>".to_string()
-            } else {
-                "<span class=\"badge\">допущена</span>".to_string()
-            }
+            "<span class=\"badge\">допущена</span>".to_string()
         };
         let name = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
         sch_rows.push_str(&format!(
-            "<tr><td>{name}</td><td class=\"num\">{runs}</td><td class=\"num\">{median}</td>\
+            "<tr{attrs}><td>{name}</td><td class=\"num\">{runs}</td><td class=\"num\">{median}</td>\
              <td class=\"num\">{cv}</td><td class=\"num\">{cons}</td><td class=\"num\">{worst}</td>\
              <td class=\"num\">{purity}</td><td class=\"num\">{mean}</td><td>{status}</td></tr>",
+            attrs = scheme_row_attrs(&name, sch.runs, sch.median_throughput, row_status),
             name = esc(&name),
             runs = sch.runs,
             median = f1(sch.median_throughput),
@@ -706,17 +1002,20 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
 
     format!(
         "<tr class=\"detail\"><td colspan=\"5\"><div class=\"detail-body\">\
-         <div class=\"dhead\">Сессия <span class=\"mono\">{plan}</span> · {stamp} (UTC)</div>\
-<table class=\"sub\"><thead><tr><th>Схема</th><th class=\"num\">Прогоны</th>\
-         <th class=\"num\">Медиана, тик/с</th><th class=\"num\">CV</th>\
-         <th class=\"num\">Стабильность</th><th class=\"num\">Худш. секунда</th>\
-         <th class=\"num\">Фон</th><th class=\"num\">Среднее</th><th>Статус</th></tr></thead>\
-         <tbody>{sch_rows}</tbody></table>\
+          <div class=\"dhead\">Сессия <span class=\"mono\">{plan}</span> · {stamp} (UTC)</div>\
+{schemes}\
 <div class=\"rec\">{rec_line}</div>\
-         <div class=\"note\">{reason}</div>{score}{probs}{mode_html}</div></td></tr>",
+          <div class=\"note\">{reason}</div>{score}{probs}{mode_html}</div></td></tr>",
         plan = esc(&s.plan_guid),
         stamp = esc(stamp),
-        sch_rows = sch_rows,
+        schemes = scheme_block(&format!(
+            "<table class=\"sub\"><thead><tr><th>Схема</th><th class=\"num\">Прогоны</th>\
+             <th class=\"num\">Медиана, тик/с</th><th class=\"num\">CV</th>\
+             <th class=\"num\">Стабильность</th><th class=\"num\">Худш. секунда</th>\
+             <th class=\"num\">Фон</th><th class=\"num\">Среднее</th><th>Статус</th></tr></thead>\
+             <tbody>{sch_rows}</tbody></table>",
+            sch_rows = sch_rows
+        )),
         rec_line = rec_line,
         reason = esc(&rec.reason),
         score = score_section(s),
@@ -1045,6 +1344,34 @@ mod tests {
         }
     }
 
+    /// Пишет отчёт в файл и возвращает его содержимое — для проверки тем же
+    /// кодом, каким пользуется приложение (а не литералом в тесте).
+    fn render_to_file(html: &str, tag: &str) -> (std::path::PathBuf, String) {
+        let path = std::env::temp_dir().join(format!("powerbench-report-{tag}.html"));
+        std::fs::write(&path, html).expect("отчёт должен записываться");
+        let read = std::fs::read_to_string(&path).expect("отчёт должен читаться");
+        (path, read)
+    }
+
+    /// Файл отчёта на диске — то же самое, что открывает браузер, поэтому
+    /// проверяем именно его: кодировку, самодостаточность и навигацию.
+    #[test]
+    fn report_file_on_disk_is_self_contained() {
+        let a = sample_session("AAA", 500.0);
+        let b = sample_session("BBB", 520.0);
+        let (path, html) = render_to_file(&build_report(&[a, b]), "history");
+        // Без внешних ресурсов: иначе отчёт не откроется офлайн.
+        assert!(!html.contains("<link "), "внешняя таблица стилей");
+        assert!(!html.contains("src=\"http"), "внешний скрипт");
+        assert!(html.contains("<style>"), "нет встроенных стилей");
+        assert!(html.contains("<script>"), "нет встроенного скрипта");
+        // Навигация по длинному списку схем.
+        assert!(html.contains("data-schemes"), "нет контейнера навигации");
+        assert!(html.contains("sch-search"), "нет поиска");
+        assert!(html.contains("Показано"), "нет счётчика строк");
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn report_builds_complete_html() {
         let a = sample_session("AAA", 500.0);
@@ -1090,5 +1417,195 @@ mod tests {
         let saved = save_result_in(&s, &dir).unwrap();
         assert!(saved.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Сессия со 120 схемами: отчёт должен собраться целиком, все строки
+    /// попасть в таблицу, а навигация (поиск/фильтр/сортировка/кнопка
+    /// «показать все») — присутствовать, иначе список превращается в стену.
+    #[test]
+    fn session_report_scales_to_many_schemes() {
+        let mut s = sample_session("LEAD", 900.0);
+        s.schemes = (0..120)
+            .map(|i| {
+                let id = format!("S{i:03}");
+                let rejected = i % 7 == 0;
+                let mut sch = SchemeJson::from_aggregate(
+                    id.clone(),
+                    rejected,
+                    if rejected { Some("Unstable".into()) } else { None },
+                    &empty_aggregate(100.0 + i as f64),
+                    Vec::new(),
+                );
+                sch.name = Some(format!("Схема питания «{id}»"));
+                sch
+            })
+            .collect();
+        s.recommendation.recommended_scheme = Some("LEAD".into());
+
+        let html = build_session_report(&s);
+        assert!(html.ends_with("</body></html>"));
+        // Все 120 схем на месте: ничего не потеряно при генерации.
+        assert_eq!(html.matches("data-name=").count(), 120, "потерялись строки");
+        // Навигация для длинного списка на месте.
+        assert!(html.contains("data-schemes"), "нет контейнера для поиска");
+        assert!(html.contains("sch-search"), "нет поля поиска");
+        assert!(html.contains("sch-status"), "нет фильтра по статусу");
+        assert!(html.contains("sch-sort"), "нет сортировки");
+        assert!(html.contains("sch-more"), " нет кнопки «показать все»");
+        assert!(html.contains("Показано"), "нет счётчика показанных строк");
+        assert!(html.contains("<script"), "нет скрипта навигации");
+        // Каждая строка несёт данные для поиска/фильтра/сортировки.
+        assert_eq!(html.matches("data-status=").count(), 120);
+        assert_eq!(html.matches("data-median=").count(), 120);
+        assert_eq!(html.matches("data-runs=").count(), 120);
+    }
+
+    /// Сводный отчёт по истории: строки сессий сворачиваются (иначе 50 сессий
+    /// с деталями — это десятки тысяч строк), при этом данные остаются в DOM.
+    #[test]
+    fn history_report_collapses_session_details() {
+        let sessions: Vec<SessionJson> = (0..12)
+            .map(|i| sample_session(&format!("S{i:02}"), 400.0 + i as f64 * 10.0))
+            .collect();
+        let html = build_report(&sessions);
+        assert!(html.contains("Сессии (12)"));
+        assert_eq!(html.matches("class=\"sess-row\"").count(), 12);
+        // Каждая сессия сохраняет свои детали в DOM (скрывает их скрипт).
+        assert_eq!(html.matches("class=\"detail\"").count(), 12);
+        assert!(html.contains("class=\"to-top\""), "нет кнопки «наверх»");
+        assert!(html.contains("initSessions"), "нет логики сворачивания");
+    }
+
+    /// Сводный отчёт: при большом числе схем график и сводка не превращаются
+    /// в кашу, но отчёт честно сообщает, что часть схем не показана.
+    #[test]
+    fn history_report_caps_chart_and_summary() {
+        let mut sessions = Vec::new();
+        for t in 0..3 {
+            let mut s = sample_session("LEAD", 900.0);
+            s.schemes = (0..40)
+                .map(|i| {
+                    let id = format!("S{i:02}");
+                    let mut sch = SchemeJson::from_aggregate(
+                        id.clone(),
+                        false,
+                        None,
+                        &empty_aggregate(100.0 + i as f64 + t as f64),
+                        Vec::new(),
+                    );
+                    sch.name = Some(format!("План {id}"));
+                    sch
+                })
+                .collect();
+            sessions.push(s);
+        }
+        let html = build_report(&sessions);
+        // Никаких 40 линий на графике: только лидеры.
+        assert_eq!(
+            html.matches("<path class=\"line\"").count(),
+            CHART_MAX_SERIES,
+            "на графике слишком много линий"
+        );
+        assert!(
+            html.contains("не показаны"),
+            "нет честной пометки о скрытых схемах"
+        );
+        // Плиток сводки не больше лимита.
+        assert_eq!(
+            html.matches("class=\"sumcard\"").count(),
+            SUMMARY_MAX_CARDS
+        );
+        assert!(html.contains("Показаны"), "нет пометки о скрытых схемах в сводке");
+    }
+
+    /// Регресс: палитра графика не должна содержать синих тонов — отчёт
+    /// обязан совпадать с графитовой темой приложения.
+    #[test]
+    fn chart_palette_has_no_blue() {
+        for c in COLORS {
+            let ch = |s: &str| u8::from_str_radix(s, 16).unwrap() as f64;
+            let (r, g, b) = (ch(&c[1..3]), ch(&c[3..5]), ch(&c[5..7]));
+            let max = r.max(g).max(b);
+            let min = r.min(g).min(b);
+            let d = max - min;
+            // Оттенок в HSL: 0° красный, 120° зелёный, 210–260° синий/фиолетовый.
+            let hue = if d == 0.0 {
+                0.0
+            } else if max == r {
+                60.0 * (((g - b) / d) % 6.0)
+            } else if max == g {
+                60.0 * ((b - r) / d + 2.0)
+            } else {
+                60.0 * ((r - g) / d + 4.0)
+            };
+            let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+            assert!(
+                !(200.0..=265.0).contains(&hue),
+                "цвет {c} выглядит синим (hue={hue:.0}°)"
+            );
+        }
+    }
+
+    /// Отчёт должен открываться в браузере как автономный файл: без внешних
+    /// ресурсов, без незакрытых тегов и с работающей навигацией по длинному
+    /// списку. Здесь проверяется структура, сам браузер запускает пользователь.
+    #[test]
+    fn report_is_self_contained_and_well_formed() {
+        let mut s = sample_session("LEAD", 900.0);
+        s.schemes = (0..130)
+            .map(|i| {
+                let id = format!("S{i:03}");
+                let mut sch = SchemeJson::from_aggregate(
+                    id.clone(),
+                    i % 9 == 0,
+                    None,
+                    &empty_aggregate(100.0 + i as f64),
+                    Vec::new(),
+                );
+                sch.name = Some(format!("Схема «{id}» — довольно длинное имя плана"));
+                sch
+            })
+            .collect();
+        let html = build_session_report(&s);
+
+        // Автономность: только встроенные стили и скрипт, никаких ссылок наружу.
+        for pattern in ["<link ", "src=\"http", "href=\"http", "@import"] {
+            assert!(!html.contains(pattern), "внешний ресурс: {pattern}");
+        }
+        // Основные контейнеры закрыты.
+        for (open, close) in [("<html", "</html>"), ("<body", "</body>"), ("<table", "</table>")] {
+            assert_eq!(
+                html.matches(open).count(),
+                html.matches(close).count(),
+                "несбалансированный тег {open}"
+            );
+        }
+        // Скрипт и стили на месте — иначе навигация по 130 схемам не появится.
+        assert!(html.contains("<style>"), "нет встроенных стилей");
+        assert!(html.contains("<script>"), "нет встроенного скрипта");
+        assert!(html.contains("data-schemes"), "нет контейнера навигации");
+        // Таблица большая, но ограничение страницы найдено: 130 строк
+        // отдаются сразу в DOM, а порция на экране отсекается скриптом.
+        assert!(html.contains("Показать все"), "нет кнопки показать всё");
+        assert!(html.contains("PAGE = 60"), "нет порции на экран");
+    }
+
+    /// Имена схем приходят извне: спецсимволы не должны ломать разметку.
+    #[test]
+    fn scheme_names_are_escaped_in_toolbar_data() {
+        let mut s = sample_session("LEAD", 900.0);
+        let mut sch = SchemeJson::from_aggregate(
+            "X".into(),
+            false,
+            None,
+            &empty_aggregate(500.0),
+            Vec::new(),
+        );
+        sch.name = Some("План \"><script>alert(1)</script>".into());
+        s.schemes.push(sch);
+        s.recommendation.recommended_scheme = Some("LEAD".into());
+        let html = build_session_report(&s);
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(html.contains("&lt;script&gt;"));
     }
 }

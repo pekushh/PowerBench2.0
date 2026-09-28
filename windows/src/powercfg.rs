@@ -7,8 +7,12 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::power::decode_oem;
+
+/// Потолок ожидания `powercfg`: переключение схемы не должно висеть вечно.
+const POWERCFG_TIMEOUT_SECS: u64 = 10;
 
 /// Ошибка вызова powercfg.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,26 +75,85 @@ pub fn find_uuid(text: &str) -> Option<std::ops::Range<usize>> {
 }
 
 /// Разбор одной строки `powercfg /list`: локале-независимый синтаксис
-/// «GUID (имя) *». Возвращает `None` для строк без UUID (заголовки и пустые).
+/// «GUID (имя) *».
+///
+/// Звёздочка активной схемы стоит **после закрывающей скобки**, но не внутри
+/// имени. Раньше проверка была `tail.contains('*')` — схема с названием
+/// «Мой \*профиль\*» считалась активной, и приложение переключало бы не ту
+/// схему при восстановлении.
 pub fn parse_scheme_line(line: &str) -> Option<PowerScheme> {
     let range = find_uuid(line)?;
     let guid = line[range.clone()].to_ascii_lowercase();
     let tail = &line[range.end..];
-    let name = match (tail.find('('), tail.rfind(')')) {
-        (Some(a), Some(b)) if b > a => tail[a + 1..b].trim().to_string(),
-        _ => String::new(),
+    let close = tail.rfind(')');
+    let (name, after_name) = match (tail.find('('), close) {
+        (Some(a), Some(b)) if b > a => (tail[a + 1..b].trim().to_string(), &tail[b + 1..]),
+        // Без скобок: имя — весь хвост без завершающей звёздочки-маркера.
+        _ => (
+            tail.trim_end().trim_end_matches('*').trim().to_string(),
+            tail,
+        ),
     };
-    let active = tail.contains('*');
+    let active = after_name.trim_end().ends_with('*');
     Some(PowerScheme { guid, name, active })
 }
 
+/// Абсолютный путь к `powercfg.exe`.
+///
+/// Имя без пути ищется по `PATH` **и по текущему каталогу** — приложение
+/// запускается с правами администратора, поэтому подложенный рядом
+/// `powercfg.exe` выполнялся бы с этими правами. Используем системный путь.
+fn powercfg_path() -> std::path::PathBuf {
+    let sys = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    std::path::PathBuf::from(sys).join("System32").join("powercfg.exe")
+}
+
 /// Выполнить powercfg с аргументами; вернуть перекодированный вывод.
+///
+/// Вызов ограничен по времени: зависший `powercfg.exe` иначе держал бы поток
+/// сессии (а вместе с ним — переключение схем питания) неограниченно долго.
 fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError> {
-    let output = Command::new("powercfg").args(args).output().map_err(|e| {
-        PowerCfgError::new(operation, format!("не удалось запустить powercfg: {e}"))
-    })?;
+    let mut child = Command::new(powercfg_path())
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            PowerCfgError::new(operation, format!("не удалось запустить powercfg: {e}"))
+        })?;
+
+    // Ждём с потолком; по истечении — снимаем процесс и возвращаем ошибку.
+    let deadline = Instant::now() + Duration::from_secs(POWERCFG_TIMEOUT_SECS);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(PowerCfgError::new(
+                        operation,
+                        format!(
+                            "powercfg не ответил за {} с",
+                            POWERCFG_TIMEOUT_SECS
+                        ),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => {
+                return Err(PowerCfgError::new(
+                    operation,
+                    format!("не удалось дождаться завершения powercfg: {e}"),
+                ));
+            }
+        }
+    };
+    let output = child
+        .wait_with_output()
+        .map_err(|e| PowerCfgError::new(operation, format!("не удалось прочитать вывод: {e}")))?;
     let stdout = decode_oem(&output.stdout);
-    if !output.status.success() {
+    if !status.success() {
         let stderr = decode_oem(&output.stderr);
         let detail = if stderr.trim().is_empty() {
             stdout
@@ -101,7 +164,7 @@ fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError>
             operation,
             format!(
                 "код возврата {}: {}",
-                output.status.code().unwrap_or(-1),
+                status.code().unwrap_or(-1),
                 detail.trim()
             ),
         ));
@@ -121,8 +184,12 @@ pub fn activate(guid: &str) -> Result<(), PowerCfgError> {
     Ok(())
 }
 
-/// Продублировать схему; возвращает GUID новой схемы (первый UUID в выводе,
-/// отличный от исходного, если исходный тоже попал в вывод).
+/// Продублировать схему; возвращает GUID новой схемы.
+///
+/// В выводе powercfg может встретиться GUID исходной схемы, поэтому берём
+/// первый, отличный от него. Прежний вариант с `or_else(|| uuids.first())`
+/// возвращал исходный GUID — интерфейс показывал бы «дубль успешно создан»,
+/// указывая на ту же самую схему.
 pub fn duplicate(guid: &str) -> Result<String, PowerCfgError> {
     let stdout = run_powercfg("duplicatescheme", &["/duplicatescheme", guid])?;
     let mut uuids: Vec<&str> = Vec::new();
@@ -132,16 +199,16 @@ pub fn duplicate(guid: &str) -> Result<String, PowerCfgError> {
         rest = &rest[r.end..];
     }
     let want = guid.to_ascii_lowercase();
-    let new_guid = uuids
+    uuids
         .iter()
         .find(|u| u.to_ascii_lowercase() != want)
-        .or_else(|| uuids.first());
-    new_guid.map(|u| u.to_ascii_lowercase()).ok_or_else(|| {
-        PowerCfgError::new(
-            "duplicatescheme",
-            "в выводе powercfg не найден GUID новой схемы",
-        )
-    })
+        .map(|u| u.to_ascii_lowercase())
+        .ok_or_else(|| {
+            PowerCfgError::new(
+                "duplicatescheme",
+                "в выводе powercfg не найден GUID новой схемы",
+            )
+        })
 }
 
 /// Удалить схему по GUID.
@@ -196,6 +263,33 @@ mod tests {
     fn parse_ignores_lines_without_uuid() {
         assert!(parse_scheme_line("Существующие схемы управления электропитанием").is_none());
         assert!(parse_scheme_line("").is_none());
+    }
+
+    /// Регресс: звёздочка внутри имени не должна считаться признаком активной
+    /// схемы, иначе приложение переключало бы не ту схему при восстановлении.
+    #[test]
+    fn asterisk_inside_name_is_not_active_marker() {
+        let line = "GUID схемы питания: 381b4222-f694-41f0-9685-ff5bb260df2e  (Мой *профиль*)";
+        let s = parse_scheme_line(line).unwrap();
+        assert_eq!(s.name, "Мой *профиль*");
+        assert!(!s.active, "звёздочка в имени ошибочно принята за маркер активности");
+
+        // Настоящий маркер — после закрывающей скобки.
+        let active = "381b4222-f694-41f0-9685-ff5bb260df2e  (Мой *профиль*) *";
+        assert!(parse_scheme_line(active).unwrap().active);
+        assert_eq!(
+            parse_scheme_line(active).unwrap().name,
+            "Мой *профиль*",
+            "маркер активности попал в имя"
+        );
+    }
+
+    /// Регресс: без скобок активная схема определяется по звёздочке в хвосте.
+    #[test]
+    fn active_without_parentheses() {
+        let s = parse_scheme_line("381b4222-f694-41f0-9685-ff5bb260df2e  Без скобок *").unwrap();
+        assert!(s.active);
+        assert_eq!(s.name, "Без скобок");
     }
 
     #[test]

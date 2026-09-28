@@ -15,7 +15,7 @@ import {
 import { Badge, Button, FadeScroll, Field, Glass, NumInput, Panel, Progress, Spot, Stat } from "../components/ui";
 import { GearIcon } from "../components/icons";
 import { pushToast, setRunning, useSession } from "../store";
-import { SchemePicker } from "../components/SchemeTiles";
+import { SchemePicker, filterEligible, sortSchemes } from "../components/SchemeTiles";
 
 type Stage = "mode" | "schemes" | "run";
 type PresetKey = "quick" | "detailed" | "custom";
@@ -51,9 +51,9 @@ const PRESETS: Record<"quick" | "detailed", PresetDef> = {
 };
 
 const PRESET_SHORT: Record<PresetKey, string> = {
-  quick: "Быстро",
-  detailed: "Детально",
-  custom: "Пользовательская",
+  quick: "Быстрый",
+  detailed: "Детальный",
+  custom: "Пользовательские параметры",
 };
 
 const STAGES: { id: Stage; label: string }[] = [
@@ -62,13 +62,25 @@ const STAGES: { id: Stage; label: string }[] = [
   { id: "run", label: "Запуск" },
 ];
 
-/** ~1 мин 41 с */
-export function fmtEst(totalSeconds: number): string {
-  if (!Number.isFinite(totalSeconds)) return "~—";
-  const t = Math.max(0, Math.round(totalSeconds));
-  if (t >= 3600) return `~${Math.floor(t / 3600)} ч ${Math.round((t % 3600) / 60)} мин`;
-  if (t >= 60) return `~${Math.floor(t / 60)} мин ${Math.round(t % 60)} с`;
-  return `~${t} с`;
+/**
+ * Форматирование уже посчитанного времени (прошедшего или оставшегося).
+ * Слово «около» и «прошло» задаёт вызывающий: здесь только единицы.
+ */
+export function fmtDuration(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return "—";
+  const t = Math.round(totalSeconds);
+  if (t < 60) return `${t} с`;
+  const m = Math.floor(t / 60);
+  const s = t % 60;
+  if (m < 60) return s === 0 ? `${m} мин` : `${m} мин ${s} с`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm === 0 ? `${h} ч` : `${h} ч ${rm} мин`;
+}
+
+/** Телеметрия для показа: нефинитное значение — прочерк, а не «NaN». */
+function tf(v: number | null | undefined, digits: number): string {
+  return typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—";
 }
 
 const T_TABLE = [12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262];
@@ -81,14 +93,24 @@ function earlyStopNeed(reps: number, cv = 0.05): number | null {
 
 function earlyStopHint(reps: number): string {
   if (!Number.isFinite(reps) || reps < 2)
-    return "Адаптивная остановка невозможна при одном повторе — нужен перевес в данных минимум двух прогонов.";
+    return "Адаптивная остановка невозможна при одном повторе: нужны минимум два прогона, чтобы оценить разброс.";
   const need = earlyStopNeed(reps) ?? Infinity;
   if (need >= 100)
-    return `При ${reps} повторах ранняя остановка практически недостижима (нужен перевес > 100% при разбросе прогонов ~5%). Рекомендуем 5+ повторов.`;
+    return `При ${reps} ${plural(reps, "повторе", "повторах", "повторах")} ранняя остановка практически недостижима (нужен перевес > 100% при разбросе прогонов ~5%). Рекомендуем 5+ повторов.`;
   return `Ранняя остановка возможна, если перевес ≈ ${need.toFixed(0)}% и более (при разбросе прогонов ~5%). Для практичного срабатывания рекомендуем 5+ повторов.`;
 }
 
 const CHART_POINTS = 180;
+
+/** Русские склонения: 1 повтор / 2 повтора / 5 повторов. */
+function plural(n: number, one: string, few: string, many: string): string {
+  const a = Math.abs(Math.trunc(n)) % 100;
+  const b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
+}
 
 /**
  * Длительности фаз — та же формула, что в `orchestrator::config::phase_durations`:
@@ -140,8 +162,51 @@ export default function BenchmarkPage() {
   const [chart, setChart] = useState<number[]>([]);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [quarantine, setQuarantine] = useState<QuarantineEntry[]>([]);
+  const [estimate, setEstimate] = useState<string>("—");
   const chartRef = useRef<number[]>([]);
   const t0 = useRef(0);
+  // Полная оценка сессии в секундах — для расчёта «осталось» во время замера.
+  const totalSecondsRef = useRef<number | null>(null);
+
+  // Оценку времени для каждого пресета считает бэкенд из тех же констант,
+  // что и планировщик: интерфейс не должен переписывать формулу, иначе цифры
+  // в карточке режима и реальная длительность разойдутся.
+  const [presetEstimates, setPresetEstimates] = useState<Record<string, string>>({});
+  const [oneScheme, setOneScheme] = useState("—");
+  useEffect(() => {
+    let alive = true;
+    const n = Math.max(1, selected.size);
+    commands
+      .estimateSession(duration, warmup, cooling, reps, n)
+      .then((v) => {
+        if (!alive) return;
+        setEstimate(v.label);
+        totalSecondsRef.current = v.seconds > 0 ? v.seconds : null;
+      })
+      .catch(() => alive && setEstimate("—"));
+    // «Одна схема» для текущих параметров — панель настроек показывает его
+    // рядом с полями, которые пользователь только что двигал.
+    const one = commands.estimateSession(duration, warmup, cooling, reps, 1);
+    // По одной схеме каждого пресета: карточки режима обещают «сколько займёт
+    // тест», и раньше там стояла формула без стабилизации и фоновых проб.
+    const perPreset = (Object.keys(PRESETS) as ("quick" | "detailed")[]).map(async (
+      key,
+    ) => {
+      const p = PRESETS[key].preset;
+      const v = await commands.estimateSession(p.duration, p.warmup, p.cooling, p.reps, 1);
+      return [key, v.label] as const;
+    });
+    Promise.all([one, Promise.all(perPreset)])
+      .then(([oneV, pairs]) => {
+        if (!alive) return;
+        setOneScheme(oneV.label);
+        setPresetEstimates(Object.fromEntries(pairs));
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [duration, warmup, cooling, reps, selected.size]);
 
   const loadQuarantine = useCallback(() => {
     commands.quarantineList().then(setQuarantine).catch(() => undefined);
@@ -175,7 +240,8 @@ export default function BenchmarkPage() {
         ? "detailed"
         : "custom";
 
-  const estSeconds = duration * reps + warmup + cooling;
+  // «Осталось» = полная оценка сессии минус уже прошедшее время.
+  const [remainingEstimate, setRemainingEstimate] = useState("—");
 
   const applyPreset = (p: "quick" | "detailed") => {
     const def = PRESETS[p].preset;
@@ -197,46 +263,34 @@ export default function BenchmarkPage() {
       .checkpointStatus()
       .then((cp) => alive && setCheckpoint(cp))
       .catch(() => undefined);
-    commands
-      .listSchemes()
-      .then((s) => {
-        if (!alive) return;
-        // Алфавитный порядок (русская локаль); плитки сортируют ещё раз,
-        // но так список предсказуем и в других вьюхах.
-        const sorted = [...s].sort((a, b) =>
-          (a.name || "").localeCompare(b.name || "", "ru", { sensitivity: "base" }),
-        );
-        setSchemes(sorted);
-        // Исключённые и карантинные схемы не должны попадать в выбор молча:
-        // пользователь счёл бы их отфильтрованными, а замер шёл бы по ним.
-        const excluded = new Set(
-          (settings?.excluded_schemes ?? []).map((g) => g.toLowerCase()),
-        );
-        const quarantined = new Set(quarantine.map((q) => q.scheme_id.toLowerCase()));
-        setSelected(
-          new Set(
-            sorted
-              .filter(
-                (x) =>
-                  !excluded.has(x.guid.toLowerCase()) &&
-                  !quarantined.has(x.guid.toLowerCase()),
-              )
-              .map((x) => x.guid),
-          ),
-        );
-      })
-      .catch(() => undefined);
-    commands
-      .getSettings()
-      .then((st) => {
+    // Настройки и карантин нужны до выбора схем: без них исключённые и
+    // карантинные схемы попадали бы в выбор молча, хотя код ниже обещает
+    // обратное. Раньше обе выборки шли параллельно, и `listSchemes` успевал
+    // раньше — с пустыми `settings` и `quarantine`.
+    Promise.all([commands.getSettings(), commands.quarantineList()])
+      .then(([st, quarantineRows]) => {
         if (!alive) return;
         setSettings(st);
+        setQuarantine(quarantineRows);
         setDuration(num(st.duration_seconds, 30));
         setWarmup(num(st.warmup_seconds, 6));
         setCooling(num(st.cooling_seconds, 5));
         setReps(num(st.repetitions, 3));
+        return commands.listSchemes().then((s) => {
+          if (!alive) return;
+          setSchemes(sortSchemes(s));
+          setSelected(
+            new Set(
+              filterEligible(sortSchemes(s), st.excluded_schemes, quarantineRows).map(
+                (x) => x.guid,
+              ),
+            ),
+          );
+        });
       })
-      .catch(() => undefined);
+      .catch((e) => {
+        if (alive) pushToast("err", `не удалось загрузить схемы: ${String(e)}`);
+      });
     return () => {
       alive = false;
     };
@@ -254,6 +308,7 @@ export default function BenchmarkPage() {
       setStopping(false);
       setTelemetry(null);
       setFinished(true);
+      setChart([]);
       commands
         .checkpointStatus()
         .then((cp) => setCheckpoint(cp))
@@ -293,12 +348,39 @@ export default function BenchmarkPage() {
     };
   }, [stage, selected, duration, warmup, cooling, reps, running]);
 
-  const selSchemes = schemes.filter((s) => selected.has(s.guid));
+  // Порядок выполнения совпадает с показанным: активная первая, далее
+  // по алфавиту (тот же порядок применяет бэкенд для прогонов).
+  const selSchemes = useMemo(
+    () => sortSchemes(schemes.filter((s) => selected.has(s.guid))),
+    [schemes, selected],
+  );
 
+  // На время замера — один таймер раз в секунду на весь прогресс.
+  //
+  // Раньше их было два, причём второй пересоздавался на каждом тике первого
+  // (`elapsed` стоял в зависимостях), то есть интервал пересоздавался дважды
+  // в секунду. Секундной границы достаточно: счётчик показывает `мм:сс`, а
+  // «осталось» округляется пятками.
   useEffect(() => {
-    if (!running) return;
+    if (!running) {
+      setElapsed(0);
+      setRemainingEstimate("—");
+      return;
+    }
     if (!t0.current) t0.current = Date.now();
-    const id = window.setInterval(() => setElapsed((Date.now() - t0.current) / 1000), 500);
+    const tick = () => {
+      const passed = (Date.now() - t0.current) / 1000;
+      setElapsed(passed);
+      const total = totalSecondsRef.current;
+      // Оценка приходит асинхронно; до неё показываем «—», а не ноль.
+      if (total == null) return;
+      const left = Math.max(0, total - passed);
+      // Округляем: «осталось примерно 4 мин 30 с» полезнее, чем «4 мин 33 с».
+      const rounded = left < 60 ? Math.round(left / 5) * 5 : Math.round(left / 15) * 15;
+      setRemainingEstimate(fmtDuration(rounded));
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
   }, [running]);
 
@@ -309,16 +391,8 @@ export default function BenchmarkPage() {
 
   /** Схемы к бенчмарку: исключённые и карантинные не выбираются по умолчанию. */
   const eligible = useCallback(
-    (list: SchemeRow[]): string[] => {
-      const excluded = new Set((settings?.excluded_schemes ?? []).map((g) => g.toLowerCase()));
-      const quarantined = new Set(quarantine.map((q) => q.scheme_id.toLowerCase()));
-      return list
-        .filter((x) => {
-          const k = x.guid.toLowerCase();
-          return !excluded.has(k) && !quarantined.has(k);
-        })
-        .map((x) => x.guid);
-    },
+    (list: SchemeRow[]): string[] =>
+      filterEligible(list, settings?.excluded_schemes ?? [], quarantine).map((x) => x.guid),
     [settings, quarantine],
   );
 
@@ -349,7 +423,11 @@ export default function BenchmarkPage() {
       setElapsed(0);
       commands
         .startTest({
-          preset: preset ?? "detailed",
+          // Отправляем выведенный `activePreset`, а не последний нажатый ключ:
+          // после ручной правки полей пресет «не тот», и в истории сессии
+          // лежал бы чужой режим. «custom» бэкенд трактует как «параметры
+          // переданы явно» и использует их.
+          preset: activePreset,
           duration_seconds: resume ? null : duration,
           warmup_seconds: resume ? null : warmup,
           cooling_seconds: resume ? null : cooling,
@@ -387,7 +465,7 @@ export default function BenchmarkPage() {
 
   const subtitle =
     stage === "mode"
-      ? "выберите пресет — Быстрый или Детальный; настройки открываются кнопкой ниже"
+      ? "выберите режим «Быстро» или «Детально» — точные параметры откроются рядом"
       : stage === "schemes"
         ? "отметьте схемы питания, которые войдут в сравнение"
         : running
@@ -434,13 +512,20 @@ export default function BenchmarkPage() {
 
   // Прогресс фазы: телеметрия шлёт событие до конца фазы, поэтому значение
   // может слегка превысить 100 — клампим, иначе кольцо и подписи «ломаются».
+  // Нефинитное время тоже даёт NaN, а `Math.min/max` его не убирают: на экране
+  // появлялось «NaN%».
   const phaseProgress = useMemo(() => {
-    if (!telemetry || telemetry.phase_seconds <= 0) return 0;
-    const p = (telemetry.phase_elapsed_ms / (telemetry.phase_seconds * 1000)) * 100;
-    return Math.min(100, Math.max(0, p));
+    const el = telemetry?.phase_elapsed_ms;
+    const total = telemetry?.phase_seconds;
+    if (el == null || total == null || !Number.isFinite(el) || !Number.isFinite(total)) return 0;
+    if (total <= 0) return 0;
+    const p = (el / (total * 1000)) * 100;
+    return Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : 0;
   }, [telemetry]);
 
-  const chartSvg = (() => {
+  // График пересобирается на каждом тике телеметрии, поэтому он memoized:
+  // иначе SVG строился в главном потоке ровно тогда, когда идёт замер.
+  const chartSvg = useMemo(() => {
     if (chart.length < 2) return null;
     const w = 720;
     const h = 120;
@@ -460,9 +545,7 @@ export default function BenchmarkPage() {
         />
       </svg>
     );
-  })();
-
-
+  }, [chart]);
 
   return (
     <div className="page">
@@ -510,11 +593,18 @@ export default function BenchmarkPage() {
                         className={`mode-card ${open ? "open" : ""}`}
                         role="button"
                         tabIndex={0}
+                        aria-pressed={open}
+                        aria-label={`Режим «${def.title}»`}
                         onClick={() => {
                           if (!expanded) applyPreset(key);
                         }}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter" && !expanded) applyPreset(key);
+                          // Space тоже выбирает режим: на Enter-only карточка
+                          // недоступна с клавиатуры привычным образом.
+                          if ((e.key === "Enter" || e.key === " ") && !expanded) {
+                            e.preventDefault();
+                            applyPreset(key);
+                          }
                         }}
                       >
                         <div className="face" style={{ textAlign: "center" }}>
@@ -532,22 +622,15 @@ export default function BenchmarkPage() {
                               <div className="ms-value">{def.accuracy}</div>
                             </div>
                           </div>
-                          <div className="mode-time" style={{ textAlign: "center" }}>
-                            Примерное время 1 плана ≈{" "}
-                            <b>
-                              {fmtEst(
-                                def.preset.duration * def.preset.reps +
-                                  def.preset.warmup +
-                                  def.preset.cooling,
-                              )}
-                            </b>
+                          <div className="mode-time">
+                            Одна схема целиком: <b>{presetEstimates[key] ?? "—"}</b>
                           </div>
                         </div>
                         {cardIdx === 0 ? (
                           <div className="settings-pane">
                             <h3 className="pane-title">Настройки теста</h3>
                             <span className="est">
-                              Одна схема ≈ <b>{fmtEst(estSeconds)}</b>
+                              Одна схема: <b>{oneScheme}</b>
                             </span>
                             <p className="desc">{PRESETS[preset].desc}</p>
                             <div className="spacer" />
@@ -557,7 +640,7 @@ export default function BenchmarkPage() {
                                 checked={rawSamples}
                                 onChange={(e) => setRawSamples(e.target.checked)}
                               />
-                              <span>Сырые сэмплы (JSON)</span>
+                              <span>Подробные замеры (JSON)</span>
                             </label>
                           </div>
                         ) : (
@@ -658,8 +741,30 @@ export default function BenchmarkPage() {
                 onChanged={loadAll}
                 onToggle={(guid, active) => {
                   if (active && selected.has(guid)) {
-                    pushToast("err", "Активная схема питания должна участвовать в тестировании — её нельзя снять.");
+                    pushToast("err", "Эта схема уже выбрана для сравнения — снимите галочку.");
                     return;
+                  }
+                  // Исключённую пользователем схему нельзя вернуть в сравнение
+                  // щелчком по плитке: исключение — это явное «не мерить её».
+                  if (active) {
+                    const row = schemes.find((s) => s.guid === guid);
+                    const isExcluded = (settings?.excluded_schemes ?? []).some(
+                      (g) => g.toLowerCase() === guid.toLowerCase(),
+                    );
+                    const isQuarantined = quarantine.some(
+                      (q) => q.scheme_id.toLowerCase() === guid.toLowerCase(),
+                    );
+                    if (isExcluded) {
+                      pushToast("err", "Схема помечена как исключённая — снимите метку «исключить».");
+                      return;
+                    }
+                    if (isQuarantined) {
+                      pushToast(
+                        "err",
+                        `Схема в карантине${row?.name ? ` (${row.name})` : ""} — верните её из карантина.`,
+                      );
+                      return;
+                    }
                   }
                   setSelected((prev) => {
                     const next = new Set(prev);
@@ -671,15 +776,20 @@ export default function BenchmarkPage() {
               />
               {schemes.length === 0 ? (
                 <div className="glass inset">
-                  <div className="muted">Ничего не найдено.</div>
+                  <div className="muted">
+                    Схемы питания не найдены. Проверьте, что вы запустили
+                    PowerBench от имени администратора.
+                  </div>
                 </div>
               ) : null}
               {checkpoint && !checkpoint.original_restored ? (
                 <Glass className="inset">
-                  <div className="card-title">Прерванная сессия</div>
+                  <div className="card-title">Незавершённая сессия</div>
                   <div className="hint" style={{ marginBottom: 10 }}>
-                    {checkpoint.plan_guid} · схем {checkpoint.scheme_ids.length} · повторов{" "}
-                    {checkpoint.repetitions} · {checkpoint.completed_keys.length} выполненных раундов
+                    <span className="mono break">{checkpoint.plan_guid}</span> · схем{" "}
+                    {checkpoint.scheme_ids.length} · повторов {checkpoint.repetitions} ·{" "}
+                    {checkpoint.completed_keys.length}{" "}
+                    {plural(checkpoint.completed_keys.length, "раунд выполнен", "раунда выполнено", "раундов выполнено")}
                   </div>
                   <div className="row wrap gap-2">
                     <Button variant="primary" disabled={running} onClick={() => start(true)}>
@@ -711,10 +821,10 @@ export default function BenchmarkPage() {
             running || telemetry ? (
               <>
                 <div className="run-hero">
-                  <div className="rh-stat">
+                  <div className="rh-stat grow">
                     <div className="rh-label">Текущая скорость</div>
                     <div className="rh-value">
-                      {telemetry ? telemetry.ticks_per_sec.toFixed(1) : "—"}
+                      {telemetry ? tf(telemetry.ticks_per_sec, 1) : "—"}
                       <span className="rh-suffix">тик/с</span>
                     </div>
                     <div className="rh-sub">
@@ -771,18 +881,17 @@ export default function BenchmarkPage() {
                         );
                       })}
                     </div>
-                    <div className="hint" style={{ marginTop: 10 }}>
-                      {running || telemetry
-                        ? `прошло ~${fmtEst(elapsed)} · осталось ~${fmtEst(
-                            Math.max(0, estSeconds * Math.max(1, selected.size) - elapsed),
-                          )}`
-                        : "Замер идёт в три фазы; первые секунды каждой фазы — разгон, они в статистику не входят."}
-                    </div>
+                    {running || telemetry ? (
+                      <div className="hint" style={{ marginTop: 10 }}>
+                        Прошло {fmtDuration(elapsed)} · осталось примерно{" "}
+                        {remainingEstimate}
+                      </div>
+                    ) : null}
                   </Panel>
                   <div className="grid2">
                     <Stat
                       label="Время тика"
-                      value={telemetry ? telemetry.ms_per_tick.toFixed(3) : "—"}
+                      value={telemetry ? tf(telemetry.ms_per_tick, 3) : "—"}
                       suffix="мс"
                     />
                     <Stat label="Тиков" value={telemetry ? `${telemetry.ticks_done}` : "—"} />
@@ -832,7 +941,7 @@ export default function BenchmarkPage() {
                       <b>{reps}</b>
                     </div>
                     <div className="run-row">
-                      <span className="run-k">Сырые сэмплы</span>
+                      <span className="run-k">Подробные замеры</span>
                       <b>{rawSamples ? "да" : "нет"}</b>
                     </div>
                   </Panel>
@@ -840,12 +949,13 @@ export default function BenchmarkPage() {
                 <div className="run-summary">
                   <div className="grow">
                     <div className="run-total">
-                      Примерная длительность:{" "}
-                      <b>{fmtEst(estSeconds * Math.max(1, selected.size))}</b>
+                      Длительность теста: <b>{estimate}</b>
                     </div>
                     <div className="hint">
-                      Фазы: Лёгкая / Тяжёлая / Отклик. По окончании активная схема восстанавливается
-                      автоматически.
+                      {selected.size}{" "}
+                      {plural(selected.size, "схема", "схемы", "схем")} × {reps}{" "}
+                      {plural(reps, "раунд", "раунда", "раундов")}. Фазы: Лёгкая / Тяжёлая /
+                      Отклик. По окончании исходная схема питания восстанавливается автоматически.
                     </div>
                   </div>
                   <Button

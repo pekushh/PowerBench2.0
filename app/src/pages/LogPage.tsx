@@ -1,61 +1,127 @@
 // Страница «Логи»: старт приложения, ошибки и события сессий.
 
-import { useEffect, useMemo, useState } from "react";
-import { commands, fmtTime, onLog, type LoggerEntry } from "../api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { commands, onLog, type LoggerEntry } from "../api";
 import { Badge, FadeScroll, Panel, Seg } from "../components/ui";
 import { SearchIcon } from "../components/icons";
 
 type Level = "all" | "info" | "success" | "warn" | "error";
 
+/** Сколько строк держим в «живом» буфере: больше уже не прочитать глазом. */
+const LIVE_CAP = 200;
+/** Сколько записей реально рисуем: журнал хранит тысячи, DOM — нет. */
+const RENDER_CAP = 1000;
+
 const LEVEL_SHORT: Record<string, string> = {
   info: "инфо",
   success: "успех",
-  warn: "вним.",
-  error: "ошиб.",
+  warn: "внимание",
+  error: "ошибка",
 };
 
+const LEVEL_LABEL: Record<Level, string> = {
+  all: "Все",
+  info: "Инфо",
+  success: "Успех",
+  warn: "Внимание",
+  error: "Ошибки",
+};
+
+const LEVEL_OPTIONS: Level[] = ["all", "info", "success", "warn", "error"];
+
+/** Привести уровень из журнала к одному из четырёх отображаемых. */
+function normLevel(raw: string): string {
+  if (raw === "warning" || raw === "warn") return "warn";
+  if (raw === "err" || raw === "error") return "error";
+  if (raw === "ok" || raw === "success") return "success";
+  if (raw === "info" || raw === "") return "info";
+  return "info";
+}
+
+/** Строка журнала со стабильным ключом: индекс в отсортированном списке ключом быть не может. */
+type LogRow = LoggerEntry & { key: string };
+
+function timeOf(ts: number): string {
+  if (!Number.isFinite(ts) || ts < 0) return "--:--:--";
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** Русские склонения: 1 участник / 2 участника / 5 участников. */
+function plural(n: number, one: string, few: string, many: string): string {
+  const a = Math.abs(n) % 100;
+  const b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
+}
+
 export default function LogPage() {
-  const [entries, setEntries] = useState<LoggerEntry[] | null>(null);
-  const [live, setLive] = useState<LoggerEntry[]>([]);
+  const [entries, setEntries] = useState<LogRow[] | null>(null);
+  const [live, setLive] = useState<LogRow[]>([]);
   const [query, setQuery] = useState("");
   const [level, setLevel] = useState<Level>("all");
+  const nextKey = useRef(0);
 
   useEffect(() => {
-    commands.logHistory().then(setEntries).catch(() => setEntries([]));
-    const un = onLog((m) =>
-      setLive((prev) => [...prev.slice(-200), { level: m.level, text: m.text, ts_ms: m.ts_ms }]),
-    );
+    let alive = true;
+    commands
+      .logHistory()
+      .then((rows) => {
+        if (!alive) return;
+        nextKey.current = rows.length;
+        setEntries(
+          rows.map((e, i) => ({ ...e, key: `h${i}` })),
+        );
+      })
+      .catch(() => {
+        if (alive) setEntries([]);
+      });
+    const un = onLog((m) => {
+      const row: LogRow = { ...m, key: `l${nextKey.current++}` };
+      setLive((prev) => [...prev.slice(-LIVE_CAP), row]);
+    });
     return () => {
-      un.then((f) => f());
+      alive = false;
+      un.then((f) => f()).catch(() => undefined);
     };
   }, []);
 
   const all = useMemo(
-    () => [...(entries ?? []), ...live].sort((a, b) => a.ts_ms - b.ts_ms),
+    () =>
+      [...(entries ?? []), ...live].sort(
+        (a, b) => a.ts_ms - b.ts_ms || (a.key < b.key ? -1 : 1),
+      ),
     [entries, live],
   );
 
   const counts = useMemo(() => {
-    const c = { all: all.length, info: 0, success: 0, warn: 0, error: 0, other: 0 };
+    const c = { all: all.length, info: 0, success: 0, warn: 0, error: 0 };
     for (const e of all) {
-      const k = e.level === "warning" ? "warn" : e.level === "err" ? "error" : e.level;
+      const k = normLevel(e.level);
       if (k === "info") c.info++;
       else if (k === "success") c.success++;
       else if (k === "warn") c.warn++;
       else if (k === "error") c.error++;
-      else c.other++;
     }
     return c;
   }, [all]);
 
-  const norm = (l: string) => (l === "warning" ? "warn" : l === "err" ? "error" : l);
-
-  const shown = all.filter((e) => {
-    if (level !== "all" && norm(e.level) !== level) return false;
+  const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (q && !e.text.toLowerCase().includes(q)) return false;
-    return true;
-  });
+    return all.filter((e) => {
+      if (level !== "all" && normLevel(e.level) !== level) return false;
+      if (q && !e.text.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [all, level, query]);
+
+  // Длинный журнал показываем с конца — свежие записи важнее, а DOM остаётся
+  // ограниченным независимо от того, сколько сессий накопилось.
+  const visible = shown.length > RENDER_CAP ? shown.slice(-RENDER_CAP) : shown;
+  const hidden = shown.length - visible.length;
 
   return (
     <div className="page fill">
@@ -71,16 +137,11 @@ export default function LogPage() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Поиск по тексту…"
+            aria-label="Поиск по тексту записи журнала"
           />
         </div>
         <Seg
-          options={[
-            { value: "all", label: "Все" },
-            { value: "info", label: "Инфо" },
-            { value: "success", label: "Успех" },
-            { value: "warn", label: "Внимание" },
-            { value: "error", label: "Ошибки" },
-          ]}
+          options={LEVEL_OPTIONS.map((v) => ({ value: v, label: LEVEL_LABEL[v] }))}
           value={level}
           onChange={setLevel}
         />
@@ -95,25 +156,44 @@ export default function LogPage() {
       </div>
       <Panel
         title="Журнал"
-        hint={entries ? `показаны последние ${shown.length} записей — с фильтром обновляются` : undefined}
+        hint={
+          entries === null
+            ? undefined
+            : `показано ${visible.length} из ${shown.length} ${plural(
+                shown.length,
+                "записи",
+                "записей",
+                "записей",
+              )} по текущему фильтру`
+        }
         className="fill-grow"
       >
         <FadeScroll className="log log-box">
-          {!entries ? (
+          {entries === null ? (
             <div className="muted">Загрузка журнала…</div>
-          ) : shown.length === 0 ? (
-            <div className="muted">Журнал пуст. Тест или событие — и оно появится здесь.</div>
+          ) : visible.length === 0 ? (
+            <div className="muted">
+              {all.length === 0
+                ? "Журнал пуст. Здесь появятся события тестов и ошибки приложения."
+                : "Ни одна запись не подходит под фильтр."}
+            </div>
           ) : (
-            shown.map((e, i) => (
-              <div key={`${e.ts_ms}-${i}`} className={`log-line ${norm(e.level)}`}>
-                <span className="ts">{fmtTime(e.ts_ms)}</span>
-                <span className="lv">{LEVEL_SHORT[norm(e.level)] ?? e.level}</span>
+            visible.map((e) => (
+              <div key={e.key} className={`log-line ${normLevel(e.level)}`}>
+                <span className="ts">{timeOf(e.ts_ms)}</span>
+                <span className="lv">{LEVEL_SHORT[normLevel(e.level)] ?? e.level}</span>
                 <span className="tx">{e.text}</span>
               </div>
             ))
           )}
         </FadeScroll>
       </Panel>
+      {hidden > 0 ? (
+        <div className="hint" style={{ marginTop: 8 }}>
+          Ещё {hidden} {plural(hidden, "запись", "записи", "записей")} выше не показаны —
+          сузьте фильтр или поиск.
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -17,6 +17,7 @@ pub mod report;
 pub mod result;
 pub mod score;
 pub mod session;
+pub mod storage;
 
 #[cfg(test)]
 mod goldens;

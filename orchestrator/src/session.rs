@@ -17,7 +17,7 @@ use powerbench_core::engine::{
     Engine, ProgressSnapshot, RunError, RunReport, RunTarget, Scoreboard,
 };
 use powerbench_metrics::run::{
-    RunStats, burst_retention_percent, consistency_percent, median, population_std, run_stats,
+    RunStats, burst_retention_percent, consistency_percent, median, run_stats,
 };
 use powerbench_metrics::{
     AggregateResult, CompatibilitySignature, DeterminismSignature, aggregate_runs,
@@ -29,11 +29,13 @@ use powerbench_windows::monitor::{
 use powerbench_windows::powercfg::PowerScheme;
 
 use crate::checkpoint::{Checkpoint, PhaseStats, StoredRun};
-use crate::config::{SessionConfig, phase_durations, round_order, run_key, validate_config};
+use crate::config::{
+    SessionConfig, canonical_scheme_order, phase_durations, round_order, run_key, validate_config,
+};
 use crate::quarantine::{
-    DEGRADED_MIN_RUNS, DEGRADED_SHARE, QuarantineKind, TestingMarker, UNSTABLE_CV_LIMIT,
-    UNSTABLE_MIN_RUNS, clear_testing_marker, degraded_share, load_quarantine, preflight_filter,
-    quarantine_add, unstable_cv, write_testing_marker,
+    DEGRADED_MIN_RUNS, DEGRADED_SHARE_LIMIT, MIN_RUNS_FOR_JUDGMENT, QuarantineKind, TestingMarker,
+    UNSTABLE_MAD_LIMIT, clear_testing_marker, degraded_share, load_quarantine, preflight_filter,
+    quarantine_add, unstable_spread, write_testing_marker,
 };
 
 /// Период опроса сторожевого таймера.
@@ -42,16 +44,18 @@ pub const WATCHDOG_POLL_MS: u64 = 250;
 pub const WATCHDOG_NO_PROGRESS_SECS: u64 = 30;
 /// Грейс ожидания остановки нагрузки после отмены (спецификация).
 pub const WATCHDOG_CANCEL_GRACE_SECS: u64 = 5;
-/// Пауза после применения схемы питания (спецификация).
-pub const PAUSE_AFTER_SCHEME_SECS: u64 = 3;
+/// Пауза после применения схемы питания: живёт в `config`, оттуда же её
+/// берёт оценка времени сессии (единый источник правды).
+pub use crate::config::PAUSE_AFTER_SCHEME_SECS;
 /// Длительность одного замера фоновой нагрузки (спецификация).
 pub const BACKGROUND_MEASURE_MS: u64 = 700;
 /// Пауза между повторными замерами фона (спецификация).
 pub const BACKGROUND_RETRY_PAUSE_MS: u64 = 1200;
 /// Число попыток проверки фона до предупреждения (спецификация).
 pub const BACKGROUND_ATTEMPTS: u32 = 3;
-/// Стабилизационная пауза после окончания каждой фазы (спецификация).
-pub const STABILIZATION_SECS: u64 = 2;
+/// Стабилизационная пауза после окончания каждой фазы: живёт в `config`,
+/// оттуда же её берёт оценка времени сессии (единый источник правды).
+pub use crate::config::STABILIZATION_SECS;
 
 /// Ошибка сессии.
 #[derive(Debug, Clone, PartialEq)]
@@ -375,12 +379,29 @@ pub fn phase_label(phase: Phase) -> &'static str {
     }
 }
 
-/// Порог скачка латентности: `медиана + 3σ` времён тиков.
+/// Порог скачка латентности.
+///
+/// Раньше использовалось `медиана + 3σ`. σ неустойчив: несколько крупных
+/// выбросов (а они и есть предмет детекции) сами раздувают σ, порог
+/// поднимается выше настоящих скачков, и они перестают находиться. Используем
+/// медианное абсолютное отклонение (MAD) — стандартная робастная оценка
+/// разброса. Коэффициент 3 подобран так, чтобы для нормального распределения
+/// порог соответствовал ~3σ: `σ ≈ 1.4826 · MAD`.
+pub const SPIKE_MAD_FACTOR: f64 = 3.0;
+
 pub fn spike_threshold(times: &[f64]) -> f64 {
     if times.is_empty() {
-        0.0
+        return 0.0;
+    }
+    let med = median(times);
+    let deviations: Vec<f64> = times.iter().map(|t| (t - med).abs()).collect();
+    let mad = median(&deviations);
+    if mad > 0.0 {
+        med + SPIKE_MAD_FACTOR * 1.4826 * mad
     } else {
-        median(times) + 3.0 * population_std(times)
+        // Все времена почти равны: отступаем от среднего хотя бы на 20%,
+        // иначе порог равен значению и скачки не находятся вовсе.
+        med * 1.2
     }
 }
 
@@ -419,11 +440,17 @@ pub fn spike_windows_for(
 
 /// Решение «фон чистый»: суммарная загрузка процессов (кроме системы и себя)
 /// меньше порога `threshold_percent * логических_CPU`.
+///
+/// Нормировка `cpu_percent` у sysinfo — процент **одного** ядра, поэтому
+/// сумма по процессам сравнивается с порогом, умноженным на число логических
+/// CPU. Первый вызов `sample()` прогревает накопители sysinfo (без него
+/// `cpu_usage()` отдаёт 0), дальше идут настоящие измерения.
 pub fn background_check(logical_cpus: usize, threshold_percent: f64) -> (bool, f64) {
     let mut sampler = ProcessSampler::new();
+    // Прогрев накопителей: без него первый замер всегда нулевой.
+    let _ = sampler.sample();
     let mut last = 0.0;
-    for _ in 0..BACKGROUND_ATTEMPTS {
-        let _ = sampler.sample();
+    for attempt in 0..BACKGROUND_ATTEMPTS {
         std::thread::sleep(Duration::from_millis(BACKGROUND_MEASURE_MS));
         let samples = sampler.sample();
         last = samples.iter().map(|s| s.cpu_percent).sum();
@@ -431,7 +458,10 @@ pub fn background_check(logical_cpus: usize, threshold_percent: f64) -> (bool, f
         if last < threshold {
             return (true, last);
         }
-        std::thread::sleep(Duration::from_millis(BACKGROUND_RETRY_PAUSE_MS));
+        // Между попытками ждём только если ещё остались попытки.
+        if attempt + 1 < BACKGROUND_ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(BACKGROUND_RETRY_PAUSE_MS));
+        }
     }
     (false, last)
 }
@@ -443,9 +473,15 @@ enum WatchdogVerdict {
     UserCancelled,
 }
 
-/// Запустить сторожевой таймер фазы: следит за прогрессом ядра и флагом
-/// пользовательской отмены. При бездействии дольше `WATCHDOG_NO_PROGRESS_SECS`
-/// отменяет прогон (variant Hung); при пользовательской отмене — тоже.
+/// Сторожевой таймер фазы.
+///
+/// Ключевые требования:
+/// 1. **Не уйти до старта фазы.** Раньше первый же опрос видел `running == false`
+///    (флаг взводится внутри `run_phase`, то есть позже старта потока) и сторож
+///    завершался, не отслеживая зависание вообще. Теперь сторож сначала ждёт
+///    признака старта фазы (или отмены), и только затем начинает следить.
+/// 2. **Не ждать завершения самому.** Он только выставляет флаг отмены;
+///    освобождение батча делает пул (см. `Pool::quiesce`).
 fn spawn_watchdog(
     scoreboard: Arc<Scoreboard>,
     cancel: Arc<AtomicBool>,
@@ -455,6 +491,23 @@ fn spawn_watchdog(
     let handle: JoinHandle<()> = std::thread::spawn(move || {
         let mut last_ticks: u64 = 0;
         let mut last_progress = Instant::now();
+        // Фаза 1: ждём старта фазы. Если пользователь отменил раньше — выходим.
+        loop {
+            if user_cancel.load(Ordering::Relaxed) {
+                let _ = tx.send(WatchdogVerdict::UserCancelled);
+                cancel.store(true, Ordering::Relaxed);
+                return;
+            }
+            if scoreboard.snapshot().running {
+                break;
+            }
+            if cancel.load(Ordering::Relaxed) {
+                // Фаза отменена до старта (например, гонка отмены).
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(WATCHDOG_POLL_MS));
+        }
+        // Фаза 2: следим за прогрессом тиков.
         loop {
             std::thread::sleep(Duration::from_millis(WATCHDOG_POLL_MS));
             let snap: ProgressSnapshot = scoreboard.snapshot();
@@ -472,7 +525,6 @@ fn spawn_watchdog(
             } else if last_progress.elapsed().as_secs() >= WATCHDOG_NO_PROGRESS_SECS {
                 let _ = tx.send(WatchdogVerdict::Hung);
                 cancel.store(true, Ordering::Relaxed);
-                std::thread::sleep(Duration::from_secs(WATCHDOG_CANCEL_GRACE_SECS));
                 return;
             }
         }
@@ -500,6 +552,19 @@ fn spawn_monitor(
 
 /// Проверка пользовательской отмены между фазами/прогонами.
 fn user_wants_stop(user_cancel: &AtomicBool) -> bool {
+    user_cancel.load(Ordering::Relaxed)
+}
+
+/// Сон с быстрой реакцией на отмену пользователя.
+/// Возвращает `true`, если сон был прерван до истечения.
+fn interruptible_sleep(user_cancel: &AtomicBool, seconds: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < deadline {
+        if user_cancel.load(Ordering::Relaxed) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100).min(deadline - Instant::now()));
+    }
     user_cancel.load(Ordering::Relaxed)
 }
 
@@ -548,8 +613,10 @@ fn run_measured_phase(
     );
     monitor_run.store(false, Ordering::Relaxed);
     let _ = monitor_handle.join();
-    // Классификация отмены: только сторожевой таймер мог отменить прогон.
-    let verdict = if result.is_err() {
+    // Классификация отмены: вердикт запрашиваем только при отмене. Раньше
+    // `recv_timeout` выполнялся при любой ошибке (включая ошибки движка, которых
+    // сторож не присылает) — это гарантированная лишняя пауза в 5 секунд.
+    let verdict = if matches!(result, Err(RunError::Cancelled)) {
         rx.recv_timeout(Duration::from_millis(WATCHDOG_CANCEL_GRACE_SECS * 1000))
             .ok()
     } else {
@@ -559,8 +626,11 @@ fn run_measured_phase(
     if let Some(h) = telemetry_handle {
         let _ = h.join();
     }
-    // Нагрузка обязана остановиться в пределах грейса после отмены.
-    if engine.progress_snapshot().running {
+    // Гарантия «нагрузка остановлена»: движок уже вернул управление, значит
+    // батч снят, но воркеры могли не уложиться в грейс отмены. Ждём реальной
+    // тишины пула — иначе они продолжали бы писать в буферы сущностей, а
+    // следующий `reset` пересоздал бы данные у них под ногами.
+    if !engine.quiesce_pool() {
         return Err(PhaseFailure::LoadDidNotStop);
     }
     match (result, verdict) {
@@ -674,6 +744,31 @@ pub fn run_session(
         .iter()
         .map(|s| (s.guid.to_ascii_lowercase(), s.name.clone()))
         .collect();
+
+    // Канонический порядок плана: активная схема первая, остальные как заданы.
+    // Делается здесь, а не только в интерфейсе, чтобы правило действовало и
+    // для CLI, и для продолжения из чекпоинта.
+    let plan = {
+        let active = schemes_list.iter().find(|s| s.active).map(|s| s.guid.as_str());
+        let ordered = canonical_scheme_order(&plan.scheme_ids, active);
+        if ordered != plan.scheme_ids {
+            note(
+                &observer,
+                &mut events,
+                SessionEvent::Warn(format!(
+                    "порядок схем: активная «{}» перенесена в начало",
+                    name_map
+                        .get(&active.unwrap_or_default().to_ascii_lowercase())
+                        .cloned()
+                        .unwrap_or_else(|| active.unwrap_or_default().to_string())
+                )),
+            );
+        }
+        SessionConfig {
+            scheme_ids: ordered,
+            ..plan
+        }
+    };
 
     // Контрольная точка: либо текущий план, либо ошибка несовпадения.
     let mut checkpoint = match store.load() {
@@ -1072,13 +1167,17 @@ fn run_session_loop(
                         }
                         first_tick_checksums[idx] = report.first_tick_checksum;
                         run_checksums[idx] = report.run_checksum;
-                        // Шаг перевода индекса сэмпла в секунды: длительность ЭТОЙ
-                        // фазы, а не всего теста (иначе окна скачков растянуты).
-                        let sec_per_index = secs as f64 / times.len().max(1) as f64;
+                        // Шаг перевода индекса сэмпла в секунды и начало фазы
+                        // считаем по ФАКТИЧЕСКОМУ времени, а не по номинальному
+                        // `secs`: фаза включает запуск нагрузки и разгон, из-за
+                        // чего окна скачков систематически смещались на
+                        // несколько секунд и не совпадали с выборками процессов.
+                        let actual = phase_started.elapsed().as_secs_f64().max(0.001);
+                        let sec_per_index = actual / times.len().max(1) as f64;
                         let windows = spike_windows_for(
                             &times,
                             spike_threshold(&times),
-                            now_unix_secs() - secs,
+                            now_unix_secs().saturating_sub(actual.ceil() as u64),
                             sec_per_index,
                             label,
                         );
@@ -1223,7 +1322,9 @@ fn run_session_loop(
                     },
                 );
                 if !user_wants_stop(user_cancel) && plan.cooling_seconds > 0 {
-                    std::thread::sleep(Duration::from_secs(plan.cooling_seconds));
+                    // Охлаждение прерываемо: пауза до 60 с иначе игнорировала бы
+                    // кнопку «Стоп» почти на минуту после каждого прогона.
+                    interruptible_sleep(user_cancel, plan.cooling_seconds);
                 }
             }
         }
@@ -1350,16 +1451,11 @@ fn quarantine_post_session(
     observer: &Option<Arc<dyn TelemetryObserver>>,
     events: &mut Vec<SessionEvent>,
 ) {
-    let mut means: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut medians: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for r in &checkpoint.runs {
-        let avg = r.combined.average_throughput;
-        if avg.is_finite() && avg > 0.0 {
-            means
-                .entry(r.scheme_id.to_ascii_lowercase())
-                .or_default()
-                .push(avg);
-        }
+        // Нестабильность оцениваем по МЕДИАНЕ прогона, а не по среднему:
+        // среднее внутри прогона зашумлено всплесками фоновой нагрузки, и
+        // сравнивать такие значения между прогонами бессмысленно.
         let med = r.combined.median_throughput;
         if med.is_finite() && med > 0.0 {
             medians
@@ -1368,7 +1464,8 @@ fn quarantine_post_session(
                 .push(med);
         }
     }
-    if means.len() < 2 {
+    if medians.len() < 2 {
+        // Сравнивать не с чем: правила деградации требуют хотя бы две схемы.
         return;
     }
     let best_median = medians
@@ -1384,17 +1481,25 @@ fn quarantine_post_session(
             .map(|r| r.scheme_id.clone())
             .unwrap_or_else(|| lower.to_string())
     };
-    let mut keys: Vec<String> = means.keys().cloned().collect();
+    let mut keys: Vec<String> = medians.keys().cloned().collect();
     keys.sort();
     for lower in keys {
         let id = canon(&lower);
-        let run_means = &means[&lower];
-        if let Some(cv) = unstable_cv(run_means, UNSTABLE_MIN_RUNS, UNSTABLE_CV_LIMIT) {
+        let run_medians = &medians[&lower];
+        // Лидер по медиане деградировать не может — сравнивать его с собой.
+        let own_median = median_of(run_medians);
+        if let Some(spread) =
+            unstable_spread(run_medians, MIN_RUNS_FOR_JUDGMENT, UNSTABLE_MAD_LIMIT)
+        {
             quarantine_scheme(
                 &id,
                 name_map,
                 QuarantineKind::Unstable,
-                &format!("разброс прогонов CV={cv:.1}% при {} прогонах", run_means.len()),
+                &format!(
+                    "разброс прогонов {spread:.0}% от медианы при {} прогонах \
+                     (порог {UNSTABLE_MAD_LIMIT:.0}%)",
+                    run_medians.len()
+                ),
                 plan_guid,
                 observer,
                 events,
@@ -1403,23 +1508,20 @@ fn quarantine_post_session(
         }
         // MSRV 1.85: схлопывание через let-цепочки требует Rust 1.88+.
         #[allow(clippy::collapsible_if)]
-        if let Some(run_meds) = medians.get(&lower) {
-            if run_meds.len() >= DEGRADED_MIN_RUNS {
-                let med = median_of(run_meds);
-                if degraded_share(med, best_median, DEGRADED_SHARE) {
-                    quarantine_scheme(
-                        &id,
-                        name_map,
-                        QuarantineKind::Degraded,
-                        &format!(
-                            "медиана {med:.1} тик/с — менее {:.0}% от лучшей ({best_median:.1})",
-                            DEGRADED_SHARE * 100.0
-                        ),
-                        plan_guid,
-                        observer,
-                        events,
-                    );
-                }
+        if run_medians.len() >= DEGRADED_MIN_RUNS {
+            if degraded_share(own_median, best_median, DEGRADED_SHARE_LIMIT) {
+                quarantine_scheme(
+                    &id,
+                    name_map,
+                    QuarantineKind::Degraded,
+                    &format!(
+                        "медиана {own_median:.1} тик/с — менее {:.0}% от лучшей ({best_median:.1})",
+                        DEGRADED_SHARE_LIMIT * 100.0
+                    ),
+                    plan_guid,
+                    observer,
+                    events,
+                );
             }
         }
     }
@@ -1592,13 +1694,35 @@ fn build_aggregation(
 mod tests {
     use super::*;
 
+    /// Порог устойчив к выбросам: считается по медианному абсолютному
+    /// отклонению, а не по σ.
     #[test]
-    fn spike_threshold_uses_median_plus_3_sigma() {
-        let times = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        // median = 3, mean = 3, population_std = sqrt(2) ≈ 1.414.
-        let expected = 3.0 + 3.0 * population_std(&times);
-        assert!((spike_threshold(&times) - expected).abs() < 1e-9);
+    fn spike_threshold_is_robust_to_outliers() {
         assert_eq!(spike_threshold(&[]), 0.0);
+
+        // 1000 тиков по 1.0 мс и 50 огромных скачков. Формула σ раздула бы
+        // порог выше самих скачков; MAD держит его в разумных пределах.
+        let mut times = vec![1.0f64; 1000];
+        times.extend(std::iter::repeat_n(500.0, 50));
+        let threshold = spike_threshold(&times);
+        assert!(
+            threshold > 1.0 && threshold < 10.0,
+            "порог {threshold} неустойчив к выбросам"
+        );
+        // Все реальные скачки находятся, фоновые значения — нет.
+        let windows = spike_windows_for(&times, threshold, 0, 0.001, "Тяжёлая");
+        assert_eq!(windows.len(), 1, "скачки не объединились в одно окно");
+    }
+
+    /// Почти постоянные времена: порог всё равно должен что-то ловить.
+    #[test]
+    fn spike_threshold_handles_zero_variance() {
+        let threshold = spike_threshold(&[2.0; 100]);
+        assert!(threshold > 2.0, "при нулевом разбросе порог не поднялся");
+        assert_eq!(
+            spike_windows_for(&[2.0; 100], threshold, 0, 0.01, "X").len(),
+            0
+        );
     }
 
     #[test]

@@ -211,13 +211,20 @@ pub fn export_csv(session: &SessionJson, out: &mut impl Write) -> Result<usize, 
 }
 
 /// Экспорт результата в файл CSV.
+///
+/// Запись атомарная: сначала во временный файл рядом, затем переименование.
+/// Раньше файл создавался сразу и заполнялся на месте, поэтому прерванный
+/// экспорт оставлял после себя обрезанный CSV, который нельзя отличить от
+/// корректного, но уже неполного.
 pub fn export_csv_to(session: &SessionJson, path: &Path) -> Result<usize, String> {
     // У голого имени файла parent() даёт Some("") — фильтруем, иначе упадём.
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    export_csv(session, &mut file)
+    let mut buf: Vec<u8> = Vec::new();
+    let rows = export_csv(session, &mut buf)?;
+    atomic_write(path, &buf).map_err(|e| e.to_string())?;
+    Ok(rows)
 }
 
 /// Одна CSV-строка (прогон) с полями обязательного набора.

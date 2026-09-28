@@ -2,54 +2,44 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-/** Затемнение краёв только там, где реально есть скрытый скролл. */
+/**
+ * Ref на прокручиваемый контейнер.
+ *
+ * Раньше здесь был `MutationObserver` плюс чтение `scrollHeight`/`clientHeight`
+ * на каждое изменение DOM — это принудительный синхронный layout, то есть
+ * десятки раз в секунду, в том числе во время замера. Само затемнение краёв
+ * теперь делает CSS (`background-attachment: local`), поэтому от JS остаётся
+ * только ref: подписки на прокрутку не нужны.
+ */
 export function useScrollFade<T extends HTMLElement>() {
   const ref = useRef<T>(null);
-  const [fade, setFade] = useState({ top: false, bottom: false, right: false });
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const update = () => {
-      const vCan = el.scrollHeight - el.clientHeight > 4;
-      const hCan = el.scrollWidth - el.clientWidth > 4;
-      const next = {
-        top: vCan && el.scrollTop > 4,
-        bottom: vCan && el.scrollTop + el.clientHeight < el.scrollHeight - 4,
-        right: hCan && el.scrollLeft + el.clientWidth < el.scrollWidth - 4,
-      };
-      // Без bail-out MutationObserver дёргал бы setState на каждое изменение DOM.
-      setFade((prev) =>
-        prev.top === next.top && prev.bottom === next.bottom && prev.right === next.right
-          ? prev
-          : next,
-      );
-    };
-    update();
-    el.addEventListener("scroll", update, { passive: true });
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    const mo = new MutationObserver(update);
-    mo.observe(el, { childList: true, subtree: true, characterData: true });
-    return () => {
-      el.removeEventListener("scroll", update);
-      ro.disconnect();
-      mo.disconnect();
-    };
-  }, []);
-  return { ref, ...fade };
+  return { ref };
 }
 
 /**
  * Мягкий свет за курсором (spotlight). Без ре-рендеров: координаты пишутся
- * напрямую в CSS-переменные через rAF, уважает reduce-motion (см. CSS).
+ * напрямую в CSS-переменные через rAF.
+ *
+ * Во время замера подсветка выключена (класс `bench-running` на `<html>`), и
+ * обработчик движения мыши не делает ничего: иначе каждое движение мыши во
+ * время бенчмарка планировало бы кадр с записью в DOM. Проверка классов идёт
+ * внутри обработчика, а не один раз при монтировании — иначе подписка
+ * осталась бы активной на всю сессию.
  */
 export function useSpotlight<T extends HTMLElement>() {
   const ref = useRef<T>(null);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    const off = () =>
+      document.documentElement.classList.contains("reduce-motion") ||
+      document.documentElement.classList.contains("bench-running");
     let raf = 0;
     const onMove = (e: PointerEvent) => {
+      if (off()) {
+        el.classList.remove("spot-on");
+        return;
+      }
       cancelAnimationFrame(raf);
       const r = el.getBoundingClientRect();
       const x = e.clientX - r.left;
@@ -90,17 +80,22 @@ export function Spot({
 }
 
 /** Прокручиваемый блок с умными фейдами по краям. */
+/**
+ * Прокручиваемый блок с индикацией «есть что прокрутить».
+ *
+ * Индикатор — CSS-тень по краям (`background-attachment: local`), а не
+ * `mask-image`: маска делала первые пиксели контента прозрачными, то есть
+ * верхняя строка списка частично исчезала. JS-подписка на прокрутку больше не
+ * нужна — тень появляется и исчезает сама.
+ */
 export function FadeScroll({
   className = "",
   children,
   ...rest
 }: React.HTMLAttributes<HTMLDivElement>) {
-  const { ref, top, bottom, right } = useScrollFade<HTMLDivElement>();
-  const cls = [className, top ? "fade-top" : "", bottom ? "fade-bottom" : "", right ? "fade-right" : ""]
-    .filter(Boolean)
-    .join(" ");
+  const { ref } = useScrollFade<HTMLDivElement>();
   return (
-    <div ref={ref} className={cls} {...rest}>
+    <div ref={ref} className={`scrolled-x ${className}`.trim()} {...rest}>
       {children}
     </div>
   );
@@ -162,7 +157,15 @@ export function Button({
     .filter(Boolean)
     .join(" ");
   return (
-    <button className={cls} {...rest}>
+    // `type="button"` по умолчанию: без него кнопка внутри формы отправляет её.
+    // `big` шириной в 100%, поэтому в flex-строке он должен уступить место
+    // соседям — иначе «Старт» раздвигал бы соседние кнопки.
+    <button
+      type="button"
+      className={cls}
+      data-big={big ? "1" : undefined}
+      {...rest}
+    >
       {children}
     </button>
   );
@@ -190,15 +193,25 @@ export function Seg<T extends string>({
   options,
   value,
   onChange,
+  label,
 }: {
   options: { value: T; label: string }[];
   value: T;
   onChange: (v: T) => void;
+  /** Доступное имя группы; `aria-pressed` на кнопках безымянной группы
+   *  скринридер читает как «переключатель» без пояснения, что переключают. */
+  label?: string;
 }) {
   return (
-    <div className="seg">
+    <div className="seg" role="group" aria-label={label}>
       {options.map((o) => (
-        <button key={o.value} className={o.value === value ? "on" : ""} onClick={() => onChange(o.value)}>
+        <button
+          key={o.value}
+          type="button"
+          className={o.value === value ? "on" : ""}
+          aria-pressed={o.value === value}
+          onClick={() => onChange(o.value)}
+        >
           <span>{o.label}</span>
         </button>
       ))}
@@ -206,6 +219,11 @@ export function Seg<T extends string>({
   );
 }
 
+/**
+ * Поле с подписью. Подпись оборачивает сам контрол (`<label>` вокруг), иначе
+ * она ни с чем не связана: ни мышь, ни скринридер не свяжут «Длительность»
+ * с полем ввода.
+ */
 export function Field({
   label,
   hint,
@@ -216,11 +234,11 @@ export function Field({
   children: ReactNode;
 }) {
   return (
-    <div className="field">
-      <label>{label}</label>
+    <label className="field">
+      <span className="field-label">{label}</span>
       {children}
-      {hint ? <div className="field-hint">{hint}</div> : null}
-    </div>
+      {hint ? <span className="field-hint">{hint}</span> : null}
+    </label>
   );
 }
 
@@ -230,22 +248,27 @@ export function NumInput({
   onChange,
   min,
   max,
+  step,
   unit,
 }: {
   value: number;
   onChange: (v: number) => void;
   min?: number;
   max?: number;
+  /** Шаг ползунка/стрелок. По умолчанию 1 — все текущие поля целочисленные. */
+  step?: number;
   unit?: string;
 }) {
   const shown = Number.isFinite(value) ? value : (min ?? 0);
+  // Шаг меньше единицы — дробные значения, их округлять нельзя.
+  const fractional = step != null && step < 1;
   return (
     <span className="num-in">
       <input
         type="number"
         min={min}
         max={max}
-        step={1}
+        step={step ?? 1}
         value={shown}
         onChange={(e) => {
           // Округляем и зажимаем сразу: иначе «9.5» или «-3» уходит в бэкенд
@@ -255,7 +278,7 @@ export function NumInput({
             onChange(min ?? 0);
             return;
           }
-          const v = Math.round(raw);
+          const v = fractional ? Math.round(raw / step) * step : Math.round(raw);
           const lo = min ?? v;
           const hi = max ?? v;
           onChange(Math.min(Math.max(v, lo), hi));
@@ -299,21 +322,63 @@ export function Modal({
   wide?: boolean;
   children: ReactNode;
 }) {
+  const panel = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
+    // Кто открыл — тому вернём фокус при закрытии, иначе после Escape
+    // фокус падает на `<body>` и следующий Tab начинает с начала окна.
+    const opener = document.activeElement as HTMLElement | null;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab" || !panel.current) return;
+      // Ловушка фокуса: Tab не должен уводить за пределы диалога.
+      const items = panel.current.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+      );
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !panel.current.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !panel.current.contains(active))) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Фокус внутрь диалога: иначе он остаётся на фоне под оверлеем.
+    const focusFirst = window.setTimeout(() => {
+      const items = panel.current?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+      );
+      (items && items.length > 0 ? items[0] : panel.current)?.focus();
+    }, 0);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.clearTimeout(focusFirst);
+      opener?.focus?.();
+    };
   }, [open, onClose]);
   if (!open) return null;
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className={`modal${wide ? " wide" : ""}`} onClick={(e) => e.stopPropagation()}>
+      <div
+        className={`modal${wide ? " wide" : ""}`}
+        onClick={(e) => e.stopPropagation()}
+        ref={panel}
+        role="dialog"
+        aria-modal="true"
+        aria-label={typeof title === "string" ? title : undefined}
+      >
         <div className="modal-head">
           <div className="modal-title">{title}</div>
-          <button className="modal-close" onClick={onClose} aria-label="Закрыть">
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Закрыть">
             ×
           </button>
         </div>
@@ -338,13 +403,18 @@ export function Dropdown<T extends string>({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      // Escape возвращает фокус на кнопку: иначе он уходит на `<body>`.
+      if (e.key === "Escape") {
+        setOpen(false);
+        trigger.current?.focus();
+      }
     };
     window.addEventListener("pointerdown", onDown);
     window.addEventListener("keydown", onKey);
@@ -352,15 +422,19 @@ export function Dropdown<T extends string>({
       window.removeEventListener("pointerdown", onDown);
       window.removeEventListener("keydown", onKey);
     };
-  }, [open ]);
+  }, [open]);
   const cur = options.find((o) => o.value === value);
   return (
     <div className="select" ref={ref} title={title}>
       <button
         type="button"
+        ref={trigger}
         className="dd-btn"
         aria-haspopup="listbox"
         aria-expanded={open}
+        // Без `aria-label` у кнопки нет доступного имени: `title` на обёртке
+        // скринридер не читает, а текст — только текущее значение.
+        aria-label={title ? `${title}: ${cur?.label ?? value}` : cur?.label ?? value}
         onClick={() => setOpen((o) => !o)}
       >
         <span>{cur?.label ?? value}</span>

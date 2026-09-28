@@ -7,10 +7,12 @@ mod runner;
 
 use crate::bridge::{
     AppState, ac_power_online, appsettings_path, checkpoint_discard, checkpoint_status,
-    get_settings, history_delete, history_export_to, history_list, history_open,
-    history_open_folder, history_report, identity_info, is_admin, list_schemes, log_history,
-    open_file, open_folder, quarantine_clear, quarantine_list, results_dir, scheme_action,
-    session_report, set_settings, start_test, stop_test, storage_stats, system_ready, test_running,
+    estimate_session, get_settings, history_delete, history_export_to, history_list,
+    history_open, history_open_folder, history_report, identity_info, is_admin, list_schemes,
+    log_flush, log_history, open_file, open_folder, quarantine_clear, quarantine_list,
+    results_dir,
+    scheme_action, session_report, set_settings, start_test, stop_test, storage_stats,
+    system_ready, test_running,
 };
 use tauri::{
     Manager,
@@ -115,9 +117,11 @@ fn main() {
             history_open_folder,
             quarantine_list,
             quarantine_clear,
+            estimate_session,
             storage_stats,
             open_folder,
             open_file,
+            log_flush,
             log_history,
             system_ready,
             results_dir,
@@ -130,6 +134,9 @@ fn main() {
                 use tauri::Manager;
                 if let Some(state) = window.app_handle().try_state::<AppState>() {
                     runner::join(&state.runner);
+                    // Журнал пишется фоновым потоком: без явного сброса
+                    // последние строки остались бы только в памяти.
+                    state.log.flush();
                 }
             }
         })

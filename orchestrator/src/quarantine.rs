@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::checkpoint::{atomic_write, data_dir};
+use crate::checkpoint::data_dir;
 
 /// Имя файла карантина в каталоге данных.
 pub const QUARANTINE_FILE_NAME: &str = "powerbench-quarantine.json";
@@ -80,13 +80,31 @@ pub struct TestingMarker {
 }
 
 /// Пороги правил пост-сессии.
-pub const UNSTABLE_MIN_RUNS: usize = 3;
-/// CV (%) по средним прогонов, выше которого схема — кандидат в карантин.
-pub const UNSTABLE_CV_LIMIT: f64 = 25.0;
-/// Минимум прогонов схемы для правила деградации.
+///
+/// Числа не «из воздуха», а следуют из того, что именно мы хотим отсечь:
+///
+/// * [`MIN_RUNS_FOR_JUDGMENT`] — меньше трёх прогонов медиана статистически
+///   неустойчива: один выброс (фоновый антивирус, драйвер) целиком определяет
+///   результат. Смотреть на такие данные и браковать нельзя.
+/// * [`UNSTABLE_MAD_LIMIT`] — разброс прогонов в 25% и выше означает, что
+///   схема даёт нестабильный результат: пользователю нельзя на неё полагаться.
+///   Метрика — среднее абсолютное отклонение (MAD) в процентах от медианы:
+///   устойчива к выбросам, в отличие от σ, которую сами же выбросы раздувают.
+/// * [`DEGRADED_SHARE_LIMIT`] — схема медленнее 20% от лучшей медианы сессии
+///   практически бесполезна на этой машине. 20% (а не 10%) оставлены с
+///   запасом, чтобы не срезать схему, которая просто слабее, но рабочая.
+/// * [`MIN_MARGIN_PERCENT`] — минимальный перевес, ради которого вообще
+///   имеет смысл что-то различать: 1% — это граница, ниже которой
+///   преимущество не воспроизводимо от прогона к прогону.
+pub const MIN_RUNS_FOR_JUDGMENT: usize = 3;
+/// Нестабильность: MAD в % от медианы, выше которой схема в карантин.
+pub const UNSTABLE_MAD_LIMIT: f64 = 25.0;
+/// Деградация: доля от лучшей медианы, ниже которой схема в карантин.
+pub const DEGRADED_SHARE_LIMIT: f64 = 0.20;
+/// Деградация проверяется начиная с этих прогонов (меньше — рано).
 pub const DEGRADED_MIN_RUNS: usize = 2;
-/// Доля от лучшей медианы: ниже — деградация.
-pub const DEGRADED_SHARE: f64 = 0.10;
+/// Сравнение с лидером имеет смысл только при заметном перевесе.
+pub const MIN_MARGIN_PERCENT: f64 = 1.0;
 
 pub fn quarantine_path() -> PathBuf {
     data_dir().join(QUARANTINE_FILE_NAME)
@@ -105,17 +123,7 @@ fn now_ns() -> u64 {
 
 /// Загрузить карантин; отсутствующий/битый файл — пустой список, без паники.
 pub fn load_quarantine() -> Vec<QuarantineEntry> {
-    let text = match std::fs::read_to_string(quarantine_path()) {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
-    };
-    serde_json::from_str(&text).unwrap_or_default()
-}
-
-fn save_quarantine(entries: &[QuarantineEntry]) -> io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(entries)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    atomic_write(&quarantine_path(), &bytes)
+    crate::storage::read_json(&quarantine_path()).unwrap_or_default()
 }
 
 /// Схема в карантине? Сравнение по GUID, регистронезависимое.
@@ -127,6 +135,10 @@ pub fn is_quarantined(entries: &[QuarantineEntry], scheme_id: &str) -> bool {
 
 /// Добавить схему в карантин. Возвращает `true`, если запись новая,
 /// `false` — если схема уже в карантине (идемпотентно).
+///
+/// Всё «прочитать-проверить-записать» выполняется под блокировкой файла:
+/// вызывающих одновременно несколько (фоновый поток сессии, команды
+/// интерфейса, восстановление при старте), и без блокировки правки терялись.
 pub fn quarantine_add(
     scheme_id: &str,
     scheme_name: Option<&str>,
@@ -134,51 +146,63 @@ pub fn quarantine_add(
     reason: &str,
     plan_guid: &str,
 ) -> io::Result<bool> {
-    let mut entries = load_quarantine();
-    if is_quarantined(&entries, scheme_id) {
-        return Ok(false);
-    }
-    entries.push(QuarantineEntry {
-        scheme_id: scheme_id.to_string(),
+    let path = quarantine_path();
+    let scheme_id = scheme_id.to_string();
+    let entry = QuarantineEntry {
+        scheme_id: scheme_id.clone(),
         scheme_name: scheme_name.map(str::to_string),
         kind,
         reason: reason.to_string(),
         at_ns: now_ns(),
         plan_guid: plan_guid.to_string(),
-    });
-    save_quarantine(&entries)?;
-    Ok(true)
+    };
+    let mut added = false;
+    crate::storage::update_file(&path, |cur| {
+        let mut entries: Vec<QuarantineEntry> = serde_json::from_slice(cur).unwrap_or_default();
+        if entries
+            .iter()
+            .any(|e| e.scheme_id.eq_ignore_ascii_case(&scheme_id))
+        {
+            return serde_json::to_vec_pretty(&entries).unwrap_or_default();
+        }
+        entries.push(entry.clone());
+        added = true;
+        serde_json::to_vec_pretty(&entries).unwrap_or_default()
+    })?;
+    Ok(added)
 }
 
 /// Убрать схему из карантина (возврат пользователем). `true` — была запись.
 pub fn quarantine_remove(scheme_id: &str) -> io::Result<bool> {
-    let mut entries = load_quarantine();
-    let before = entries.len();
-    entries.retain(|e| !e.scheme_id.eq_ignore_ascii_case(scheme_id));
-    if entries.len() == before {
-        return Ok(false);
-    }
-    save_quarantine(&entries)?;
-    Ok(true)
+    let path = quarantine_path();
+    let scheme_id = scheme_id.to_string();
+    let mut removed = false;
+    crate::storage::update_file(&path, |cur| {
+        let mut entries: Vec<QuarantineEntry> = serde_json::from_slice(cur).unwrap_or_default();
+        let before = entries.len();
+        entries.retain(|e| !e.scheme_id.eq_ignore_ascii_case(&scheme_id));
+        removed = entries.len() != before;
+        serde_json::to_vec_pretty(&entries).unwrap_or_default()
+    })?;
+    Ok(removed)
 }
 
 /// Записать маркер активного прогона (после успешного `set_active`).
 pub fn write_testing_marker(marker: &TestingMarker) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(marker)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    atomic_write(&testing_marker_path(), &bytes)
+    crate::storage::atomic_write(&testing_marker_path(), &bytes)
 }
 
 /// Стереть маркер (прогон завершён записью результата или браковкой).
 /// Отсутствие файла — не ошибка.
 pub fn clear_testing_marker() {
-    let _ = std::fs::remove_file(testing_marker_path());
+    let _ = crate::storage::remove_file_if_exists(&testing_marker_path());
 }
 
 /// Прочитать маркер незавершённого прогона, если он остался с прошлого запуска.
 pub fn load_testing_marker() -> Option<TestingMarker> {
-    let text = std::fs::read_to_string(testing_marker_path()).ok()?;
-    serde_json::from_str(&text).ok()
+    crate::storage::read_json(&testing_marker_path())
 }
 
 /// Префлайт: убрать карантинные схемы из плана.
@@ -204,10 +228,32 @@ pub fn preflight_filter(
     (admitted, skipped)
 }
 
-/// Правило нестабильности: CV (%) по средним throughput прогонов.
-/// Возвращает CV, если прогонов достаточно (`>= min_runs`) и CV выше лимита.
-pub fn unstable_cv(means: &[f64], min_runs: usize, cv_limit: f64) -> Option<f64> {
-    let valid: Vec<f64> = means
+/// Медиана отсортированной копии (пустое — 0).
+fn median_of(values: &[f64]) -> f64 {
+    let mut v: Vec<f64> = values.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+/// Правило нестабильности: разброс прогонов как **MAD в % от медианы**.
+///
+/// Почему не σ: стандартное отклонение неустойчиво — два выброса из десяти
+/// прогонов дают σ больше, чем у схемы с настоящим разбросом, и схема проходит
+/// незамеченной. Медианное абсолютное отклонение игнорирует крайние значения,
+/// поэтому «один плохой прогон» не помечает схему как нестабильную, а
+/// «каждый прогон разный» — помечает.
+///
+/// Возвращает `Some(mad_percent)`, если данных достаточно и правило сработало.
+pub fn unstable_spread(values: &[f64], min_runs: usize, limit_percent: f64) -> Option<f64> {
+    let valid: Vec<f64> = values
         .iter()
         .copied()
         .filter(|v| v.is_finite() && *v > 0.0)
@@ -215,22 +261,40 @@ pub fn unstable_cv(means: &[f64], min_runs: usize, cv_limit: f64) -> Option<f64>
     if valid.len() < min_runs.max(2) {
         return None;
     }
-    let mean = valid.iter().sum::<f64>() / valid.len() as f64;
-    if mean <= 0.0 {
+    let med = median_of(&valid);
+    if med <= 0.0 {
         return None;
     }
-    let var = valid.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / valid.len() as f64;
-    let cv = var.sqrt() / mean * 100.0;
-    (cv > cv_limit).then_some(cv)
+    let deviations: Vec<f64> = valid.iter().map(|v| (v - med).abs()).collect();
+    let mad = median_of(&deviations);
+    // MAD → «процент разброса». 1.4826 приводит MAD к масштабу σ для
+    // нормального распределения; для пары-тройки прогонов это избыточно,
+    // поэтому ограничиваем снизу, чтобы не делить слишком мелкий ноль.
+    let spread_percent = if mad > 0.0 {
+        mad / med * 100.0
+    } else {
+        // Все прогоны совпали — разброс нулевой, нестабильности нет.
+        0.0
+    };
+    (spread_percent > limit_percent).then_some(spread_percent)
 }
 
-/// Правило деградации: медиана схемы ниже `share` от лучшей медианы сессии.
-pub fn degraded_share(median: f64, best_median: f64, share: f64) -> bool {
-    median.is_finite()
-        && best_median.is_finite()
-        && best_median > 0.0
-        && median >= 0.0
-        && median < best_median * share
+/// Правило деградации: медиана схемы заметно ниже лучшей медианы сессии.
+///
+/// `best` — медиана лучшей схемы той же сессии. Сравнение медиан (а не средних)
+/// устойчиво к выбросам; минимальный перевес [`MIN_MARGIN_PERCENT`] не даёт
+/// браковать схемы, которые просто чуть-чуть отстают.
+pub fn degraded_share(median: f64, best_median: f64, share_limit: f64) -> bool {
+    if !(median.is_finite() && best_median.is_finite() && best_median > 0.0 && median >= 0.0) {
+        return false;
+    }
+    // Два независимых условия:
+    //  1) доля от лидера ниже порога;
+    //  2) сам перевес не меньше минимального (защищает от браковки схем,
+    //     отстающих на доли процента, где разница — шум измерения).
+    let share = median / best_median;
+    let margin_percent = (best_median - median) / best_median * 100.0;
+    share < share_limit && margin_percent >= MIN_MARGIN_PERCENT
 }
 
 #[cfg(test)]
@@ -271,24 +335,51 @@ mod tests {
     }
 
     #[test]
-    fn unstable_cv_needs_enough_runs() {
+    fn unstable_spread_needs_enough_runs() {
         // Разброс огромный, но прогонов мало — не браковать.
-        assert_eq!(unstable_cv(&[100.0, 300.0], 3, UNSTABLE_CV_LIMIT), None);
-        // Три прогона с диким разбросом — браковать.
-        let cv = unstable_cv(&[100.0, 300.0, 500.0], 3, UNSTABLE_CV_LIMIT);
-        assert!(cv.is_some() && cv.unwrap() > UNSTABLE_CV_LIMIT);
+        assert_eq!(unstable_spread(&[100.0, 300.0], 3, UNSTABLE_MAD_LIMIT), None);
+        assert_eq!(unstable_spread(&[100.0], 3, UNSTABLE_MAD_LIMIT), None);
         // Стабильная схема — не браковать.
         assert_eq!(
-            unstable_cv(&[500.0, 505.0, 498.0], 3, UNSTABLE_CV_LIMIT),
+            unstable_spread(&[500.0, 505.0, 498.0], 3, UNSTABLE_MAD_LIMIT),
+            None
+        );
+        // Полностью совпадающие прогоны — разброс нулевой.
+        assert_eq!(
+            unstable_spread(&[500.0, 500.0, 500.0], 3, UNSTABLE_MAD_LIMIT),
             None
         );
     }
 
+    /// Регресс против σ-метрики: пара выбросов среди нормальных прогонов —
+    /// это «шум», а не нестабильность. Настоящая нестабильность — когда
+    /// каждый прогон отличается.
     #[test]
-    fn degraded_share_threshold() {
-        assert!(degraded_share(50.0, 1000.0, DEGRADED_SHARE));
-        assert!(!degraded_share(150.0, 1000.0, DEGRADED_SHARE));
-        assert!(!degraded_share(f64::NAN, 1000.0, DEGRADED_SHARE));
-        assert!(!degraded_share(50.0, 0.0, DEGRADED_SHARE));
+    fn unstable_spread_ignores_lone_outliers() {
+        let with_outlier = [500.0, 502.0, 498.0, 500.0, 900.0];
+        assert_eq!(
+            unstable_spread(&with_outlier, 3, UNSTABLE_MAD_LIMIT),
+            None,
+            "один выброс не должен означать нестабильность"
+        );
+        let really_unstable = [300.0, 500.0, 800.0, 400.0, 900.0];
+        assert!(
+            unstable_spread(&really_unstable, 3, UNSTABLE_MAD_LIMIT).is_some(),
+            "разброс в каждом прогоне пропущен"
+        );
+    }
+
+    #[test]
+    fn degraded_share_respects_minimum_margin() {
+        // Явная деградация.
+        assert!(degraded_share(50.0, 1000.0, DEGRADED_SHARE_LIMIT));
+        // Отставание меньше порога — не браковать.
+        assert!(!degraded_share(500.0, 1000.0, DEGRADED_SHARE_LIMIT));
+        // На малых абсолютных величинах перевес в 1% — тоже прощаем.
+        assert!(!degraded_share(9.5, 10.0, DEGRADED_SHARE_LIMIT));
+        assert!(degraded_share(0.5, 10.0, DEGRADED_SHARE_LIMIT));
+        // Вырожденные значения.
+        assert!(!degraded_share(f64::NAN, 1000.0, DEGRADED_SHARE_LIMIT));
+        assert!(!degraded_share(50.0, 0.0, DEGRADED_SHARE_LIMIT));
     }
 }

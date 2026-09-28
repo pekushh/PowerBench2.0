@@ -5,7 +5,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -30,6 +30,9 @@ pub struct RunnerHandle {
     pub cancel: Arc<AtomicBool>,
     pub join: Option<JoinHandle<()>>,
 }
+
+/// Сколько ждём завершения сессии при закрытии окна, мс.
+const JOIN_TIMEOUT_MS: u64 = 10_000;
 
 /// Сообщение о завершении сессии (событие `test-finished`).
 #[derive(Clone, Serialize)]
@@ -132,6 +135,17 @@ fn log_level(e: &SessionEvent) -> &'static str {
     }
 }
 
+impl AppObserver {
+    /// Захват контекста телеметрии.
+    ///
+    /// Отравление мьютекса игнорируем: если поток паники случится внутри
+    /// критической секции, обычный `unwrap()` превратил бы каждое следующее
+    /// обновление телеметрии в новую панику, и сессия «залипла» бы намертво.
+    fn lock_ctx(&self) -> std::sync::MutexGuard<'_, ObsCtx> {
+        self.ctx.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 impl TelemetryObserver for AppObserver {
     fn event(&self, e: &SessionEvent) {
         let msg = LogMsg {
@@ -154,7 +168,7 @@ impl TelemetryObserver for AppObserver {
         seconds: u64,
     ) {
         let now = Instant::now();
-        let mut ctx = self.ctx.lock().unwrap();
+        let mut ctx = self.lock_ctx();
         ctx.run_index = run_index;
         ctx.run_total = run_total;
         ctx.round = round;
@@ -168,7 +182,7 @@ impl TelemetryObserver for AppObserver {
     }
 
     fn tick(&self, snap: &ProgressSnapshot, phase_label: &str, phase_started: &Instant) {
-        let ctx = self.ctx.lock().unwrap();
+        let ctx = self.lock_ctx();
         let now = Instant::now();
         let dt_ms = now.duration_since(ctx.last_time).as_millis().max(1) as f64;
         let delta = snap.ticks_done.saturating_sub(ctx.last_ticks);
@@ -257,13 +271,22 @@ fn empty_recommendation() -> Recommendation {
     }
 }
 
-fn warn_of(app: &AppHandle, text: &str) {
+/// Настоящая ошибка, а не предупреждение.
+///
+/// Уровень `error` существует в фильтре журнала, но раньше не использовался:
+/// сбои вроде «не удалось сохранить в историю» попадали в `warn`, и фильтр
+/// «Ошибки» в UI всегда показывал ноль. Теперь они действительно ошибки.
+fn error_of(app: &AppHandle, text: &str) {
+    log_at(app, "error", text);
+}
+
+fn log_at(app: &AppHandle, level: &str, text: &str) {
     let msg = LogMsg {
-        level: "warn".into(),
+        level: level.into(),
         text: text.to_string(),
         ts_ms: now_ms(),
     };
-    persist_log(app, "warn", text);
+    persist_log(app, level, text);
     let _ = app.emit("log", msg);
 }
 
@@ -279,6 +302,7 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
     let mut engine = match prepare_engine(plan.worker_count) {
         Ok(e) => e,
         Err(e) => {
+            error_of(&app, &format!("не удалось подготовить движок: {e}"));
             let _ = app.emit(
                 "test-finished",
                 FinishedPayload {
@@ -293,6 +317,7 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
     let guard = match SleepGuard::prevent() {
         Ok(g) => g,
         Err(e) => {
+            error_of(&app, &format!("не удалось запретить сон: {e:?}"));
             let _ = app.emit(
                 "test-finished",
                 FinishedPayload {
@@ -320,6 +345,7 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
     ) {
         Ok(o) => o,
         Err(e) => {
+            error_of(&app, &format!("ошибка сессии: {e}"));
             let _ = app.emit(
                 "test-finished",
                 FinishedPayload {
@@ -393,21 +419,21 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
     let saved = match powerbench_orchestrator::history::save_result(&json) {
         Ok(path) => Some(path.display().to_string()),
         Err(e) => {
-            warn_of(&app, &format!("не удалось сохранить в историю: {e}"));
+            error_of(&app, &format!("не удалось сохранить в историю: {e}"));
             None
         }
     };
     let report_path = match write_session_report(&json) {
         Some(p) => Some(p),
         None => {
-            warn_of(&app, "не удалось сформировать HTML-отчёт по сессии");
+            error_of(&app, "не удалось сформировать HTML-отчёт по сессии");
             None
         }
     };
     // Сессия записана в историю — точка долетала своё, иначе следующий
     // новый запуск упрётся в «контрольная точка другого плана».
     if let Err(e) = powerbench_orchestrator::checkpoint::clear_checkpoint() {
-        warn_of(
+        error_of(
             &app,
             &format!("не удалось очистить контрольную точку: {e}"),
         );
@@ -564,7 +590,7 @@ pub fn start(
     plan: SessionConfig,
 ) -> Result<String, String> {
     {
-        let guard = runner.lock().unwrap();
+        let guard = runner.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_some() {
             return Err("сессия уже выполняется".to_string());
         }
@@ -575,7 +601,7 @@ pub fn start(
         join: None,
     };
     {
-        let mut guard = runner.lock().unwrap();
+        let mut guard = runner.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(handle);
     }
     let pid = plan.plan_guid.clone();
@@ -603,7 +629,7 @@ pub fn start(
             guard.take();
         }
     });
-    if let Some(h) = runner.lock().unwrap().as_mut() {
+    if let Some(h) = runner.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         h.join = Some(join);
     }
     Ok(pid)
@@ -611,7 +637,7 @@ pub fn start(
 
 /// Запросить остановку текущей сессии. Возвращает true, если она шла.
 pub fn stop(runner: &Arc<Mutex<Option<RunnerHandle>>>) -> bool {
-    let mut guard = runner.lock().unwrap();
+    let mut guard = runner.lock().unwrap_or_else(|e| e.into_inner());
     match guard.as_mut() {
         Some(h) => {
             h.cancel.store(true, Ordering::Relaxed);
@@ -623,7 +649,7 @@ pub fn stop(runner: &Arc<Mutex<Option<RunnerHandle>>>) -> bool {
 
 /// Идёт ли сессия сейчас.
 pub fn running(runner: &Arc<Mutex<Option<RunnerHandle>>>) -> bool {
-    runner.lock().unwrap().is_some()
+    runner.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
 /// Глобальное состояние приложения не должны видеть внутренности; лог-хелпер
@@ -649,13 +675,42 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// Дождаться завершения фоновой сессии (используется при закрытии окна).
+/// Дождаться завершения фоновой сессии при закрытии окна.
+///
+/// Сначала просим сессию остановиться, затем ждём поток, но не дольше
+/// [`JOIN_TIMEOUT`]. Раньше закрытие окна ждало `join()` без предела: если
+/// движок завис (например, поток ждал ресурс), приложение не закрывалось
+/// вообще и выглядело зависшим. По истечении времени мы отходим — сессия
+/// запишет контрольную точку, и её можно будет продолстить при следующем
+/// запуске (ровно для этого точка и существует).
 pub fn join(runner: &Arc<Mutex<Option<RunnerHandle>>>) {
-    let handle = runner
-        .lock()
-        .ok()
-        .and_then(|mut guard| guard.as_mut().and_then(|h| h.join.take()));
-    if let Some(h) = handle {
+    let (cancel, handle) = {
+        let Ok(mut guard) = runner.lock() else { return };
+        match guard.as_mut() {
+            Some(h) => (Some(Arc::clone(&h.cancel)), h.join.take()),
+            None => (None, None),
+        }
+    };
+    if let Some(c) = cancel {
+        c.store(true, Ordering::Relaxed);
+    }
+    let Some(h) = handle else { return };
+    if h.thread().id() == std::thread::current().id() {
+        // Вызвано из самого потока сессии: ждать себя нельзя.
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let _ = h.join();
+        let _ = tx.send(());
+    });
+    if rx
+        .recv_timeout(Duration::from_millis(JOIN_TIMEOUT_MS))
+        .is_err()
+    {
+        eprintln!(
+            "сессия не завершилась за {} с — закрытие приложения продолжается",
+            JOIN_TIMEOUT_MS
+        );
     }
 }

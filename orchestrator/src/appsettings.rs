@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::checkpoint::{atomic_write, data_dir};
+use crate::checkpoint::data_dir;
 
 /// Имя файла настроек в каталоге данных.
 pub const APPSETTINGS_FILE_NAME: &str = "appsettings.json";
@@ -128,11 +128,7 @@ impl AppSettings {
 
     /// Загрузить из конкретного пути.
     pub fn load_from(path: &Path) -> Self {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(_) => return Self::default(),
-        };
-        serde_json::from_str(&text).unwrap_or_default()
+        crate::storage::read_json(path).unwrap_or_default()
     }
 
     /// Сохранить настройки по стандартному пути (атомарно).
@@ -142,16 +138,13 @@ impl AppSettings {
 
     /// Сохранить настройки в указанный путь (атомарно, каталоги создаются).
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        atomic_write(path, &bytes)
+        crate::storage::atomic_write(path, &bytes)
     }
 
     /// Изменить настройки через замыкание и автосохранить («автосохранение
-    /// при изменениях» по спецификации) в стандартный файл.
+    /// при изменениях» по спецификации) в стандартном файле.
     pub fn update<F: FnOnce(&mut Self)>(&mut self, f: F) -> io::Result<()> {
         self.update_to(&appsettings_path(), f)
     }
@@ -160,6 +153,36 @@ impl AppSettings {
     pub fn update_to<F: FnOnce(&mut Self)>(&mut self, path: &Path, f: F) -> io::Result<()> {
         f(self);
         self.save_to(path)
+    }
+
+    /// Изменить настройки по стандартному пути **под блокировкой файла**.
+    ///
+    /// Настройки меняются из нескольких мест одновременно: команды интерфейса
+    /// (избранное, исключение схем, внешний вид) идут на пуле потоков Tauri,
+    /// а `set_settings` целиком перезаписывает файл. Без блокировки параллельные
+    /// правки затирали друг друга — пользователь терял, например, отметку
+    /// «избранное», сохранённую секундой раньше.
+    pub fn update_locked<F: FnOnce(&mut Self)>(f: F) -> io::Result<()> {
+        let path = appsettings_path();
+        // `Option` позволяет вызвать замыкание ровно один раз: `update_file`
+        // гарантирует единственный вызов, но компилятор этого не знает.
+        let mut f = Some(f);
+        let mut applied = false;
+        crate::storage::update_file(&path, |cur| {
+            let mut s: Self = serde_json::from_slice(cur).unwrap_or_default();
+            if let Some(apply) = f.take() {
+                apply(&mut s);
+            }
+            applied = true;
+            serde_json::to_vec_pretty(&s).unwrap_or_default()
+        })?;
+        if let Some(apply) = f {
+            // Файл не читался и остался пустым — записываем дефолты с правкой.
+            let mut s = Self::default();
+            apply(&mut s);
+            s.save_to(&path)?;
+        }
+        Ok(())
     }
 }
 

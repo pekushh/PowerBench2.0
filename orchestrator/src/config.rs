@@ -1,4 +1,12 @@
 //! Конфигурация сессии, пресеты, деление длительности на фазы и план раундов.
+//!
+//! Здесь же — единственный источник правды про длительность сессии:
+//! [`estimate_run_seconds`] и [`format_estimate`], которыми пользуются и
+//! оркестратор, и интерфейс, поэтому оценка времени не расходится с фактом.
+
+use crate::session::{
+    BACKGROUND_ATTEMPTS, BACKGROUND_MEASURE_MS, BACKGROUND_RETRY_PAUSE_MS,
+};
 
 /// Пресет «Быстрый»: длительность 9 с, разогрев 2 с, охлаждение 1 с, повторов 1.
 pub const QUICK_PRESET: Preset = Preset {
@@ -62,6 +70,86 @@ pub const MAX_WORKER_COUNT: usize = 256;
 pub const DEFAULT_BACKGROUND_PERCENT: f64 = 5.0;
 pub const MIN_BACKGROUND_PERCENT: f64 = 0.5;
 pub const MAX_BACKGROUND_PERCENT: f64 = 100.0;
+
+/// Пауза после применения схемы питания (секунды). Ждём, чтобы Windows
+/// переключила профиль питания до начала замера.
+pub const PAUSE_AFTER_SCHEME_SECS: u64 = 3;
+/// Стабилизационная пауза после каждой измеряемой фазы (секунды): даёт
+/// затухнуть эффекту только что прошедшей нагрузки.
+pub const STABILIZATION_SECS: u64 = 2;
+/// Пауза охлаждения между прогонами по умолчанию (секунды).
+pub const DEFAULT_COOLING_SECS: u64 = 5;
+/// Число измеряемых фаз в прогоне (Лёгкая, Тяжёлая, Отклик).
+pub const PHASES_PER_RUN: u64 = 3;
+/// Оценка времени проверки фоновой нагрузки: одна попытка, а при шуме —
+/// до трёх с паузами между ними.
+pub const BACKGROUND_CHECK_SECS: f64 =
+    BACKGROUND_MEASURE_MS as f64 / 1000.0
+        + (BACKGROUND_ATTEMPTS as f64 - 1.0) * BACKGROUND_RETRY_PAUSE_MS as f64 / 1000.0;
+
+/// Оценка полного времени сессии в секундах.
+///
+/// Считает все стадии прогона одной схемы, а не только измеряемое время:
+///
+/// ```text
+/// на прогон = длительность фаз + разогрев
+///            + пауза после схемы + стабилизация после каждой фазы
+///            + проверка фона + охлаждение
+/// сессия    = сумма прогонов по всем схемам × повторы
+/// ```
+///
+/// Это ровно то, что делает `run_session_loop`, поэтому оценка не врёт про
+/// «лишние» минуты. Публичная функция — тем же считает и интерфейс.
+pub fn estimate_run_seconds(
+    duration_seconds: u64,
+    warmup_seconds: u64,
+    cooling_seconds: u64,
+    repetitions: u32,
+    scheme_count: usize,
+) -> f64 {
+    if scheme_count == 0 || repetitions == 0 {
+        return 0.0;
+    }
+    let per_run = duration_seconds as f64
+        + warmup_seconds as f64
+        + PAUSE_AFTER_SCHEME_SECS as f64
+        + STABILIZATION_SECS as f64 * PHASES_PER_RUN as f64
+        + BACKGROUND_CHECK_SECS;
+    // Охлаждение идёт после каждого прогона, кроме последнего в плане.
+    let per_round = per_run * scheme_count as f64
+        + cooling_seconds as f64 * (scheme_count as f64 - 1.0);
+    per_round * repetitions as f64
+}
+
+/// Человекочитаемая оценка времени: «около 2 ч 15 мин», «около 40 с».
+///
+/// Разделяет округление на минуты и десятки секунд: оценка вида «~14 с» или
+/// «~~1 мин 41 с» выглядит как мусор и обесценивает обещание пользователю.
+pub fn format_estimate(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return "—".to_string();
+    }
+    let total = seconds.round() as u64;
+    if total < 60 {
+        return format!("около {total} с");
+    }
+    let minutes = total / 60;
+    let secs = total % 60;
+    if minutes < 60 {
+        return if secs == 0 {
+            format!("около {minutes} мин")
+        } else {
+            format!("около {minutes} мин {secs} с")
+        };
+    }
+    let hours = minutes / 60;
+    let rem = minutes % 60;
+    if rem == 0 {
+        format!("около {hours} ч")
+    } else {
+        format!("около {hours} ч {rem} мин")
+    }
+}
 
 /// Валидация параметров сценария. Возвращает человекочитаемую причину
 /// невалидности, либо `None` при валидных значениях.
@@ -159,6 +247,42 @@ pub const fn phase_durations(total: u64) -> PhaseDurations {
     }
 }
 
+/// Канонический порядок схем для плана: **активная схема всегда первая**,
+/// остальные — строго в порядке, заданном пользователем.
+///
+/// Активная идёт первой по практической причине: её почти всегда ставят
+/// первой вручную, и когда она попадала в середину, первый раунд начинал
+/// замер с чужой схемы, а восстановление после прерывания возвращало неё —
+/// то есть система возвращала пользователя к тому, что и так стояло.
+/// Заодно видимый пользователем порядок становится равным порядку выполнения.
+pub fn canonical_scheme_order(scheme_ids: &[String], active: Option<&str>) -> Vec<String> {
+    let Some(active) = active else {
+        return scheme_ids.to_vec();
+    };
+    let mut first: Option<String> = None;
+    let mut rest = Vec::with_capacity(scheme_ids.len());
+    for id in scheme_ids {
+        if id.eq_ignore_ascii_case(active) {
+            // Каноническое написание берём из плана (регистр GUID от powercfg).
+            if first.is_none() {
+                first = Some(id.clone());
+            }
+        } else {
+            rest.push(id.clone());
+        }
+    }
+    match first {
+        Some(head) => {
+            let mut out = Vec::with_capacity(scheme_ids.len());
+            out.push(head);
+            out.extend(rest);
+            out
+        }
+        // Активной схемы нет в выборе (пользователь её снял) — порядок как есть.
+        None => scheme_ids.to_vec(),
+    }
+}
+
 /// Порядок схем в раунде: ротация против «кто первый» (спецификация).
 ///
 /// ```text
@@ -196,6 +320,68 @@ pub fn run_key(round: u32, plan_guid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Оценка времени учитывает паузу после схемы, стабилизации, проверку
+    /// фона и охлаждение — иначе она систематически занижена.
+    #[test]
+    fn estimate_covers_every_stage() {
+        let per_run = 30.0 + 6.0 + PAUSE_AFTER_SCHEME_SECS as f64
+            + STABILIZATION_SECS as f64 * PHASES_PER_RUN as f64
+            + BACKGROUND_CHECK_SECS;
+        let expected = (per_run * 2.0 + 5.0) * 3.0;
+        let s = estimate_run_seconds(30, 6, 5, 3, 2);
+        assert!((s - expected).abs() < 1.0, "оценка {s} != {expected}");
+        assert!(estimate_run_seconds(30, 6, 5, 3, 3) > s);
+        assert!(estimate_run_seconds(30, 6, 5, 4, 2) > s);
+        assert_eq!(estimate_run_seconds(30, 6, 5, 3, 0), 0.0);
+        assert_eq!(estimate_run_seconds(30, 6, 5, 0, 2), 0.0);
+    }
+
+    /// Оценка читаема: без тильд и «~~», с понятными единицами.
+    #[test]
+    fn estimate_formatting_is_readable() {
+        assert_eq!(format_estimate(45.0), "около 45 с");
+        assert_eq!(format_estimate(0.0), "—");
+        assert_eq!(format_estimate(-5.0), "—");
+        assert_eq!(format_estimate(f64::NAN), "—");
+        assert_eq!(format_estimate(60.0), "около 1 мин");
+        assert_eq!(format_estimate(101.0), "около 1 мин 41 с");
+        assert_eq!(format_estimate(3600.0), "около 1 ч");
+        assert_eq!(format_estimate(5400.0), "около 1 ч 30 мин");
+        for v in [1.0, 14.0, 59.0, 119.0, 3599.0, 7200.0] {
+            let s = format_estimate(v);
+            assert!(!s.contains('~'), "лишняя тильда: {s}");
+        }
+    }
+
+    /// Активная схема всегда первая, остальные — в порядке пользователя.
+    #[test]
+    fn active_scheme_is_moved_to_front() {
+        let ids: Vec<String> = ["b", "a", "c"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            canonical_scheme_order(&ids, Some("c")),
+            vec!["c", "b", "a"],
+            "активная схема не перенесена в начало"
+        );
+        // Регистр GUID игнорируется.
+        assert_eq!(
+            canonical_scheme_order(&ids, Some("A")),
+            vec!["a", "b", "c"]
+        );
+        // Активной среди выбранных нет — порядок не трогаем.
+        assert_eq!(canonical_scheme_order(&ids, Some("zzz")), ids);
+        assert_eq!(canonical_scheme_order(&ids, None), ids);
+        // Пустой выбор.
+        assert!(canonical_scheme_order(&[], Some("a")).is_empty());
+    }
+
+    /// Первый раунд идёт ровно в каноническом порядке плана.
+    #[test]
+    fn first_round_follows_canonical_order() {
+        let plan: Vec<String> = ["z", "y", "x"].iter().map(|s| s.to_string()).collect();
+        let ordered = canonical_scheme_order(&plan, Some("y"));
+        assert_eq!(round_order(&ordered, 0), ordered);
+    }
 
     fn cfg(preset: Preset, threshold: f64) -> SessionConfig {
         SessionConfig {

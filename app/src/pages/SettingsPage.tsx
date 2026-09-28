@@ -1,14 +1,21 @@
 // Страница «Настройки»: оформление с живым превью, скоринг с донатом,
 // статус окружения, каталоги данных.
 
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { commands, type SettingsDto } from "../api";
-import { Badge, Button, Glass, Seg, Switch } from "../components/ui";
+import { Badge, Button, Field, Glass, NumInput, Seg, Switch } from "../components/ui";
 import { ShieldIcon, SocketIcon } from "../components/icons";
 import { pushToast } from "../store";
 
 type ModeName = "Dark" | "Light" | "Auto";
 
+/** Отсечение неизвестного значения: без него `Seg` остался бы без выбора. */
+function isMode(v: string): v is ModeName {
+  return v === "Dark" || v === "Light" || v === "Auto";
+}
+
+// Цвета весов повторяют акценты палитры приложения (info, violet, warn) и
+// служат только для этого кольца.
 const WEIGHT_COLORS = ["#5aa2f2", "#a78bfa", "#e4b46f"];
 
 function WSlider({
@@ -78,7 +85,10 @@ function Donut({ values }: { values: { label: string; value: number; color: stri
             : null}
         </svg>
         <div className="donut-center">
-          <b>100%</b>
+          {/* Сумма весов может быть любой — при подсчёте они нормализуются.
+              Показываем реальную сумму, а не жёсткие «100%»: иначе кольцо
+              говорило бы «всего 100%», а легенда под ним — 50/30/20. */}
+          <b>{Math.round(total)}%</b>
           <span>всего</span>
         </div>
       </div>
@@ -87,7 +97,7 @@ function Donut({ values }: { values: { label: string; value: number; color: stri
           <div className="row" key={i}>
             <i style={{ background: v.color }} />
             <span>{v.label}</span>
-            <b>{Math.round(v.value)}%</b>
+            <b>{total > 0 ? Math.round((v.value / total) * 100) : 0}%</b>
           </div>
         ))}
       </div>
@@ -101,6 +111,9 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
   const [ac, setAc] = useState<boolean | null>(null);
   const [dataDir, setDataDir] = useState("");
   const [cfgDir, setCfgDir] = useState("");
+  // Очередь записей. Хук объявлен до раннего возврата ниже: хуки нельзя
+  // вызывать условно.
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
 
   useEffect(() => {
     commands.getSettings().then(setSt).catch(() => undefined);
@@ -112,10 +125,30 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
 
   if (!st) return <div className="page">Загрузка настроек…</div>;
 
+  // Записи настроек выстраиваются в очередь. Без неё каждый слайдер писал
+  // «прочитал → изменил → записал» сам по себе, и два быстрых движения
+  // ползунком затирали друг друга.
   const patch = (p: Partial<SettingsDto>) => {
-    const next = { ...st, ...p };
-    setSt(next);
-    commands.setSettings(next).then(() => onAppearance(next)).catch((e) => pushToast("err", String(e)));
+    setSt((prev) => {
+      if (!prev) return prev;
+      // Показываем новое значение сразу (слайдеры должны реагировать), но при
+      // ошибке возвращаем старое: иначе экран показывал бы настройки,
+      // которых на диске нет.
+      const next = { ...prev, ...p };
+      queue.current = queue.current
+        .then(() => commands.setSettings(next))
+        .then(() => onAppearance(next))
+        .catch((e: unknown) => {
+          pushToast("err", `Настройка не сохранена: ${String(e)}`);
+          // Перечитываем реальное состояние: иначе экран продолжал бы
+          // показывать значение, которого на диске нет.
+          commands
+            .getSettings()
+            .then(setSt)
+            .catch(() => undefined);
+        });
+      return next;
+    });
   };
 
   const weightsSum = st.score_performance + st.score_stability + st.score_worst_second;
@@ -127,6 +160,8 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
         <div className="actions">
           <Button
             variant="ghost"
+            disabled={!dataDir}
+            title={dataDir || undefined}
             onClick={() => dataDir && commands.openFolder(dataDir).catch((e) => pushToast("err", String(e)))}
           >
             Папка результатов
@@ -163,14 +198,17 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
         </div>
         <div className="appearance-controls">
           <div className="field">
-            <label>Тема</label>
+            <span className="field-label">Тема</span>
             <Seg
+              label="Тема оформления"
               options={[
                 { value: "Dark", label: "Тёмная" },
                 { value: "Light", label: "Светлая" },
                 { value: "Auto", label: "Авто" },
               ]}
-              value={st.mode as ModeName}
+              // Значение приходит строкой: неизвестное отображаем как «Авто»,
+              // иначе `Seg` остался бы без выбранного пункта.
+              value={isMode(st.mode) ? st.mode : "Auto"}
               onChange={(v) => patch({ mode: v })}
             />
           </div>
@@ -210,7 +248,8 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
           />
           {weightsSum <= 0 ? (
             <div style={{ paddingTop: 12 }}>
-              <Badge kind="danger">Сумма весов должна быть больше 0.</Badge>
+              {/* Без точки — это короткая метка. */}
+              <Badge kind="danger">Сумма весов должна быть больше нуля</Badge>
             </div>
           ) : null}
           <button
@@ -222,7 +261,7 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
           </button>
         </div>
         <div className="donut-pane">
-          <div className="donut-title">Распределение веса</div>
+          <div className="donut-title">Распределение весов</div>
           <Donut
             values={[
               { label: "Производительность", value: st.score_performance, color: WEIGHT_COLORS[0] },
@@ -231,14 +270,85 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
             ]}
           />
           <div className="donut-chips">
-            <span className={`status-chip ${adm ? "is-ok" : "is-bad"}`} title={adm ? "Запуск от имени администратора" : "Нет прав администратора"}>
+            {/* Пока проверка не завершена, чип не должен мигать красным:
+                `null` — это «неизвестно», а не «прав нет». */}
+            <span
+              className={`status-chip ${adm == null ? "" : adm ? "is-ok" : "is-bad"}`}
+              title={adm ? "Запуск от имени администратора" : "Нет прав администратора"}
+            >
               <ShieldIcon />
               {adm == null ? "…" : adm ? "Администратор" : "Нет прав"}
             </span>
-            <span className={`status-chip ${ac ? "is-ok" : "is-bad"}`} title={ac ? "Питание от сети" : "Работа от батареи"}>
+            <span
+              className={`status-chip ${ac == null ? "" : ac ? "is-ok" : "is-bad"}`}
+              title={ac ? "Питание от сети" : "Работа от батареи"}
+            >
               <SocketIcon />
               {ac == null ? "…" : ac ? "Сеть" : "Батарея"}
             </span>
+          </div>
+        </div>
+      </Glass>
+
+      <div className="section-head">
+        <h2 className="section-title">Параметры теста по умолчанию</h2>
+        <span className="hint">
+          Применяются при запуске из режима «Быстро» или «Детально» и сохраняются
+          между запусками.
+        </span>
+      </div>
+      <Glass className="appearance-card">
+        <div className="appearance-controls">
+          <div className="grid2">
+            <Field label="Длительность теста, с">
+              <NumInput
+                value={st.duration_seconds}
+                min={9}
+                max={600}
+                step={1}
+                unit="с"
+                onChange={(v) => patch({ duration_seconds: v })}
+              />
+            </Field>
+            <Field label="Разогрев, с">
+              <NumInput
+                value={st.warmup_seconds}
+                min={2}
+                max={120}
+                step={1}
+                unit="с"
+                onChange={(v) => patch({ warmup_seconds: v })}
+              />
+            </Field>
+            <Field label="Охлаждение между схемами, с">
+              <NumInput
+                value={st.cooling_seconds}
+                min={0}
+                max={120}
+                step={1}
+                unit="с"
+                onChange={(v) => patch({ cooling_seconds: v })}
+              />
+            </Field>
+            <Field label="Повторов">
+              <NumInput
+                value={st.repetitions}
+                min={1}
+                max={20}
+                step={1}
+                onChange={(v) => patch({ repetitions: v })}
+              />
+            </Field>
+            <Field label="Порог фоновой нагрузки, %">
+              <NumInput
+                value={st.background_threshold_percent}
+                min={0}
+                max={100}
+                step={0.5}
+                unit="%"
+                onChange={(v) => patch({ background_threshold_percent: v })}
+              />
+            </Field>
           </div>
         </div>
       </Glass>

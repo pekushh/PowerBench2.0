@@ -13,7 +13,6 @@ use windows_sys::Win32::System::Power::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
-
 /// Версия диагностики (часть CompatibilitySignature).
 pub const DIAGNOSTICS_VERSION: &str = "0.1.0";
 
@@ -53,9 +52,34 @@ pub fn cpu_identifier() -> String {
 }
 
 /// Проверка прав администратора при старте.
+///
+/// `IsUserAnAdmin` — shell-API: он возвращает `true` для админской учётной
+/// записи, запущенной **без повышения** (split token). Тогда диагностика
+/// считала окружение готовым, а `powercfg /setactive` падал с «access denied»
+/// уже посреди бенчмарка. Поэтому спрашиваем настоящее состояние токена:
+/// `TokenElevation == 1` означает, что процесс действительно повышен.
 pub fn is_admin() -> bool {
     #[cfg(windows)]
     {
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TokenElevation};
+        // Псевдодескриптор текущего процесса (GetCurrentProcess()).
+        const CURRENT_PROCESS: HANDLE = std::ptr::null_mut();
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut returned: u32 = 0;
+        let ok = unsafe {
+            GetTokenInformation(
+                CURRENT_PROCESS,
+                TokenElevation,
+                std::ptr::addr_of_mut!(elevation).cast(),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut returned,
+            )
+        };
+        if ok != 0 {
+            return elevation.TokenIsElevated != 0;
+        }
+        // Не удалось определить — не блокируем запуск из-за проверки.
         unsafe { IsUserAnAdmin() != 0 }
     }
     #[cfg(not(windows))]
@@ -110,8 +134,15 @@ pub fn decode_oem(bytes: &[u8]) -> String {
 }
 
 /// Запрет сна и отключения дисплея на время сессии; снимается при Drop.
+///
+/// `SetThreadExecutionState` возвращает **предыдущее** состояние потока, и его
+/// нужно вернуть при снятии guard'а. Прежний код ставил `ES_CONTINUOUS` (то
+/// есть «разрешить сон»), из-за чего два вложенных guard'а ломали друг друга:
+/// снятие внешнего разрешало сон, пока внутренний ещё был жив.
 #[derive(Debug)]
 pub struct SleepGuard {
+    #[cfg(windows)]
+    previous: EXECUTION_STATE,
     #[cfg(windows)]
     active: bool,
 }
@@ -126,7 +157,10 @@ impl SleepGuard {
             if prev == 0 {
                 return Err(PowerError::SleepPreventionFailed);
             }
-            Ok(Self { active: true })
+            Ok(Self {
+                previous: prev,
+                active: true,
+            })
         }
         #[cfg(not(windows))]
         {
@@ -140,7 +174,9 @@ impl Drop for SleepGuard {
         #[cfg(windows)]
         {
             if self.active {
-                unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+                // Возвращаем состояние, которое было до guard'а, а не «разрешить
+                // сон»: так вложенные guard'а работают корректно.
+                unsafe { SetThreadExecutionState(self.previous) };
                 self.active = false;
             }
         }

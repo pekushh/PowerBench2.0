@@ -74,8 +74,14 @@ impl SampleBuffer {
 }
 
 /// Ёмкость буфера сэмплов под длительность фазы (правила спецификации).
+///
+/// Умножение насыщающее: `duration_secs * 32000` переполнялось на больших
+/// значениях (паника в debug, wrap в release с последующим неверным размером
+/// буфера). Верхняя граница и так достигается гораздо раньше переполнения.
 pub fn capacity_for(phase: Phase, duration_secs: u64) -> usize {
-    let raw = duration_secs * ESTIMATED_MAX_TICKS_PER_SEC;
+    let max_secs = (MAX_SAMPLE_CAPACITY as u64) / ESTIMATED_MAX_TICKS_PER_SEC + 2;
+    let seconds = duration_secs.min(max_secs);
+    let raw = seconds.saturating_mul(ESTIMATED_MAX_TICKS_PER_SEC);
     let clamped = (raw as usize).clamp(MIN_SAMPLE_CAPACITY, MAX_SAMPLE_CAPACITY);
     if phase == Phase::Response {
         // Округление ВВЕРХ до кратности 256, но не выше максимума.
@@ -86,17 +92,18 @@ pub fn capacity_for(phase: Phase, duration_secs: u64) -> usize {
     }
 }
 
-/// Ёмкость буфера, достаточная для `ticks` тиков (для прогонов по числу тиков).
-pub fn capacity_for_ticks(phase: Phase, ticks: u64) -> usize {
-    if ticks == 0 {
-        return MIN_SAMPLE_CAPACITY;
+    /// Ёмкость буфера, достаточная для `ticks` тиков (для прогонов по числу тиков).
+    pub fn capacity_for_ticks(phase: Phase, ticks: u64) -> usize {
+        if ticks == 0 {
+            return MIN_SAMPLE_CAPACITY;
+        }
+        let ticks = ticks.min(MAX_SAMPLE_CAPACITY as u64);
+        let seconds = ticks.div_ceil(ESTIMATED_MAX_TICKS_PER_SEC).max(1);
+        let c = capacity_for(phase, seconds);
+        // Гарантия: capacity >= ticks (за счёт оценки сверху 32000/+1 секунды).
+        debug_assert!(c as u64 >= ticks);
+        c
     }
-    let seconds = ticks.div_ceil(ESTIMATED_MAX_TICKS_PER_SEC).max(1);
-    let c = capacity_for(phase, seconds);
-    // Гарантия: capacity >= ticks (за счёт оценки сверху 32000/+1 секунды).
-    debug_assert!(c as u64 >= ticks);
-    c
-}
 
 #[cfg(test)]
 mod tests {
@@ -118,6 +125,22 @@ mod tests {
         assert_eq!(capacity_for(Phase::Heavy, 1_000_000), MAX_SAMPLE_CAPACITY);
         assert!(capacity_for(Phase::Response, 1_000_000) <= MAX_SAMPLE_CAPACITY);
     }
+
+    /// Регресс: огромные длительности не должны переполнять расчёт ёмкости.
+    #[test]
+    fn capacity_survives_absurd_durations() {
+        let _g = crate::tests::lock();
+        for secs in [u64::MAX, u64::MAX / 2, 1 << 40, 10_000_000] {
+            let c = capacity_for(Phase::Light, secs);
+            assert_eq!(c, MAX_SAMPLE_CAPACITY, "секунд={secs}");
+            let r = capacity_for(Phase::Response, secs);
+            assert!(r <= MAX_SAMPLE_CAPACITY);
+        }
+        // По числу тиков — тоже без паники.
+        let c = capacity_for_ticks(Phase::Response, u64::MAX);
+        assert!(c <= MAX_SAMPLE_CAPACITY);
+    }
+
 
     #[test]
     fn capacity_for_ticks_is_sufficient() {

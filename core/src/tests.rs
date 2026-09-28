@@ -199,6 +199,83 @@ fn cancellation_is_bounded_and_pool_recovers() {
     assert_eq!(a.run_checksum, b.run_checksum);
 }
 
+/// Регресс: после отмены пул обязан быть «тихим» перед reset, иначе воркер,
+/// не уложившийся в грейс, писал бы в буферы сущностей параллельно с
+/// `EntityBuffers::reset()` из главного потока (гонка памяти и рассинхрон
+/// контрольных сумм). Проверяем инвариант напрямую и через reset.
+#[test]
+fn reset_waits_for_pool_quiescence() {
+    let _g = lock();
+    let mut engine = Engine::new(Some(4));
+    engine.reset();
+    let canceller = engine.canceller();
+
+    // Отменяем длинную фазу и дожидаемся её выхода.
+    let result = std::thread::scope(|s| {
+        let handled = s.spawn(|| {
+            engine.prepare_sample_buffer(Phase::Heavy, 60);
+            engine.run_phase(Phase::Heavy, RunTarget::Duration(Duration::from_secs(60)))
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        canceller.store(true, Ordering::Release);
+        handled.join().unwrap()
+    });
+    assert!(matches!(result, Err(RunError::Cancelled)));
+
+    // `reset` сам дожидается тишины — после него пул обязан быть quiesced.
+    engine.reset();
+    assert!(
+        engine.pool_quiesced(),
+        "пул не затих после reset: воркеры могли писать в буферы"
+    );
+
+    // И последующие прогоны детерминированы (нет остаточных записей).
+    engine.reset();
+    let a = engine
+        .run_phase(Phase::Heavy, RunTarget::Ticks(64))
+        .unwrap();
+    engine.reset();
+    let b = engine
+        .run_phase(Phase::Heavy, RunTarget::Ticks(64))
+        .unwrap();
+    assert_eq!(a.run_checksum, b.run_checksum);
+}
+
+/// Регресс: опоздавший отчёт воркера по устаревшей эпохе не должен засчитываться
+/// в следующем батче. Эмулируем ситуацию «отмена, грейс истёк, reset, новый
+/// батч» и убеждаемся, что контрольные суммы нового батча корректны.
+#[test]
+fn late_worker_report_does_not_corrupt_next_batch() {
+    let _g = lock();
+    let mut engine = Engine::new(Some(4));
+    engine.reset();
+    // Серия отмен «туда-обратно» многократно нагружает окно гонки.
+    for _ in 0..10 {
+        let canceller = engine.canceller();
+        let _ = std::thread::scope(|s| {
+            let handled = s.spawn(|| {
+                engine.prepare_sample_buffer(Phase::Heavy, 30);
+                engine.run_phase(Phase::Heavy, RunTarget::Duration(Duration::from_secs(30)))
+            });
+            std::thread::sleep(Duration::from_millis(20));
+            canceller.store(true, Ordering::Release);
+            handled.join().unwrap()
+        });
+        engine.reset();
+    }
+    // Финальный эталонный прогон должен совпасть с чистым.
+    engine.reset();
+    let a = engine
+        .run_phase(Phase::Heavy, RunTarget::Ticks(64))
+        .unwrap();
+    engine.reset();
+    let b = engine
+        .run_phase(Phase::Heavy, RunTarget::Ticks(64))
+        .unwrap();
+    assert_eq!(a.run_checksum, b.run_checksum, "гонка отчётов испортила батч");
+    assert_eq!(a.first_tick_checksum, b.first_tick_checksum);
+}
+
 /// Ошибка `SampleCapacityReached`, а не тихое обрезание.
 #[test]
 fn sample_capacity_reached_is_an_error() {

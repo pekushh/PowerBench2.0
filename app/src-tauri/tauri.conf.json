@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "identifier": "ru.pekushh.powerbench",
   "build": {
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
+    "beforeDevCommand": "npm run build",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../build-ui"
   },
   "app": {
@@ -15,14 +15,16 @@
         "label": "main",
         "width": 1200,
         "height": 800,
-        "resizable": false,
-        "maximizable": false,
+        "minWidth": 900,
+        "minHeight": 640,
+        "resizable": true,
+        "maximizable": true,
         "center": true,
         "decorations": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {

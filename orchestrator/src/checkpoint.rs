@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use powerbench_metrics::run::RunStats;
 use powerbench_windows::monitor::CorrelatedProcess;
@@ -125,9 +125,7 @@ pub fn checkpoint_path() -> PathBuf {
 
 /// Загрузить контрольную точку, если существует и читается.
 pub fn load_checkpoint() -> Option<Checkpoint> {
-    let path = checkpoint_path();
-    let text = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&text).ok()
+    crate::storage::read_json(&checkpoint_path())
 }
 
 /// Сохранить контрольную точку: атомарная запись (временный файл + перемещение).
@@ -136,7 +134,7 @@ pub fn save_checkpoint(checkpoint: &Checkpoint) -> io::Result<()> {
     std::fs::create_dir_all(&dir)?;
     let bytes = serde_json::to_vec_pretty(checkpoint)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    atomic_write(&dir.join(CHECKPOINT_FILE_NAME), &bytes)
+    crate::storage::atomic_write(&dir.join(CHECKPOINT_FILE_NAME), &bytes)
 }
 
 /// Удалить контрольную точку. Отсутствие файла — не ошибка.
@@ -145,11 +143,7 @@ pub fn save_checkpoint(checkpoint: &Checkpoint) -> io::Result<()> {
 /// сессии: без этого новый план всегда падал бы с `CheckpointPlanMismatch`,
 /// потому что на диске лежит точка прошлого плана.
 pub fn clear_checkpoint() -> io::Result<()> {
-    match std::fs::remove_file(checkpoint_path()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+    crate::storage::remove_file_if_exists(&checkpoint_path())
 }
 
 impl StoredRun {
@@ -189,48 +183,8 @@ impl StoredRun {
 }
 
 /// Атомарная запись файла: пишем во временный файл рядом и перемещаем.
-pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes)?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-        };
-        let from = tmp
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<u16>>();
-        let to = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<u16>>();
-        let ok = unsafe {
-            MoveFileExW(
-                from.as_ptr(),
-                to.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if ok == 0 {
-            let err = io::Error::last_os_error();
-            let _ = std::fs::remove_file(&tmp);
-            return Err(err);
-        }
-        let _ = std::fs::remove_file(&tmp);
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::rename(&tmp, path)
-    }
-}
+/// Уникальное имя временного файла на запись (см. `storage::atomic_write`).
+pub use crate::storage::atomic_write;
 
 #[cfg(test)]
 mod tests {
@@ -341,7 +295,7 @@ mod tests {
     #[test]
     fn clear_checkpoint_is_idempotent() {
         // Регресс: без очистки новый план падал бы с CheckpointPlanMismatch.
-        clear_checkpoint();
+        let _ = clear_checkpoint();
         let cp = Checkpoint::new(plan());
         save_checkpoint(&cp).unwrap();
         assert!(load_checkpoint().is_some());

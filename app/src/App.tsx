@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { commands, onTestFinished, type SettingsDto } from "./api";
-import { setRunning, useToasts } from "./store";
+import { setRunning, useSession, useToasts, pushToast } from "./store";
 import { useScrollFade } from "./components/ui";
 import TitleBar from "./components/TitleBar";
 import { CubeIcon, GearIcon, HomeIcon, ListIcon, PowerIcon } from "./components/icons";
@@ -41,7 +41,10 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [appearance, setAppearance] = useState<SettingsDto | null>(null);
   const toasts = useToasts();
-  const { ref: mainRef, top: mainTop, bottom: mainBottom } = useScrollFade<HTMLElement>();
+  const { ref: mainRef } = useScrollFade<HTMLElement>();
+  // Подписка на «идёт ли сессия» — единственный источник для отключения
+  // анимаций ниже.
+  const { running: sessionRunning } = useSession();
 
   useEffect(() => {
     commands
@@ -58,45 +61,60 @@ export default function App() {
     };
   }, []);
 
+  // Архитектурное отключение анимаций на время замера.
+  //
+  // Пока идёт бенчмарк, интерфейс не должен ничего рисовать «для красоты»:
+  // каждая анимация и transition — это работа главного потока WebView, а она
+  // конкурирует с нагрузкой ядра, которую мы как раз измеряем. Класс на `<html>`
+  // отключает всё разом, включая анимации, добавленные в будущем.
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("bench-running", sessionRunning);
+    return () => root.classList.remove("bench-running");
+  }, [sessionRunning]);
+
   useEffect(() => {
     if (!appearance) return;
-    // Смена темы через View Transitions: плавный кросс-фейд вместо моргания.
-    const swap = (fn: () => void) => {
-      if (document.documentElement.classList.contains("reduce-motion")) {
-        fn();
-        return;
-      }
-      const d = document as Document & {
-        startViewTransition?: (cb: () => void) => void;
-      };
-      if (typeof d.startViewTransition === "function") {
-        try {
-          d.startViewTransition(fn);
-          return;
-        } catch {
-          /* fallback ниже */
-        }
-      }
-      fn();
+    // Применяем новую тему сразу, анимацию настраиваем следом: если сначала
+    // спросить `reduce-motion` у старого класса, решение всегда принималось бы
+    // по предыдущему значению — включение анимировало, выключение нет.
+    const d = document as Document & {
+      startViewTransition?: (cb: () => void) => void;
     };
-    swap(() => applyAppearance(appearance));
+    const animate =
+      !appearance.reduce_motion &&
+      !sessionRunning &&
+      typeof d.startViewTransition === "function";
+    if (animate) {
+      try {
+        d.startViewTransition?.(() => applyAppearance(appearance));
+      } catch {
+        applyAppearance(appearance);
+      }
+    } else {
+      applyAppearance(appearance);
+    }
     if (appearance.mode !== "Auto") return;
     const mq = window.matchMedia("(prefers-color-scheme: light)");
-    const onChange = () => appearance && swap(() => applyAppearance(appearance));
+    const onChange = () => appearance && applyAppearance(appearance);
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
-  }, [appearance]);
+  }, [appearance, sessionRunning]);
 
   const toggleCollapse = useCallback(() => {
-    setCollapsed((c) => {
-      const next = !c;
-      commands
-        .getSettings()
-        .then((s) => commands.setSettings({ ...s, sidebar_collapsed: next }).catch(() => undefined))
-        .catch(() => undefined);
-      return next;
-    });
-  }, []);
+    // Не пишем IPC внутри апдейтера состояния: React вызывает его дважды
+    // (StrictMode) и может вызвать во время чужого обновления. Прочитанное
+    // значение настроек забираем явно, а запись делаем в отдельном потоке.
+    const next = !collapsed;
+    setCollapsed(next);
+    commands
+      .getSettings()
+      .then((s) => commands.setSettings({ ...s, sidebar_collapsed: next }))
+      .catch((e) => {
+        pushToast("err", `Не удалось сохранить состояние панели: ${String(e)}`);
+        setCollapsed(!next);
+      });
+  }, [collapsed]);
 
   const onAppearance = useCallback((s: SettingsDto) => setAppearance(s), []);
 
@@ -107,49 +125,68 @@ export default function App() {
         <aside className={`sidebar fade-in ${collapsed ? "collapsed" : ""}`}>
           <nav className="sidebar-nav">
             {NAV.map((n) => (
-              <div
+              <button
                 key={n.id}
+                type="button"
                 className={`nav-item ${page === n.id ? "active" : ""}`}
                 onClick={() => setPage(n.id)}
+                // Навигация была на `<div onClick>`: с клавиатуры и со
+                // скринридера до неё было не добраться вовсе.
+                aria-current={page === n.id ? "page" : undefined}
                 title={collapsed ? n.label : undefined}
               >
                 <span className="nav-glyph">{n.icon}</span>
                 <span className="nav-label">{n.label}</span>
-              </div>
+              </button>
             ))}
           </nav>
           <div className="sidebar-foot">
-            <div
+            <button
+              type="button"
               className={`nav-item ${page === "settings" ? "active" : ""}`}
               onClick={() => setPage("settings")}
+              aria-current={page === "settings" ? "page" : undefined}
               title={collapsed ? "Настройки" : undefined}
             >
               <span className="nav-glyph">
                 <GearIcon />
               </span>
               <span className="nav-label">Настройки</span>
-            </div>
+            </button>
           </div>
         </aside>
-        <main ref={mainRef} className={`main${mainTop ? " fade-top" : ""}${mainBottom ? " fade-bottom" : ""}`}>
-          <div className={`page-host ${page === "test" ? "on" : ""}`}>
+        <main ref={mainRef} className="main scrolled-x">
+          {/* Активная страница монтируется всегда (в неё возвращается wizard
+              теста), остальные — только когда открыты. Раньше все пять висели в
+              DOM, скрытые `display:none`, и каждая держала свои IPC-вызовы,
+              подписки на события и таймеры всё время работы приложения, в том
+              числе во время замера. */}
+          <div className="page-host on">
             <BenchmarkPage />
           </div>
-          <div className={`page-host ${page === "schemes" ? "on" : ""}`}>
-            <SchemesPage />
-          </div>
-          <div className={`page-host ${page === "results" ? "on" : ""}`}>
-            <ResultsPage />
-          </div>
-          <div className={`page-host ${page === "log" ? "on" : ""}`}>
-            <LogPage />
-          </div>
-          <div className={`page-host ${page === "settings" ? "on" : ""}`}>
-            <SettingsPage onAppearance={onAppearance} />
-          </div>
+          {page === "schemes" ? (
+            <div className="page-host on">
+              <SchemesPage />
+            </div>
+          ) : null}
+          {page === "results" ? (
+            <div className="page-host on">
+              <ResultsPage />
+            </div>
+          ) : null}
+          {page === "log" ? (
+            <div className="page-host on">
+              <LogPage />
+            </div>
+          ) : null}
+          {page === "settings" ? (
+            <div className="page-host on">
+              <SettingsPage onAppearance={onAppearance} />
+            </div>
+          ) : null}
         </main>
       </div>
-      <div className="toasts">
+      <div className="toasts" role="status" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className={`toast glass float ${t.kind}`}>
             {t.text}

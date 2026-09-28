@@ -91,47 +91,49 @@ export interface HistoryRow {
   rounds_completed: number;
 }
 
+/** Статистика прогона в одном диапазоне (зеркало `checkpoint::RunStats`). */
+export interface RunStatsJson {
+  mean: number;
+  median: number;
+  p1: number;
+  p01: number;
+  p95_ms: number;
+  p99_ms: number;
+  std_dev: number;
+  consistency_percent: number;
+  burst_retention_percent: number;
+  jitter_p99_ms: number;
+}
+
+/** Связанный фоновый процесс, измеренный во время прогона. */
+export interface CorrelatedProcessJson {
+  name: string;
+  path: string;
+  median_cpu_percent: number;
+  peak_cpu_percent: number;
+  correlated_spike_windows: number;
+  peak_memory_bytes: number;
+  phases: string[];
+}
+
+/** Один прогон одной схемы (зеркало `checkpoint::StoredRun`). */
 export interface StoredRun {
   key: string;
   round: number;
   scheme_id: string;
   scheme_name: string | null;
-  started_at_ns: string;
+  started_at_ns: number;
   duration_ms: number;
   ticks: number;
   supercycles: number;
-  first_tick_checksums: number[];
-  run_checksums: number[];
-  phases: {
-    phase_index: number;
-    stats: {
-      mean: number;
-      median: number;
-      p1: number;
-      p01: number;
-      p95_ms: number;
-      p99_ms: number;
-      std_dev: number;
-      consistency_percent: number;
-      burst_retention_percent: number;
-      jitter_p99_ms: number;
-    };
-  }[];
-  combined: {
-    mean: number;
-    median: number;
-    p1: number;
-    p01: number;
-    p95_ms: number;
-    p99_ms: number;
-    std_dev: number;
-    consistency_percent: number;
-    burst_retention_percent: number;
-    jitter_p99_ms: number;
-  };
+  /** Ровно три контрольные суммы: загрузка, тяжёлая, отклик. */
+  first_tick_checksums: [number, number, number];
+  run_checksums: [number, number, number];
+  phases: { phase_index: number; stats: RunStatsJson }[];
+  combined: RunStatsJson;
   cross_phase_consistency: number;
   burst_retention_percent: number;
-  background: unknown[];
+  background: CorrelatedProcessJson[];
   spike_windows: number;
 }
 
@@ -156,8 +158,10 @@ export interface SchemeJson {
   median_consistency_percent: number;
   median_burst_retention_percent: number;
   median_jitter_p99_ms: number;
+  /** Медиана прохода фоновой нагрузки, %; `null`, если фона не было. */
+  median_background_purity: number | null;
   run_duration_ms: number;
-  started_at_min_ns: string;
+  started_at_min_ns: number;
   per_run: StoredRun[];
 }
 
@@ -235,8 +239,18 @@ export interface TelemetryMsg {
   phase_elapsed_ms: number;
 }
 
+/**
+ * Уровень записи журнала.
+ *
+ * Раньше здесь стоял союз `"info" | "warn" | "success"`, но бэкенд шлёт ещё
+ * и `error` (ошибки движка, сохранения, отчёта), а потребитель приводил
+ * незнакомые значения вручную. Теперь тип совпадает с тем, что реально
+ * приходит, и `normLevel` на странице логов отвечает за отображение.
+ */
+export type LogLevel = "info" | "warn" | "success" | "error";
+
 export interface LogMsg {
-  level: "info" | "warn" | "success";
+  level: LogLevel;
   text: string;
   ts_ms: number;
 }
@@ -246,11 +260,15 @@ export interface FinishedPayload {
   error: string | null;
   plan_guid: string | null;
   cancelled: boolean | null;
+  early_stopped: boolean;
   result_path: string | null;
+  report_path: string | null;
   level: string | null;
   level_label: string | null;
   recommended_scheme: string | null;
   recommended_name: string | null;
+  expected_margin_percent: number | null;
+  winner_margin_percent: number | null;
 }
 
 // ---------- Команды ----------
@@ -265,7 +283,6 @@ export const commands = {
   setSettings: (settings: SettingsDto) => invoke<void>("set_settings", { settings }),
   checkpointStatus: () => invoke<CheckpointDto | null>("checkpoint_status"),
   checkpointDiscard: () => invoke<void>("checkpoint_discard"),
-  identityInfo: () => invoke<IdentityDto>("identity_info"),
   startTest: (req: TestRequestDto) => invoke<string>("start_test", { req }),
   stopTest: () => invoke<boolean>("stop_test"),
   testRunning: () => invoke<boolean>("test_running"),
@@ -277,6 +294,23 @@ export const commands = {
   sessionReport: (planGuid: string) => invoke<string>("session_report", { planGuid }),
   quarantineList: () => invoke<QuarantineEntry[]>("quarantine_list"),
   quarantineClear: (schemeId: string) => invoke<boolean>("quarantine_clear", { schemeId }),
+  /** Оценка длительности сессии, посчитанная бэкендом. */
+  /** Сбросить журнал на диск (вызывается перед выходом и в тестах). */
+  logFlush: () => invoke<void>("log_flush"),
+  estimateSession: (
+    durationSeconds: number,
+    warmupSeconds: number,
+    coolingSeconds: number,
+    repetitions: number,
+    schemeCount: number,
+  ) =>
+    invoke<{ seconds: number; label: string }>("estimate_session", {
+      durationSeconds,
+      warmupSeconds,
+      coolingSeconds,
+      repetitions,
+      schemeCount,
+    }),
   historyDelete: (fileName: string) => invoke<void>("history_delete", { fileName }),
   historyOpenFolder: () => invoke<void>("history_open_folder"),
   openFolder: (path: string) => invoke<void>("open_folder", { path }),
@@ -305,16 +339,17 @@ export function onTestFinished(cb: (m: FinishedPayload) => void): Promise<Unlist
 
 // ---------- Прочее ----------
 
+/**
+ * Время в формате `ЧЧ:ММ:СС`.
+ *
+ * На вход приходит миллисекунды epoch. Нечисловое или отрицательное значение
+ * даёт `Invalid Date`, из которого получалось «NaN:NaN:NaN», поэтому
+ * невалидные значения показываются прочерком.
+ */
 export function fmtTime(ts: number): string {
+  if (!Number.isFinite(ts) || ts < 0) return "--:--:--";
   const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "--:--:--";
   const p = (n: number, l = 2) => n.toString().padStart(l, "0");
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
-export function fmtNs(ns: string | number): string {
-  const n = Number(ns);
-  if (!n) return "—";
-  const d = new Date(Math.floor(n / 1_000_000));
-  const p = (x: number, l = 2) => x.toString().padStart(l, "0");
-  return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }

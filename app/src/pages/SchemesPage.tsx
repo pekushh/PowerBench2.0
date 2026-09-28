@@ -6,7 +6,7 @@ import { commands, type SchemeRow, type SettingsDto } from "../api";
 import { Badge, Button, Modal } from "../components/ui";
 import { ExportIcon } from "../components/icons";
 import SchemeTiles from "../components/SchemeTiles";
-import { pushToast } from "../store";
+import { pushToast, useSession } from "../store";
 
 export default function SchemesPage() {
   const [schemes, setSchemes] = useState<SchemeRow[]>([]);
@@ -15,6 +15,7 @@ export default function SchemesPage() {
   const [exportTarget, setExportTarget] = useState<string | null>(null);
   const [askRestore, setAskRestore] = useState(false);
   const [busy, setBusy] = useState(false);
+  const { running } = useSession();
 
   const refresh = () => {
     commands.listSchemes().then(setSchemes).catch((e) => pushToast("err", String(e)));
@@ -23,6 +24,9 @@ export default function SchemesPage() {
   };
 
   useEffect(refresh, []);
+  // После сессии список схем мог измениться (схема восстановлена, карантин
+  // обновился) — перечитываем, чтобы страница не показывала устаревшее.
+  useEffect(refresh, [running]);
 
   const exportSel = async () => {
     if (!exportTarget) return;
@@ -31,7 +35,7 @@ export default function SchemesPage() {
       const path = await save({
         title: "Экспорт схемы (.pow)",
         defaultPath: `${sch?.name ?? "scheme"}.pow`,
-        filters: [{ name: "Power scheme", extensions: ["pow"] }],
+        filters: [{ name: "Схема питания Windows (.pow)", extensions: ["pow"] }],
       });
       if (!path) return;
       setBusy(true);
@@ -63,7 +67,7 @@ export default function SchemesPage() {
       const path = await open({
         multiple: false,
         title: "Импорт схемы (.pow)",
-        filters: [{ name: "Power scheme", extensions: ["pow"] }],
+        filters: [{ name: "Схема питания Windows (.pow)", extensions: ["pow"] }],
       });
       if (!path) return;
       setBusy(true);
@@ -97,7 +101,16 @@ export default function SchemesPage() {
     <div className="page">
       <div className="page-head">
         <h1>Схемы питания</h1>
-        <span className="sub">схем: {schemes.length}</span>
+        <span className="sub">
+          {schemes.length}{" "}
+          {schemes.length % 10 === 1 && schemes.length % 100 !== 11
+            ? "схема"
+            : schemes.length % 10 >= 2 &&
+                schemes.length % 10 <= 4 &&
+                !(schemes.length % 100 >= 12 && schemes.length % 100 <= 14)
+              ? "схемы"
+              : "схем"}
+        </span>
         <div className="actions">
           <Button variant="ghost" disabled={busy || !isAdmin} title={isAdmin ? undefined : "Требуются права администратора"} onClick={() => void importScheme()}>
             Импорт .pow
@@ -109,7 +122,8 @@ export default function SchemesPage() {
       </div>
       {!isAdmin ? (
         <div className="hint" style={{ marginBottom: 4 }}>
-          <Badge kind="warn">Изменение схем питания доступно только при запуске от имени администратора.</Badge>
+          {/* Без точки: это короткая метка-подсказка, а не предложение. */}
+          <Badge kind="warn">Требуется запуск от имени администратора</Badge>
         </div>
       ) : null}
       {exportTarget ? (
@@ -132,7 +146,10 @@ export default function SchemesPage() {
         schemes={schemes}
         settings={settings}
         isAdmin={isAdmin}
-        running={false}
+        // Во время замера переключение и удаление схем запрещены: смена схемы
+        // посреди сессии портит результат. Раньше здесь стояло `false`, и
+        // плитки оставались активными даже во время работающего бенчмарка.
+        running={running}
         exportTarget={exportTarget}
         onSelectExport={setExportTarget}
         onChanged={refresh}

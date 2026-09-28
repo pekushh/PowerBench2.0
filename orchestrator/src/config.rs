@@ -8,20 +8,42 @@ use crate::session::{
     BACKGROUND_ATTEMPTS, BACKGROUND_MEASURE_MS, BACKGROUND_RETRY_PAUSE_MS,
 };
 
-/// Пресет «Быстрый»: длительность 9 с, разогрев 2 с, охлаждение 1 с, повторов 1.
+/// Пресет «Быстрый»: длительность 20 с, разогрев 3 с, охлаждение 3 с, повторов 2.
+///
+/// Раньше здесь было 9/2/1/1, а девять секунд — это фазы 3/3/3. Трёх секунд
+/// тяжёлой фазы не хватает, чтобы замер вообще что-то различал: всё это время
+/// процессор ещё разгоняется, схемы питания ведут себя одинаково, а разница
+/// между ними тонет в шуме. Режим «Быстро» отвечает за быструю сравнику, но
+/// сравнивать нечего, если сигнала меньше шума.
+///
+/// 20 секунд дают фазы 6/8/6 — тяжёлая фаза в 2.7 раза длиннее. Два повтора —
+/// минимум, при котором приложение вообще считает разброс: при одном
+/// повторе доверительный интервал пуст, и в отчёте стабильность остаётся
+/// незаполненной.
 pub const QUICK_PRESET: Preset = Preset {
-    duration_seconds: 9,
-    warmup_seconds: 2,
-    cooling_seconds: 1,
-    repetitions: 1,
+    duration_seconds: 20,
+    warmup_seconds: 3,
+    cooling_seconds: 3,
+    repetitions: 2,
 };
 
-/// Пресет «Рекомендуемый» (значения по умолчанию): 30 с, 6 с, 5 с, повторов 3.
+/// Пресет «Детально» (значения по умолчанию): 45 с, 8 с, 5 с, повторов 5.
+///
+/// 45 секунд — фазы 13/19/13: девятнадцать секунд тяжёлой фазы измеряют уже
+/// установившийся режим под нагрузкой, а не разгон, и там политика схемы
+/// (максимальное состояние процессора, агрессивность разгона, охлаждение)
+/// уже вступила в силу.
+///
+/// Пять повторов — не «больше точности вообще», а минимальное число, при
+/// котором адаптивная остановка вообще срабатывает: перевес, достаточный для
+/// раннего выхода, падает с ~35 % на трёх повторах до ~18 % на пяти. Три
+/// повтора обещали экономию времени, которой на практике не происходило —
+/// сессия всё равно шла до конца.
 pub const DETAILED_PRESET: Preset = Preset {
-    duration_seconds: 30,
-    warmup_seconds: 6,
+    duration_seconds: 45,
+    warmup_seconds: 8,
     cooling_seconds: 5,
-    repetitions: 3,
+    repetitions: 5,
 };
 
 /// Пресет сценария (параметры без списка схем и GUID плана).
@@ -398,8 +420,8 @@ mod tests {
 
     #[test]
     fn default_preset_is_detailed() {
-        assert_eq!(DETAILED_PRESET.repetitions, 3);
-        assert_eq!(DETAILED_PRESET.duration_seconds, 30);
+        assert_eq!(DETAILED_PRESET.repetitions, 5);
+        assert_eq!(DETAILED_PRESET.duration_seconds, 45);
     }
 
     #[test]
@@ -407,11 +429,59 @@ mod tests {
         assert_eq!(
             QUICK_PRESET,
             Preset {
-                duration_seconds: 9,
-                warmup_seconds: 2,
-                cooling_seconds: 1,
-                repetitions: 1
+                duration_seconds: 20,
+                warmup_seconds: 3,
+                cooling_seconds: 3,
+                repetitions: 2
             }
+        );
+    }
+
+    /// Тяжёлая фаза пресета — это и есть тот замер, по которому сравнивают
+    /// схемы. Слишком короткая фаза (3 с у прежних 9 с) не даёт сигнала,
+    /// поэтому ниже фиксируем минимумы, а не «как получится».
+    #[test]
+    fn heavy_phase_is_long_enough_to_separate_schemes() {
+        for (name, p, min_heavy) in [
+            ("quick", QUICK_PRESET, 8),
+            ("detailed", DETAILED_PRESET, 19),
+        ] {
+            let d = phase_durations(p.duration_seconds);
+            assert!(
+                d.heavy_seconds >= min_heavy,
+                "{name}: тяжёлая фаза {} с, ожидалось не меньше {min_heavy}",
+                d.heavy_seconds
+            );
+        }
+    }
+
+    /// При одном повторе доверительный интервал не считается (k − 1 = 0), и
+    /// отчёт остаётся без стабильности. Оба пресета обязаны считать разброс.
+    #[test]
+    fn every_preset_allips_a_confidence_interval() {
+        for (name, p) in [("quick", QUICK_PRESET), ("detailed", DETAILED_PRESET)] {
+            assert!(
+                p.repetitions >= 2,
+                "{name}: {} повтор(ов) — интервал не построить",
+                p.repetitions
+            );
+        }
+    }
+
+    /// Адаптивная остановка обязана быть практичной у детального пресета:
+    /// подсказка под полем повторов обещает её пользователю.
+    #[test]
+    fn detailed_preset_allips_early_stop() {
+        // earlyStopNeed повторяет формулу подсказки в интерфейсе:
+        // 2*sqrt(2)*t(0.975, k-1)*cv*100 / sqrt(k), cv = 5 %.
+        let need = |k: u64| {
+            let t = [12.706, 4.303, 3.182, 2.776][(k as usize - 2).min(3)];
+            (2.0 * 2f64.sqrt() * t * 0.05 * 100.0) / (k as f64).sqrt()
+        };
+        assert!(
+            need(DETAILED_PRESET.repetitions as u64) <= 20.0,
+            "нужный перевес {} % — ранняя остановка почти не срабатывает",
+            need(DETAILED_PRESET.repetitions as u64)
         );
     }
 

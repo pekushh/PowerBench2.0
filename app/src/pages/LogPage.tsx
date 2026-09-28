@@ -1,4 +1,4 @@
-// Страница «Логи»: старт приложения, ошибки и события сессий.
+// Страница «Логи»: фильтруемый журнал запуска, ошибок и событий сессий.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { commands, onLog, type LoggerEntry } from "../api";
@@ -127,7 +127,6 @@ export default function LogPage() {
     <div className="page fill">
       <div className="page-head">
         <h1>Логи</h1>
-        <span className="sub">старт приложения, ошибки и события сессий</span>
       </div>
       <div className="wizard-toolbar">
         <div className="search-box log-search">

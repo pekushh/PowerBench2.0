@@ -10,6 +10,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
+// `creation_flags` живёт не в общем API `Command`, а в Windows-расширении.
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use powerbench_core::engine::{Engine, ProgressSnapshot};
 use powerbench_metrics::AggregateResult;
 use powerbench_orchestrator::appsettings::AppSettings;
@@ -504,6 +508,21 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
     );
 }
 
+/// Флаг `CREATE_NO_WINDOW` из `winbase.h`.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Запретить дочернему процессу создавать окно консоли.
+///
+/// Приложение — GUI. Без этого флага `cmd /C start` (и `rundll32`) мигали
+/// чёрным окном поверх интерфейса при каждом открытии отчёта или папки.
+pub fn hide_console(cmd: &mut std::process::Command) {
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(not(target_os = "windows"))]
+    let _ = cmd;
+}
+
 /// Открыть файл приложением по умолчанию (для HTML — браузер).
 /// На Windows пробует несколько способов: rundll32 (надёжнее всего для
 /// URL/file-протокола), затем `cmd /C start`, затем проводник.
@@ -512,26 +531,25 @@ pub fn open_with_default_app(path: &std::path::Path) -> Result<(), String> {
     {
         let arg = path.to_string_lossy().to_string();
         // Способ 1: rundll32 — штатный запуск ассоциации файла.
-        if std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", &arg])
-            .spawn()
-            .is_ok()
-        {
+        let mut c1 = std::process::Command::new("rundll32");
+        c1.args(["url.dll,FileProtocolHandler", &arg]);
+        hide_console(&mut c1);
+        if c1.spawn().is_ok() {
             return Ok(());
         }
         // Способ 2: cmd /C start "" <path> (пустой заголовок обязателен,
         // иначе путь в кавычках трактуется как заголовок окна).
-        if std::process::Command::new("cmd")
-            .args(["/C", "start", "", &arg])
-            .spawn()
-            .is_ok()
-        {
+        let mut c2 = std::process::Command::new("cmd");
+        c2.args(["/C", "start", "", &arg]);
+        hide_console(&mut c2);
+        if c2.spawn().is_ok() {
             return Ok(());
         }
         // Способ 3: explorer делегирует открытие ассоциированному приложению.
-        std::process::Command::new("explorer")
-            .arg(&arg)
-            .spawn()
+        let mut c3 = std::process::Command::new("explorer");
+        c3.arg(&arg);
+        hide_console(&mut c3);
+        c3.spawn()
             .map(|_| ())
             .map_err(|e| format!("не удалось открыть «{}»: {e}", path.display()))
     }

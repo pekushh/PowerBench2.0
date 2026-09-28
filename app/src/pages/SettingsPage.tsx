@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { commands, type SettingsDto } from "../api";
-import { Badge, Button, Field, Glass, NumInput, Seg, Switch } from "../components/ui";
+import { Badge, Button, Glass, Seg, Switch } from "../components/ui";
 import { ShieldIcon, SocketIcon } from "../components/icons";
 import { pushToast } from "../store";
 
@@ -179,7 +179,6 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
 
       <div className="section-head">
         <h2 className="section-title">Внешний вид</h2>
-        <span className="hint">Спокойный интерфейс, который не отвлекает от результата.</span>
       </div>
       <Glass className="appearance-card">
         <div className="preview-pane">
@@ -254,10 +253,10 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
           ) : null}
           <button
             className="reset-link"
-            title="Вернуть веса по умолчанию: 50/30/20"
-            onClick={() => patch({ score_performance: 50, score_stability: 30, score_worst_second: 20 })}
+            title="Вернуть веса по умолчанию: 40/30/30"
+            onClick={() => patch({ score_performance: 40, score_stability: 30, score_worst_second: 30 })}
           >
-            Сбросить к 50 / 30 / 20
+            Сбросить к 40 / 30 / 30
           </button>
         </div>
         <div className="donut-pane">
@@ -286,69 +285,6 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
               <SocketIcon />
               {ac == null ? "…" : ac ? "Сеть" : "Батарея"}
             </span>
-          </div>
-        </div>
-      </Glass>
-
-      <div className="section-head">
-        <h2 className="section-title">Параметры теста по умолчанию</h2>
-        <span className="hint">
-          Применяются при запуске из режима «Быстро» или «Детально» и сохраняются
-          между запусками.
-        </span>
-      </div>
-      <Glass className="appearance-card">
-        <div className="appearance-controls">
-          <div className="grid2">
-            <Field label="Длительность теста, с">
-              <NumInput
-                value={st.duration_seconds}
-                min={9}
-                max={600}
-                step={1}
-                unit="с"
-                onChange={(v) => patch({ duration_seconds: v })}
-              />
-            </Field>
-            <Field label="Разогрев, с">
-              <NumInput
-                value={st.warmup_seconds}
-                min={2}
-                max={120}
-                step={1}
-                unit="с"
-                onChange={(v) => patch({ warmup_seconds: v })}
-              />
-            </Field>
-            <Field label="Охлаждение между схемами, с">
-              <NumInput
-                value={st.cooling_seconds}
-                min={0}
-                max={120}
-                step={1}
-                unit="с"
-                onChange={(v) => patch({ cooling_seconds: v })}
-              />
-            </Field>
-            <Field label="Повторов">
-              <NumInput
-                value={st.repetitions}
-                min={1}
-                max={20}
-                step={1}
-                onChange={(v) => patch({ repetitions: v })}
-              />
-            </Field>
-            <Field label="Порог фоновой нагрузки, %">
-              <NumInput
-                value={st.background_threshold_percent}
-                min={0}
-                max={100}
-                step={0.5}
-                unit="%"
-                onChange={(v) => patch({ background_threshold_percent: v })}
-              />
-            </Field>
           </div>
         </div>
       </Glass>

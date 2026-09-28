@@ -81,7 +81,18 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
    Из-за этого на пустых и коротких списках заголовок и панели «уезжали» в
    центр, а на длинных растягивались — интерфейс дёргался при смене вкладки. */
 .page{width:100%;max-width:1120px;margin:0 auto;min-height:100%;display:flex;flex-direction:column;gap:var(--sp-4)}
-.wizard{display:flex;flex-direction:column;gap:var(--sp-4);margin-top:auto;margin-bottom:auto}
+/* Блоки страницы не сжимаются по высоте.
+   `.page` — flex-контейнер с ограниченной высотой (окно), а у его детей
+   `flex-shrink` по умолчанию равен 1. Если содержимое длиннее окна, карточки
+   сжимались вместо того, чтобы страница прокрутилась: на «Настройках»
+   превью темы и переключатель «Тема» обрезались, а из пяти полей параметров
+   теста оставались два. Прокручивать должен контейн��р `.main`. */
+.page>*{flex:0 0 auto}
+/* Блок шага занимает всю ширину и остаётся прижат к верху: вертикальные
+   auto-отступы центрировали его по высоте окна, и список плиток то прижимался к
+   верху, то прыгал в середину — в зависимости от числа схем. Положение шага
+   теперь зависит только от самого шага, а не от длины списка. */
+.wizard{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:var(--sp-4)}
 .steps,.wizard{-webkit-user-select:none;user-select:none}
 .page-head{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;padding:var(--sp-1) 0 var(--sp-2)}
 .page-head h1{font-size:var(--fs-h1);font-weight:650;letter-spacing:var(--ls-tight);line-height:var(--lh-tight)}
@@ -208,13 +219,18 @@ table.grid td.num,table.grid th.num{text-align:right;font-variant-numeric:tabula
 .tile-scheme:active{transform:translateY(-1px) scale(.99)}
 .tile-scheme.sel{border-color:color-mix(in srgb,var(--accent) 55%,var(--line-2));box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 18%,transparent)}
 .tile-scheme.active{border-color:color-mix(in srgb,var(--ok) 65%,var(--line-2));background:color-mix(in srgb,var(--ok) 7%,var(--bg-2));box-shadow:0 0 0 1px color-mix(in srgb,var(--ok) 28%,transparent),0 16px 40px -26px color-mix(in srgb,var(--ok) 45%,transparent)}
-.ts-head{display:flex;align-items:flex-start;gap:var(--sp-2)}
-.ts-title{flex:1;min-width:0}
-.ts-name{font-size:var(--fs-title);font-weight:600;letter-spacing:-.1px;overflow-wrap:anywhere}
-.ts-guid{font-family:ui-monospace,Cascadia Code,Consolas,monospace;font-size:var(--fs-xs);color:var(--fg-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ts-foot{margin-top:auto;padding-top:var(--sp-2);border-top:1px solid var(--line-1);display:flex;align-items:center;gap:6px}
+/* Внутреннее наполнение плитки схемы — одно набором правил для обоих экранов
+   (страница «Схемы» и выбор в мастере бенчмарка). Раньше у каждого были свои
+   классы (`ts-*` и `pick-*`) с почти одинаковыми правилами, из-за чего плитки
+   отличались порядком блоков и видом метки «АКТИВНА». */
+.scheme-card-name{font-size:var(--fs-title);font-weight:600;letter-spacing:-.1px;overflow-wrap:anywhere}
+.scheme-card-badges{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:22px}
+.scheme-card-id{font-family:ui-monospace,Cascadia Code,Consolas,monospace;font-size:var(--fs-xs);color:var(--fg-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scheme-card-foot{margin-top:auto;padding-top:var(--sp-2);border-top:1px solid var(--line-1);display:flex;align-items:center;gap:6px}
+.scheme-card-state{display:inline-flex;align-items:center;gap:7px;font-size:var(--fs-caption);font-weight:600;
+color:var(--fg-mute)}
 .ts-grow{flex:1}
-.tile-scheme.active .icon-btn.ts-act{display:none}
+.tile-scheme.excluded{opacity:.6}
 .progress{height:8px;border-radius:var(--radius-full);background:var(--bg-1);border:1px solid var(--line-1);overflow:hidden}
 .progress>i{display:block;height:100%;border-radius:var(--radius-full);background:linear-gradient(90deg,var(--accent),color-mix(in srgb,var(--accent) 72%,#fff));transition:width .18s linear}
 
@@ -239,6 +255,12 @@ table.grid td.num,table.grid th.num{text-align:right;font-variant-numeric:tabula
 .step .label{transition:color var(--dur) var(--ease)}
 .step-link{width:22px;height:1px;background:var(--line-2);border-radius:var(--radius-full);flex:0 0 auto}
 .wizard-stage{display:flex;flex-direction:column;gap:var(--sp-4);animation:var(--motion-stage) var(--ease) both}
+/* Шаги с фиксированным содержимым (карточки режимов, сводка запуска)
+   центрируются по вертикали — их высота не зависит от данных, и скачков не
+   было. Шаг со списком схем (`wizard-stage.top`) не центрируется: там высота
+   меняется вместе с фильтром, и центрирование уводило пустой список в
+   середину экрана. */
+.wizard-stage.centered{margin-block:auto}
 .wizard-stage.back{animation-name:stageInBack}
 .mode-cards{display:grid;grid-template-columns:repeat(2,minmax(300px,440px));justify-content:center;gap:var(--sp-3);width:100%;margin:0 auto}
 @media (max-width: 900px){.mode-cards{grid-template-columns:1fr}
@@ -578,24 +600,28 @@ html.bench-running .pick-tile{
 .modal-body{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .modal-scrollx{overflow-x:auto;max-width:100%}
 /* ╨и╨░╨┐╨║╨░ ╤Б╤В╤А╨░╨╜╨╕╤Ж╤Л: ╨╕╨╜╤Д╨╛-╤Б╤В╤А╨╛╨║╨░ ╨╛╤В╨┤╨╡╨╗╤М╨╜╨╛╨╣ ╤Б╤В╤А╨╛╨║╨╛╨╣, ╤З╤В╨╛╨▒╤Л ╨╜╨╡ ╨╜╨░╨╡╨╖╨╢╨░╨╗╨░ ╨╜╨░ ╨║╨╜╨╛╨┐╨║╨╕. */
-.page-head{align-items:flex-start}
+/* Заголовок и соседний мелкий текст выравниваются по базовой линии, а не по
+   верху бокса. С `flex-start` подпись «2 записи» прилипала к верхнему краю
+   заголовка и читалась как надстрочный индекс над «Результаты» — то же самое
+   повторялось на всех страницах. */
+.page-head{align-items:baseline}
 .page-head .actions{align-self:center}
 .storage-line{flex:1 1 100%;display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;
 color:var(--fg-mute);font-size:var(--fs-caption);min-width:0}
 /* --- ╨б╨┐╨╕╤Б╨╛╨║ ╤Б╨╡╤Б╤Б╨╕╨╣ --- */
 .res-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:var(--sp-3);
 padding:var(--sp-3) var(--sp-4);cursor:default}
+/* Строка результата лежит в прокручиваемом списке, поэтому подсветка при
+   наведении не должна выходить за её рамку: `translateY` и растущая наружу
+   тень уезжали за правый край списка, и карточка выглядела «вылезшей из
+   фрейма». Вместо этого — внутреннее кольцо и чуть светлее фон. */
+.res-row:hover{transform:none;box-shadow:inset 0 0 0 1px var(--line-2);
+background:color-mix(in srgb,var(--bg-2) 92%,var(--fg) 4%)}
 .res-when{font-size:var(--fs-sm);color:var(--fg-mute);font-variant-numeric:tabular-nums;white-space:nowrap}
 .res-name{font-size:var(--fs-title);font-weight:600;letter-spacing:-.1px;overflow:hidden;
 text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .res-meta{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;margin-top:5px;min-width:0}
 .res-meta .num{color:var(--fg-dim);font-size:var(--fs-caption)}
-.res-score.sc-ok b{color:var(--ok)}
-.res-score.sc-warn b{color:var(--warn)}
-.res-score.sc-danger b{color:var(--err)}
-.res-score{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:64px}
-.res-score b{font-size:var(--fs-h2);font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
-.res-score span{font-size:10px;letter-spacing:1.2px;color:var(--fg-mute);text-transform:uppercase}
 .res-acts{display:flex;align-items:center;gap:var(--sp-2)}
 /* --- ╨б╨╛╨┤╨╡╤А╨╢╨╕╨╝╨╛╨╡ ╨╝╨╛╨┤╨░╨╗╨║╨╕ ╤А╨╡╨╖╤Г╨╗╤М╤В╨░╤В╨░ --- */
 .rd{display:flex;flex-direction:column;gap:var(--sp-4);padding-bottom:var(--sp-2)}
@@ -659,17 +685,11 @@ box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 20%,transparent)}
 .pick-tile.quarantined{cursor:not-allowed;opacity:.72}
 .pick-tile.quarantined:hover{transform:none;box-shadow:none;border-color:var(--line-1)}
 .pick-tile.excluded{opacity:.6}
-.pick-name{font-size:var(--fs-title);font-weight:600;letter-spacing:-.1px;overflow-wrap:anywhere}
-.pick-badges{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:22px}
-.pick-foot{margin-top:auto;padding-top:var(--sp-2);border-top:1px solid var(--line-1);
-display:flex;align-items:center;gap:6px}
-.pick-state{display:inline-flex;align-items:center;gap:7px;font-size:var(--fs-caption);font-weight:600;
-color:var(--fg-mute);padding-right:4px}
-.pick-state .tick{width:16px;height:16px;border-radius:5px;border:1.5px solid var(--line-2);
+.scheme-card-state .tick{width:16px;height:16px;border-radius:5px;border:1.5px solid var(--line-2);
 display:grid;place-items:center;font-size:10px;color:transparent;
 transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
-.pick-tile.on .pick-state{color:var(--accent)}
-.pick-tile.on .pick-state .tick{background:var(--accent);border-color:var(--accent);color:#16131f}
+.pick-tile.on .scheme-card-state{color:var(--accent)}
+.pick-tile.on .scheme-card-state .tick{background:var(--accent);border-color:var(--accent);color:#16131f}
 .pick-why{font-size:var(--fs-caption);color:var(--fg-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pick-search{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
 .pick-search .search-box{flex:1 1 240px;max-width:420px}

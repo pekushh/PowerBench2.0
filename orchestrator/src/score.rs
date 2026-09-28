@@ -264,9 +264,9 @@ mod tests {
             worst_second: 0.0,
         };
         let norms = weights.normalized();
-        assert!((norms[0] - 0.5).abs() < 1e-9);
+        assert!((norms[0] - 0.4).abs() < 1e-9);
         assert!((norms[1] - 0.3).abs() < 1e-9);
-        assert!((norms[2] - 0.2).abs() < 1e-9);
+        assert!((norms[2] - 0.3).abs() < 1e-9);
         // И сами баллы вычисляются (не паникуют).
         let scores = score_schemes(&schemes, &weights);
         assert!(scores[0].score > 0.0 && scores[1].score > 0.0);

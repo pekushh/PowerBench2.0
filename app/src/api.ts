@@ -13,6 +13,15 @@ export interface SchemeRow {
 
 export type QuarantineKind = "HardFreeze" | "NoProgress" | "Unstable" | "Degraded";
 
+/** Параметры режима теста (зеркало `orchestrator::config::Preset`). */
+export interface PresetDto {
+  key: "quick" | "detailed";
+  duration_seconds: number;
+  warmup_seconds: number;
+  cooling_seconds: number;
+  repetitions: number;
+}
+
 export interface QuarantineEntry {
   scheme_id: string;
   scheme_name: string | null;
@@ -30,10 +39,7 @@ export const QUARANTINE_LABELS: Record<QuarantineKind, string> = {
 };
 
 export interface SettingsDto {
-  duration_seconds: number;
-  warmup_seconds: number;
-  cooling_seconds: number;
-  repetitions: number;
+  /** Порог фоновой нагрузки, % на ядро. Параметры режима — см. `PresetDto`. */
   background_threshold_percent: number;
   theme: string;
   mode: string;
@@ -315,6 +321,8 @@ export const commands = {
       repetitions,
       schemeCount,
     }),
+  /** Значения обоих пресетов — единственный источник для карточек режимов. */
+  testPresets: () => invoke<PresetDto[]>("test_presets"),
   historyDelete: (fileName: string) => invoke<void>("history_delete", { fileName }),
   historyOpenFolder: () => invoke<void>("history_open_folder"),
   openFolder: (path: string) => invoke<void>("open_folder", { path }),

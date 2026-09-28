@@ -183,14 +183,10 @@ pub fn scheme_action(
 /// Плоский DTO настроек для интерфейса (этап 7).
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SettingsDto {
-    // Параметры теста. Раньше их не было в DTO: фронтенд объявлял
-    // `duration_seconds`/`warmup_seconds`/`cooling_seconds`/`repetitions`
-    // в своём интерфейсе, получал `undefined` от бэкенда и подставлял
-    // значения по умолчанию — ручные правки теста терялись при перезапуске.
-    pub duration_seconds: u32,
-    pub warmup_seconds: u32,
-    pub cooling_seconds: u32,
-    pub repetitions: u32,
+    // Длительность/разогрев/охлаждение/повторы убраны: это параметры пресета
+    // режима (`test_presets`), а не настройка. Раньше они жили в DTO, и
+    // интерфейс подставлял их в мастер вместо пресета — карточка режима
+    // обещала одни числа, а запуск шёл с другими.
     pub background_threshold_percent: f64,
     pub theme: String,
     pub mode: String,
@@ -206,10 +202,6 @@ pub struct SettingsDto {
 
 fn settings_to_dto(s: &AppSettings) -> SettingsDto {
     SettingsDto {
-        duration_seconds: s.benchmark.duration_seconds,
-        warmup_seconds: s.benchmark.warmup_seconds,
-        cooling_seconds: s.benchmark.cooling_seconds,
-        repetitions: s.benchmark.repetitions,
         theme: s.appearance.theme.clone(),
         mode: s.appearance.mode.clone(),
         reduce_motion: s.appearance.reduce_motion,
@@ -241,9 +233,6 @@ pub fn set_settings(settings: SettingsDto) -> Result<(), String> {
     // Значения приходят из интерфейса, поэтому проверяем их до записи: ноль в
     // длительности или NaN в весах уронили бы планировщик или нормализацию
     // весов уже во время сессии, а пользователь увидел бы это слишком поздно.
-    if s.duration_seconds == 0 || s.warmup_seconds == 0 || s.repetitions == 0 {
-        return Err("длительность, разогрев и число повторов должны быть больше нуля".to_string());
-    }
     if !(s.background_threshold_percent.is_finite() && s.background_threshold_percent >= 0.0) {
         return Err("порог фоновой нагрузки должен быть неотрицательным числом".to_string());
     }
@@ -257,10 +246,6 @@ pub fn set_settings(settings: SettingsDto) -> Result<(), String> {
         return Err("веса оценки должны быть неотрицательными числами".to_string());
     }
     AppSettings::update_locked(|cur: &mut AppSettings| {
-        cur.benchmark.duration_seconds = s.duration_seconds;
-        cur.benchmark.warmup_seconds = s.warmup_seconds;
-        cur.benchmark.cooling_seconds = s.cooling_seconds;
-        cur.benchmark.repetitions = s.repetitions;
         cur.benchmark.background_threshold_percent = s.background_threshold_percent;
         cur.appearance.theme = std::mem::take(&mut s.theme);
         cur.appearance.mode = std::mem::take(&mut s.mode);
@@ -742,6 +727,36 @@ pub fn estimate_session(
     }
 }
 
+/// Параметры режима теста для интерфейса (зеркало `config::Preset`).
+///
+/// Нужны, потому что карточки режимов обещают конкретные «повторы» и «точность»,
+/// и мастер применяет именно эти значения. Раньше интерфейс держал свою копию
+/// чисел: правка пресета в Rust тихо расходилась с тем, что показывала и
+/// запускала карточка, и расхождение замечали уже по отчёту.
+#[derive(serde::Serialize)]
+pub struct PresetDto {
+    /// Ключ режима: `quick` или `detailed`.
+    pub key: String,
+    pub duration_seconds: u64,
+    pub warmup_seconds: u64,
+    pub cooling_seconds: u64,
+    pub repetitions: u32,
+}
+
+/// Значения обоих пресетов одним вызовом.
+#[tauri::command]
+pub fn test_presets() -> Vec<PresetDto> {
+    use powerbench_orchestrator::config::{DETAILED_PRESET, Preset, QUICK_PRESET};
+    let one = |key: &str, p: Preset| PresetDto {
+        key: key.to_string(),
+        duration_seconds: p.duration_seconds,
+        warmup_seconds: p.warmup_seconds,
+        cooling_seconds: p.cooling_seconds,
+        repetitions: p.repetitions,
+    };
+    vec![one("quick", QUICK_PRESET), one("detailed", DETAILED_PRESET)]
+}
+
 /// Вернуть схему из карантина в бенчмарк. `Ok(true)` — запись была и удалена.
 #[tauri::command]
 pub fn quarantine_clear(scheme_id: String) -> Result<bool, String> {
@@ -918,9 +933,10 @@ fn dir_size(path: &std::path::Path) -> u64 {
 }
 
 fn open_in_explorer(path: &str) -> Result<(), String> {
-    std::process::Command::new("explorer")
-        .arg(path)
-        .spawn()
+    let mut cmd = std::process::Command::new("explorer");
+    cmd.arg(path);
+    runner::hide_console(&mut cmd);
+    cmd.spawn()
         .map(|_| ())
         .map_err(|e| format!("не удалось открыть «{path}»: {e}"))
 }

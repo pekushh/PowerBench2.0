@@ -12,7 +12,7 @@ use crate::bridge::{
     log_flush, log_history, open_file, open_folder, quarantine_clear, quarantine_list,
     results_dir,
     scheme_action, session_report, set_settings, start_test, stop_test, storage_stats,
-    system_ready, test_running,
+    system_ready, test_presets, test_running,
 };
 use tauri::{
     Manager,
@@ -118,6 +118,7 @@ fn main() {
             quarantine_list,
             quarantine_clear,
             estimate_session,
+            test_presets,
             storage_stats,
             open_folder,
             open_file,

@@ -29,14 +29,23 @@ type Filter = "all" | "fav" | "excluded";
 type Confirm = { kind: "delete"; guid: string; name: string } | null;
 
 /**
- * Порядок показа и замера: активная схема всегда первая, остальные — по
- * алфавиту (русская локаль). Тот же порядок применяет бэкенд
- * (`config::canonical_scheme_order`), поэтому видимый порядок совпадает с
- * фактическим выполнением.
+ * Порядок показа: строго по алфавиту (русская локаль), при равенстве имён —
+ * по GUID, чтобы порядок не зависел от ответа `powercfg`.
+ *
+ * Раньше активная схема поднималась наверх. Из-за этого список менялся
+ * целиком в момент, когда пользователь переключал схему, а страница «Схемы»
+ * и выбор в бенчмарке выглядели по-разному. Теперь «активная» — это метка на
+ * плитке, а не её позиция: и обе страницы, и два окна показывают один и тот
+ * же список в одном порядке.
+ *
+ * Порядок *измерения* при этом остаётся прежним: план строит
+ * `config::canonical_scheme_order`, который первым ставит активную схему —
+ * это нужно для восстановления состояния после прерывания сессии.
  */
 function schemeOrder(a: SchemeRow, b: SchemeRow): number {
-  if (a.active !== b.active) return a.active ? -1 : 1;
-  return (a.name || "").localeCompare(b.name || "", "ru", { sensitivity: "base" });
+  const byName = (a.name || "").localeCompare(b.name || "", "ru", { sensitivity: "base" });
+  if (byName !== 0) return byName;
+  return a.guid.localeCompare(b.guid);
 }
 
 /** Отсортированная копия списка схем. Компаратор был продублирован в трёх
@@ -236,8 +245,8 @@ export function SchemePicker({
                   }
                 }}
               >
-                <div className="pick-name">{s.name || "Без названия"}</div>
-                <div className="pick-badges">
+                <div className="scheme-card-name">{s.name || "Без названия"}</div>
+                <div className="scheme-card-badges">
                   {s.active ? <Badge kind="ok">АКТИВНА</Badge> : null}
                   {q ? (
                     <Badge kind="danger" title={q.reason}>
@@ -247,12 +256,12 @@ export function SchemePicker({
                     <Badge kind="plain">исключена</Badge>
                   ) : null}
                 </div>
-                <div className="scheme-id" title="ID схемы">
+                <div className="scheme-card-id" title="ID схемы">
                   {s.guid}
                 </div>
                 {q ? <div className="pick-why">{q.reason}</div> : null}
-                <div className="pick-foot">
-                  <span className="pick-state">
+                <div className="scheme-card-foot">
+                  <span className="scheme-card-state">
                     <span className="tick">{on && !q ? "✓" : ""}</span>
                     {q ? "в карантине" : on ? "Выбрано" : "Выбрать"}
                   </span>
@@ -448,7 +457,7 @@ export default function SchemeTiles({
           return (
             <div
               key={s.guid}
-              className={`tile-scheme${s.active ? " active" : ""}${isSel ? " sel" : ""}`}
+              className={`tile-scheme${s.active ? " active" : ""}${isSel ? " sel" : ""}${isEx ? " excluded" : ""}`}
               // Выбор для экспорта — тоже интерактивный элемент: раньше это
               // был `<div>` без роли и клавиатуры.
               role={onSelectExport ? "button" : undefined}
@@ -464,7 +473,18 @@ export default function SchemeTiles({
               }}
               title="Клик — выбрать для экспорта"
             >
-              <div className="ts-head">
+              <div className="scheme-card-name">{s.name || "Без названия"}</div>
+              {/* Порядок блоков и сами стили — те же, что у плитки в мастере
+                  бенчмарка: окно выбора схем и страница «Схемы» должны
+                  выглядеть одинаково, иначе их невозможно сопоставлять. */}
+              <div className="scheme-card-badges">
+                {s.active ? <Badge kind="ok">АКТИВНА</Badge> : null}
+                {isEx ? <Badge kind="plain">исключена</Badge> : null}
+              </div>
+              <div className="scheme-card-id" title="ID схемы">
+                {s.guid}
+              </div>
+              <div className="scheme-card-foot">
                 <button
                   type="button"
                   className="icon-btn ts-act"
@@ -478,13 +498,6 @@ export default function SchemeTiles({
                 >
                   <PowerIcon />
                 </button>
-                <div className="ts-title">
-                  <div className="ts-name">{s.name || "Без названия"}</div>
-                  <div className="ts-guid">{s.guid}</div>
-                </div>
-                {s.active ? <Badge kind="ok">АКТИВНА</Badge> : null}
-              </div>
-              <div className="ts-foot">
                 <button
                   type="button"
                   className={`icon-btn${isFav ? " on-fav" : ""}`}

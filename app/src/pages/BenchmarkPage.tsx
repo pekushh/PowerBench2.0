@@ -6,6 +6,7 @@ import {
   onTelemetry,
   onTestFinished,
   type CheckpointDto,
+  type PresetDto,
   type QuarantineEntry,
   type Readiness,
   type SchemeRow,
@@ -24,9 +25,6 @@ interface PresetDef {
   title: string;
   desc: string;
   expand: string;
-  reps: string;
-  accuracy: string;
-  preset: { duration: number; warmup: number; cooling: number; reps: number };
 }
 
 const PRESETS: Record<"quick" | "detailed", PresetDef> = {
@@ -34,21 +32,39 @@ const PRESETS: Record<"quick" | "detailed", PresetDef> = {
     title: "Быстро",
     desc: "Быстрая проверка производительности системы с минимальным временем тестирования.",
     expand:
-      "Подходит для быстрого сравнения схем питания. Минимальное время выполнения, меньше повторов и упрощённая методика — ответ за несколько минут, без долгих ожиданий.",
-    reps: "1",
-    accuracy: "Стандартная",
-    preset: { duration: 9, warmup: 2, cooling: 1, reps: 1 },
+      "Два повтора и короткие фазы — ответ за пару минут. Разница между схемами видна, но погрешность заметно выше, чем в детальном режиме.",
   },
   detailed: {
     title: "Детально",
     desc: "Расширенное тестирование для точного сравнения схем питания и стабильных результатов.",
     expand:
-      "Расширенный сценарий с увеличенным количеством повторов и более продолжительными фазами измерения — точнее и надёжнее. Подходит, когда схема выбирается на длительный срок.",
-    reps: "3",
-    accuracy: "Повышенная",
-    preset: { duration: 30, warmup: 6, cooling: 5, reps: 3 },
+      "Длинные фазы и пять повторов — точнее и надёжнее, срабатывает адаптивная остановка. Подходит, когда схема выбирается на длительный срок.",
   },
 };
+
+type PresetParams = { duration: number; warmup: number; cooling: number; reps: number };
+
+/** Числа пресета в виде полей мастера. */
+function paramsOf(p: PresetDto): PresetParams {
+  return {
+    duration: p.duration_seconds,
+    warmup: p.warmup_seconds,
+    cooling: p.cooling_seconds,
+    reps: p.repetitions,
+  };
+}
+
+/** Порог, с которого режим считается повышенной точностью (фаза ≥ 30 с). */
+const ACCURATE_DURATION_SECONDS = 30;
+
+function sameParams(a: PresetParams, b: PresetParams): boolean {
+  return (
+    a.duration === b.duration &&
+    a.warmup === b.warmup &&
+    a.cooling === b.cooling &&
+    a.reps === b.reps
+  );
+}
 
 const PRESET_SHORT: Record<PresetKey, string> = {
   quick: "Быстрый",
@@ -131,11 +147,6 @@ function phaseIndex(name: string | undefined): number {
   return ["Лёгкая", "Тяжёлая", "Отклик"].indexOf(name);
 }
 
-/** Число из любых данных: нефинитное заменяется запасным. */
-function num(v: unknown, fallback: number): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
-}
-
 export default function BenchmarkPage() {
   const { running } = useSession();
   const [stage, setStage] = useState<Stage>("mode");
@@ -145,11 +156,19 @@ export default function BenchmarkPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [settings, setSettings] = useState<SettingsDto | null>(null);
   const [preset, setPreset] = useState<"quick" | "detailed">("detailed");
-  const [duration, setDuration] = useState(30);
-  const [warmup, setWarmup] = useState(6);
-  const [cooling, setCooling] = useState(5);
-  const [reps, setReps] = useState(3);
+  // Числа режимов приходят из `orchestrator::config` одной командой. Пока они
+  // не пришли, мастер не применяет пресет: иначе карточка обещала бы одни
+  // значения, а запустила бы другие (собственная копия чисел в интерфейсе уже
+  // расходилась с бэкендом после правки пресета).
+  const [presets, setPresets] = useState<Record<"quick" | "detailed", PresetParams> | null>(
+    null,
+  );
+  const [duration, setDuration] = useState(0);
+  const [warmup, setWarmup] = useState(0);
+  const [cooling, setCooling] = useState(0);
+  const [reps, setReps] = useState(0);
   const [rawSamples, setRawSamples] = useState(false);
+  const [backgroundThreshold, setBackgroundThresholdState] = useState(5);
   const [checkpoint, setCheckpoint] = useState<CheckpointDto | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryMsg | null>(null);
   const [starting, setStarting] = useState(false);
@@ -171,6 +190,13 @@ export default function BenchmarkPage() {
   const [oneScheme, setOneScheme] = useState("—");
   useEffect(() => {
     let alive = true;
+    // Параметров ещё нет — считать нечего, и нули в `estimateSession` вернули
+    // бы «около 0 с», что хуже прочерка.
+    if (duration <= 0 || reps <= 0) {
+      setEstimate("—");
+      setOneScheme("—");
+      return;
+    }
     const n = Math.max(1, selected.size);
     commands
       .estimateSession(duration, warmup, cooling, reps, n)
@@ -185,13 +211,13 @@ export default function BenchmarkPage() {
     const one = commands.estimateSession(duration, warmup, cooling, reps, 1);
     // По одной схеме каждого пресета: карточки режима обещают «сколько займёт
     // тест», и раньше там стояла формула без стабилизации и фоновых проб.
-    const perPreset = (Object.keys(PRESETS) as ("quick" | "detailed")[]).map(async (
-      key,
-    ) => {
-      const p = PRESETS[key].preset;
-      const v = await commands.estimateSession(p.duration, p.warmup, p.cooling, p.reps, 1);
-      return [key, v.label] as const;
-    });
+    const perPreset = presets
+      ? (Object.keys(presets) as ("quick" | "detailed")[]).map(async (key) => {
+          const p = presets[key];
+          const v = await commands.estimateSession(p.duration, p.warmup, p.cooling, p.reps, 1);
+          return [key, v.label] as const;
+        })
+      : [];
     Promise.all([one, Promise.all(perPreset)])
       .then(([oneV, pairs]) => {
         if (!alive) return;
@@ -202,7 +228,7 @@ export default function BenchmarkPage() {
     return () => {
       alive = false;
     };
-  }, [duration, warmup, cooling, reps, selected.size]);
+  }, [duration, warmup, cooling, reps, selected.size, presets]);
 
   const loadQuarantine = useCallback(() => {
     commands.quarantineList().then(setQuarantine).catch(() => undefined);
@@ -210,29 +236,31 @@ export default function BenchmarkPage() {
 
   // Настройки нужны плиткам (избранное/исключения) и после их правок.
   const loadAll = useCallback(() => {
-    commands
-      .getSettings()
-      .then((st) => {
-        setSettings(st);
-        setDuration(num(st.duration_seconds, 30));
-        setWarmup(num(st.warmup_seconds, 6));
-        setCooling(num(st.cooling_seconds, 5));
-        setReps(num(st.repetitions, 3));
-      })
-      .catch(() => undefined);
+    commands.getSettings().then(setSettings).catch(() => undefined);
     loadQuarantine();
   }, [loadQuarantine]);
 
-  const activePreset: PresetKey =
-    duration === PRESETS.quick.preset.duration &&
-    warmup === PRESETS.quick.preset.warmup &&
-    cooling === PRESETS.quick.preset.cooling &&
-    reps === PRESETS.quick.preset.reps
+  // Пресеты режимов — из бэкенда, вместе с первым набором настроек: мастер
+  // стартует с детального режима, и пока числа не пришли, поля пусты.
+  const applyPresets = useCallback((rows: PresetDto[]) => {
+    const map: Record<"quick" | "detailed", PresetParams> = {
+      quick: paramsOf(rows.find((r) => r.key === "quick") ?? rows[0]),
+      detailed: paramsOf(rows.find((r) => r.key === "detailed") ?? rows[1] ?? rows[0]),
+    };
+    setPresets(map);
+    const start = map.detailed;
+    setDuration(start.duration);
+    setWarmup(start.warmup);
+    setCooling(start.cooling);
+    setReps(start.reps);
+  }, []);
+
+  const current: PresetParams = { duration, warmup, cooling, reps };
+  const activePreset: PresetKey = !presets
+    ? "custom"
+    : sameParams(current, presets.quick)
       ? "quick"
-      : duration === PRESETS.detailed.preset.duration &&
-          warmup === PRESETS.detailed.preset.warmup &&
-          cooling === PRESETS.detailed.preset.cooling &&
-          reps === PRESETS.detailed.preset.reps
+      : sameParams(current, presets.detailed)
         ? "detailed"
         : "custom";
 
@@ -240,12 +268,24 @@ export default function BenchmarkPage() {
   const [remainingEstimate, setRemainingEstimate] = useState("—");
 
   const applyPreset = (p: "quick" | "detailed") => {
-    const def = PRESETS[p].preset;
+    const def = presets?.[p];
+    if (!def) return;
     setPreset(p);
     setDuration(def.duration);
     setWarmup(def.warmup);
     setCooling(def.cooling);
     setReps(def.reps);
+  };
+
+  /** Сохранить порог фоновой нагрузки. Значение остаётся и до следующего
+   * запуска: настройки перечитываются целиком, чтобы не затереть правки,
+   * сделанные параллельно (например, отметку «избранное» на плитке схем). */
+  const setBackgroundThreshold = (v: number) => {
+    setBackgroundThresholdState(v);
+    commands
+      .getSettings()
+      .then((st) => commands.setSettings({ ...st, background_threshold_percent: v }))
+      .catch((e) => pushToast("err", `Порог фона не сохранён: ${String(e)}`));
   };
 
 
@@ -263,15 +303,13 @@ export default function BenchmarkPage() {
     // карантинные схемы попадали бы в выбор молча, хотя код ниже обещает
     // обратное. Раньше обе выборки шли параллельно, и `listSchemes` успевал
     // раньше — с пустыми `settings` и `quarantine`.
-    Promise.all([commands.getSettings(), commands.quarantineList()])
-      .then(([st, quarantineRows]) => {
+    Promise.all([commands.getSettings(), commands.quarantineList(), commands.testPresets()])
+      .then(([st, quarantineRows, presetRows]) => {
         if (!alive) return;
         setSettings(st);
         setQuarantine(quarantineRows);
-        setDuration(num(st.duration_seconds, 30));
-        setWarmup(num(st.warmup_seconds, 6));
-        setCooling(num(st.cooling_seconds, 5));
-        setReps(num(st.repetitions, 3));
+        setBackgroundThresholdState(st.background_threshold_percent);
+        if (presetRows.length >= 2) applyPresets(presetRows);
         return commands.listSchemes().then((s) => {
           if (!alive) return;
           setSchemes(sortSchemes(s));
@@ -290,7 +328,7 @@ export default function BenchmarkPage() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [applyPresets]);
 
   useEffect(() => {
     const untele = onTelemetry((m) => {
@@ -425,7 +463,7 @@ export default function BenchmarkPage() {
           warmup_seconds: resume ? null : warmup,
           cooling_seconds: resume ? null : cooling,
           repetitions: resume ? null : reps,
-          background_threshold_percent: resume ? null : (settings?.background_threshold_percent ?? 5),
+          background_threshold_percent: resume ? null : backgroundThreshold,
           worker_count: null,
           scheme_ids: resume ? [] : chosen,
           export_raw_samples: resume ? false : rawSamples,
@@ -453,17 +491,6 @@ export default function BenchmarkPage() {
       .catch((e) => pushToast("err", String(e)))
       .finally(() => setStopping(false));
   };
-
-  const subtitle =
-    stage === "mode"
-      ? "выберите режим «Быстро» или «Детально» — точные параметры откроются рядом"
-      : stage === "schemes"
-        ? "отметьте схемы питания, которые войдут в сравнение"
-        : running
-          ? "идёт измерение — статистика обновляется в реальном времени"
-          : finished
-            ? "сессия завершена — можно начать новую"
-            : "проверьте параметры и запустите тест";
 
   const stepState = (id: Stage) => {
     if (id === "mode") return stage === "mode" ? "active" : "done";
@@ -518,7 +545,6 @@ export default function BenchmarkPage() {
     <div className="page">
       <div className="page-head">
         <h1>Бенчмарк</h1>
-        <span className="sub">{subtitle}</span>
         <div className="actions">
           {running ? (
             <Button variant="danger" disabled={stopping} onClick={stop}>
@@ -546,7 +572,11 @@ export default function BenchmarkPage() {
       </div>
 
       <div className="wizard">
-        <div className={`wizard-stage${dir === "back" ? " back" : ""}`}>
+        <div
+          className={`wizard-stage ${stage === "schemes" ? "top" : "centered"}${
+            dir === "back" ? " back" : ""
+          }`}
+        >
           {stage === "mode" ? (
             <>
               <div className="mode-area">
@@ -554,6 +584,7 @@ export default function BenchmarkPage() {
                   {(Object.keys(PRESETS) as ("quick" | "detailed")[]).map((key, cardIdx) => {
                     const def = PRESETS[key];
                     const open = preset === key;
+                    const p = presets?.[key];
                     return (
                       <Spot
                         key={key}
@@ -582,11 +613,17 @@ export default function BenchmarkPage() {
                           <div className="mode-stats">
                             <div className="mode-stat">
                               <div className="ms-label">Повторов</div>
-                              <div className="ms-value">{def.reps}</div>
+                              <div className="ms-value">{p ? p.reps : "—"}</div>
                             </div>
                             <div className="mode-stat">
                               <div className="ms-label">Точность</div>
-                              <div className="ms-value">{def.accuracy}</div>
+                              <div className="ms-value">
+                                {p
+                                  ? p.duration >= ACCURATE_DURATION_SECONDS
+                                    ? "Повышенная"
+                                    : "Стандартная"
+                                  : "—"}
+                              </div>
                             </div>
                           </div>
                           <div className="mode-time">
@@ -649,6 +686,25 @@ export default function BenchmarkPage() {
                               </Field>
                             </div>
                             <div className="hint mt-3">{earlyStopHint(reps)}</div>
+                            {/* Порог фона — параметр замера, а не оформления,
+                                поэтому он живёт здесь, рядом с остальными
+                                числами теста, а не в настройках приложения. */}
+                            <div className="mt-3">
+                              <Field label="Порог фоновой нагрузки, %">
+                                <NumInput
+                                  value={backgroundThreshold}
+                                  min={0.5}
+                                  max={100}
+                                  step={0.5}
+                                  unit="%"
+                                  onChange={(v) => setBackgroundThreshold(v)}
+                                />
+                              </Field>
+                              <div className="field-hint">
+                                Выше порога сессия помечается как замер на загруженном
+                                фоне.
+                              </div>
+                            </div>
                           </div>
                         )}
                       </Spot>

@@ -540,10 +540,11 @@ pub fn build_session_report(s: &SessionJson) -> String {
          <div class=\"rec-title\">{rec_title}</div>\
          <div class=\"rec-notes\">{rec_notes}</div>\
          </div>\
-         <h2>СХЕМЫ</h2>\
-         {schemes}\
-         {score}\
-         </div>\
+          <h2>СХЕМЫ</h2>\
+          {schemes}\
+          {score}\
+          {background}\
+          </div>\
          <div class=\"foot\">Сгенерировано {now_stamp} · PowerBench\
          <span class=\"prov\">план <span class=\"mono\">{plan}</span> · хэш \
          <span class=\"mono\">{hash}</span> · seed <span class=\"mono\">{seed}</span></span></div>\
@@ -570,6 +571,7 @@ pub fn build_session_report(s: &SessionJson) -> String {
             rows = sch_rows
         )),
         score = score_section(s),
+        background = background_section(s, "<h2>Фоновая нагрузка</h2>", ""),
         now_stamp = esc(&pretty_dt(&date_time_stamp(now_unix_ns()))),
         plan = esc(&s.plan_guid),
         hash = esc(&id.config_hash),
@@ -1014,7 +1016,7 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
           <div class=\"dhead\">Сессия <span class=\"mono\">{plan}</span> · {stamp} (UTC)</div>\
 {schemes}\
 <div class=\"rec\">{rec_line}</div>\
-          <div class=\"note\">{reason}</div>{score}{probs}{mode_html}</div></td></tr>",
+          <div class=\"note\">{reason}</div>{score}{background}{probs}{mode_html}</div></td></tr>",
         plan = esc(&s.plan_guid),
         stamp = esc(stamp),
         schemes = scheme_block(&format!(
@@ -1028,8 +1030,110 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
         rec_line = rec_line,
         reason = esc(&rec.reason),
         score = score_section(s),
+        // Внутри раскрытой сессии заголовок уровнем ниже — `.dhead` и таблица
+        // без рамки, как соседние блоки деталей.
+        background = background_section(
+            s,
+            "<div class=\"dhead\">Фоновая нагрузка</div>",
+            "sub",
+        ),
         probs = probs,
         mode_html = mode_html,
+    )
+}
+
+/// Секция «Фоновая нагрузка»: какие процессы совпали с просадками throughput.
+///
+/// Раньше отчёт показывал только процент чистоты фона — число, по которому
+/// непонятно, что именно мешало замеру. Сэмплер процессов уже собирает
+/// коррелированные с провалами окна (`StoredRun::background`), но в отчёт они
+/// не попадали, и пользователю оставалось гадать.
+fn background_section(s: &SessionJson, heading: &str, table_class: &str) -> String {
+    // Суммируем по паре (имя, путь): один и тот же процесс идёт в отчёт один
+    // раз, даже если всплески были в прогонах разных схем.
+    struct Acc {
+        name: String,
+        path: String,
+        median_cpu: f64,
+        peak_cpu: f64,
+        windows: usize,
+        schemes: Vec<String>,
+        phases: Vec<String>,
+    }
+    let mut acc: Vec<Acc> = Vec::new();
+    for sch in &s.schemes {
+        let scheme = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
+        for run in &sch.per_run {
+            for p in &run.background {
+                let hit = acc.iter_mut().find(|a| {
+                    a.name.eq_ignore_ascii_case(p.name.trim()) && a.path == p.path.trim()
+                });
+                match hit {
+                    Some(a) => {
+                        a.windows += p.correlated_spike_windows;
+                        a.peak_cpu = a.peak_cpu.max(p.peak_cpu_percent);
+                        a.median_cpu = a.median_cpu.max(p.median_cpu_percent);
+                        for ph in &p.phases {
+                            if !a.phases.iter().any(|x| x == ph) {
+                                a.phases.push(ph.clone());
+                            }
+                        }
+                        if !a.schemes.iter().any(|x| x == &scheme) {
+                            a.schemes.push(scheme.clone());
+                        }
+                    }
+                    None => acc.push(Acc {
+                        name: p.name.trim().to_string(),
+                        path: p.path.trim().to_string(),
+                        median_cpu: p.median_cpu_percent,
+                        peak_cpu: p.peak_cpu_percent,
+                        windows: p.correlated_spike_windows,
+                        schemes: vec![scheme.clone()],
+                        phases: p.phases.clone(),
+                    }),
+                }
+            }
+        }
+    }
+    // В первую очередь те, что реально совпали с просадками, потом — по пику.
+    acc.retain(|a| a.windows > 0);
+    if acc.is_empty() {
+        return String::new();
+    }
+    acc.sort_by(|a, b| {
+        b.windows.cmp(&a.windows).then_with(|| {
+            b.peak_cpu
+                .partial_cmp(&a.peak_cpu)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
+    let mut rows = String::new();
+    for a in &acc {
+        rows.push_str(&format!(
+            "<tr><td>{name}</td><td class=\"mono\">{path}</td>\
+             <td class=\"num\">{med}</td><td class=\"num\">{peak}</td><td class=\"num\">{wins}</td>\
+             <td>{schemes}</td><td>{phases}</td></tr>",
+            name = esc(&a.name),
+            path = esc(if a.path.is_empty() { "—" } else { &a.path }),
+            med = pct1(a.median_cpu),
+            peak = pct1(a.peak_cpu),
+            wins = a.windows,
+            schemes = esc(&a.schemes.join(", ")),
+            phases = esc(&a.phases.join(", ")),
+        ));
+    }
+    format!(
+        "{heading}\
+         <table class=\"{cls}\"><thead><tr><th>Процесс</th><th>Путь</th>\
+         <th class=\"num\">CPU, медиана</th><th class=\"num\">CPU, пик</th>\
+         <th class=\"num\">Окон</th><th>Схемы</th><th>Фазы</th></tr></thead>\
+         <tbody>{rows}</tbody></table>\
+         <div class=\"note\">Процесс отмечен, если его рост CPU совпал с провалом \
+         throughput. «Окон» — сколько таких совпадений набралось за сессию, \
+         CPU — максимум по прогонам.</div>",
+        heading = heading,
+        cls = table_class,
+        rows = rows
     )
 }
 
@@ -1554,6 +1658,75 @@ mod tests {
                 !html.contains(stale),
                 "в отчёте остался старый синеватый цвет: {stale}"
             );
+        }
+    }
+
+    /// Регресс: отчёт обязан называть процессы, совпавшие с просадками
+    /// throughput. Раньше в нём был только процент чистоты фона, и по нему
+    /// нельзя было понять, что именно мешало замеру.
+    #[test]
+    fn report_names_background_processes() {
+        let mut s = sample_session("AAA", 500.0);
+        let run = stored_run_with_background("aaa", "chrome.exe", 7);
+        s.schemes[0].per_run = vec![run];
+        let html = build_session_report(&s);
+        assert!(html.contains("Фоновая нагрузка"), "в отчёте нет секции фона");
+        assert!(html.contains("chrome.exe"), "в отчёте нет имени процесса");
+    }
+
+    /// Процесс, который не совпал ни с одним окном просадки, в секции быть
+    /// не должен: иначе отчёт пугает пользователя фоновыми процессами,
+    /// которые на замер не повлияли.
+    #[test]
+    fn uncorrelated_process_is_not_listed() {
+        let mut s = sample_session("AAA", 500.0);
+        let mut run = stored_run_with_background("aaa", "chrome.exe", 0);
+        run.background[0].correlated_spike_windows = 0;
+        s.schemes[0].per_run = vec![run];
+        let html = build_session_report(&s);
+        assert!(
+            !html.contains("Фоновая нагрузка"),
+            "секция фона показана без единого совпадения"
+        );
+    }
+
+    fn stored_run_with_background(
+        scheme: &str,
+        proc: &str,
+        windows: usize,
+    ) -> crate::checkpoint::StoredRun {
+        use crate::checkpoint::{PhaseStats, StoredRun};
+        use powerbench_windows::monitor::CorrelatedProcess;
+        let zero: powerbench_metrics::run::RunStats =
+            powerbench_metrics::run::run_stats(&[1.0; 4]).unwrap();
+        StoredRun {
+            key: format!("0:{scheme}"),
+            round: 0,
+            scheme_id: scheme.to_string(),
+            scheme_name: Some(format!("План {scheme}")),
+            started_at_ns: 0,
+            duration_ms: 1000,
+            ticks: 10,
+            supercycles: 1,
+            first_tick_checksums: [0; 3],
+            run_checksums: [0; 3],
+            phases: vec![PhaseStats {
+                phase_index: 0,
+                stats: zero,
+            }],
+            combined: zero,
+            cross_phase_consistency: 0.0,
+            burst_retention_percent: 0.0,
+            background: vec![CorrelatedProcess {
+                name: proc.to_string(),
+                path: format!(r"C:\Program Files\{proc}"),
+                median_cpu_percent: 3.5,
+                peak_cpu_percent: 41.0,
+                correlated_spike_windows: windows,
+                peak_memory_bytes: 1024,
+                phases: vec!["Тяжёлая".to_string()],
+            }],
+            spike_windows: 8,
         }
     }
 

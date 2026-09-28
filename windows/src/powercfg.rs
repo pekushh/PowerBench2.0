@@ -9,6 +9,10 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+// `creation_flags` живёт не в общем API `Command`, а в Windows-расширении.
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use crate::power::decode_oem;
 
 /// Потолок ожидания `powercfg`: переключение схемы не должно висеть вечно.
@@ -108,19 +112,30 @@ fn powercfg_path() -> std::path::PathBuf {
     std::path::PathBuf::from(sys).join("System32").join("powercfg.exe")
 }
 
+/// Флаг `CREATE_NO_WINDOW` из `winbase.h`.
+///
+/// Без него каждый вызов `powercfg.exe` мигает чёрным окном консоли. На
+/// странице «Схемы» список и активная схема читаются при каждом открытии,
+/// и пользователь видел пачку консолей. Приложение — GUI, дочерняя консоль
+/// ему не нужна, а stdin/stdout и так перенаправлены в каналы.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Выполнить powercfg с аргументами; вернуть перекодированный вывод.
 ///
 /// Вызов ограничен по времени: зависший `powercfg.exe` иначе держал бы поток
 /// сессии (а вместе с ним — переключение схем питания) неограниченно долго.
 fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError> {
-    let mut child = Command::new(powercfg_path())
-        .args(args)
+    let mut cmd = Command::new(powercfg_path());
+    cmd.args(args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            PowerCfgError::new(operation, format!("не удалось запустить powercfg: {e}"))
-        })?;
+        .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = cmd.spawn().map_err(|e| {
+        PowerCfgError::new(operation, format!("не удалось запустить powercfg: {e}"))
+    })?;
 
     // Ждём с потолком; по истечении — снимаем процесс и возвращаем ошибку.
     let deadline = Instant::now() + Duration::from_secs(POWERCFG_TIMEOUT_SECS);

@@ -11,7 +11,7 @@ import {
 import { Badge, Button, Dropdown, FadeScroll, Modal, Panel } from "../components/ui";
 import { pushToast } from "../store";
 
-type SortKey = "started" | "level" | "score" | "stability";
+type SortKey = "started" | "level" | "margin" | "stability";
 
 const LEVEL_ORDER: Record<string, number> = {
   Confirmed: 0,
@@ -36,16 +36,14 @@ function levelKind(level: string): "ok" | "warn" | "plain" | "danger" {
   }
 }
 
-function scoreKind(score: number | null): "ok" | "warn" | "danger" {
-  if (score == null) return "danger";
-  if (score >= 90) return "ok";
-  if (score >= 75) return "warn";
-  return "danger";
-}
-
 /** Ключ сортировки по убыванию: пропуски уходят в конец, NaN не появляется. */
 function numDesc(v: number | null | undefined): number {
   return typeof v === "number" && Number.isFinite(v) ? v : -Infinity;
+}
+
+/** Ключ сортировки по возрастанию: пропуски тоже в конец. */
+function numAsc(v: number | null | undefined): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : Infinity;
 }
 
 /** Русские склонения: 1 запись / 2 записи / 5 записей. */
@@ -157,8 +155,13 @@ export default function ResultsPage() {
             (b.readable ? (LEVEL_ORDER[b.level] ?? 99) : 99),
         );
         break;
-      case "score":
-        arr.sort((a, b) => numDesc(b.score) - numDesc(a.score));
+      // Балл лидера в истории бесполезен: он нормализован внутри своей
+      // сессии, поэтому у лучшей схемы каждой сессии он всегда ровно 100 и
+      // «100 против 100» ничего не значит. Сортируем по перевесу — чем он
+      // меньше, тем надёжнее измерение, и это единственное, что сравнимо
+      // между сессиями.
+      case "margin":
+        arr.sort((a, b) => numAsc(a.margin) - numAsc(b.margin));
         break;
       case "stability":
         arr.sort((a, b) => numDesc(b.stability) - numDesc(a.stability));
@@ -239,7 +242,7 @@ export default function ResultsPage() {
             options={[
               { value: "started", label: "По дате" },
               { value: "level", label: "По уровню" },
-              { value: "score", label: "По баллу" },
+              { value: "margin", label: "По перевесу" },
               { value: "stability", label: "По стабильности" },
             ]}
           />
@@ -319,12 +322,6 @@ export default function ResultsPage() {
                 </div>
               </div>
               <div className="res-acts">
-                {r.score != null && Number.isFinite(r.score) ? (
-                  <div className={`res-score sc-${scoreKind(r.score)}`}>
-                    <b>{r.score.toFixed(0)}</b>
-                    <span>балл</span>
-                  </div>
-                ) : null}
                 {r.readable ? (
                   <Button sm variant="ghost" title="Открыть HTML-отчёт в браузере" onClick={(e) => {
                     e.stopPropagation();
@@ -429,23 +426,36 @@ function SessionDetail({
   const rejectedCount = s.schemes.length - admitted.length;
   const totalRuns = s.schemes.reduce((n, x) => n + x.runs, 0);
 
-  // Доверие к лидерству: при <2 прогонов вердикт предварительный.
+  // Доверие к лидерству берём из `recommend()` — того же расчёта, который
+  // поставил бейдж «Предварительно» рядом. Раньше здесь стояла своя проверка
+  // «прогонов >= 2», и при двух прогонах на схему бейдж говорил
+  // «Предварительно», а плашка под ним — «Лидеру можно верить»: два
+  // взаимоисключающих вывода на одном экране.
   const trustNote = !leader
     ? { kind: "warn" as const, title: "Сравнивать нечего", items: ["Все схемы забракованы."] }
-    : leader.runs < 2
-      ? {
-          kind: "warn" as const,
-          title: "Вердикт предварительный",
-          items: [
-            `У лидера ${leader.runs} ${plural(
-              leader.runs,
-              "прогон",
-              "прогона",
-              "прогонов",
-            )} — повторите сессию в режиме «Детально» (3 повтора).`,
-          ],
-        }
-      : { kind: "ok" as const, title: "Лидеру можно верить", items: ["Прогонов достаточно, выбросов не видно."] };
+    : {
+        kind: rec.level === "Confirmed" || rec.level === "Probable" ? ("ok" as const) : ("warn" as const),
+        title:
+          rec.level === "Confirmed"
+            ? "Лидерство подтверждено"
+            : rec.level === "Probable"
+              ? "Лидеру можно верить"
+              : rec.level === "StabilityTieBreak"
+                ? "Лидер выбран по стабильности, не по скорости"
+                : rec.level === "Preliminary"
+                  ? "Вердикт предварительный"
+                  : (rec.level_label ?? "Вердикт не определён"),
+        items: [
+          rec.level === "Preliminary" || rec.level === "StabilityTieBreak"
+            ? `Повторите сессию в режиме «Детально» — у лидера ${leader.runs} ${plural(
+                leader.runs,
+                "прогон",
+                "прогона",
+                "прогонов",
+              )}.`
+            : `У лидера ${leader.runs} ${plural(leader.runs, "прогон", "прогона", "прогонов")}.`,
+        ],
+      };
 
   return (
     <div className="rd">

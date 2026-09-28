@@ -1,8 +1,8 @@
 //! `appsettings.json` — настройки приложения (Этап 6): секция benchmark
-//! (длительность, разогрев, охлаждение, повторы, порог фона), секция
-//! appearance (тема, режим, reduce motion, sidebar), списки GUID избранных
-//! и исключённых из теста схем. Автосохранение при изменениях, запись
-//! атомарная (временный файл + перемещение).
+//! (порог фоновой нагрузки), секция appearance (тема, режим, reduce motion,
+//! sidebar), списки GUID избранных и исключённых из теста схем, веса
+//! скоринга. Автосохранение при изменениях, запись атомарная (временный файл
+//! + перемещение).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,31 +14,26 @@ use crate::checkpoint::data_dir;
 /// Имя файла настроек в каталоге данных.
 pub const APPSETTINGS_FILE_NAME: &str = "appsettings.json";
 
-/// Параметры сценария по умолчанию из спецификации «Хранение данных».
-pub const DEFAULT_DURATION_SECONDS: u32 = 30;
-pub const DEFAULT_WARMUP_SECONDS: u32 = 6;
-pub const DEFAULT_COOLING_SECONDS: u32 = 5;
-pub const DEFAULT_REPETITIONS: u32 = 3;
+/// Порог фоновой нагрузки по умолчанию (%).
 pub const DEFAULT_BACKGROUND_THRESHOLD_PERCENT: f64 = 5.0;
 
 /// Настройки сценария (секция `benchmark`).
+///
+/// Длительность, разогрев, охлаждение и повторы отсюда убраны: они задаются
+/// пресетами режима (`config::QUICK_PRESET` / `DETAILED_PRESET`), а не
+/// персистентными настройками. Держать вторую копию этих чисел в
+/// `appsettings.json` было прямой дорогой к расхождению — интерфейс брал
+/// значения из файла, а пресет на экране обещал другие. Старые файлы с этими
+/// ключами по-прежнему читаются: serde молча игнорирует неизвестные поля.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BenchmarkSettings {
-    pub duration_seconds: u32,
-    pub warmup_seconds: u32,
-    pub cooling_seconds: u32,
-    pub repetitions: u32,
     pub background_threshold_percent: f64,
 }
 
 impl Default for BenchmarkSettings {
     fn default() -> Self {
         Self {
-            duration_seconds: DEFAULT_DURATION_SECONDS,
-            warmup_seconds: DEFAULT_WARMUP_SECONDS,
-            cooling_seconds: DEFAULT_COOLING_SECONDS,
-            repetitions: DEFAULT_REPETITIONS,
             background_threshold_percent: DEFAULT_BACKGROUND_THRESHOLD_PERCENT,
         }
     }
@@ -79,10 +74,12 @@ pub struct ScoringSettings {
 
 impl Default for ScoringSettings {
     fn default() -> Self {
+        // Держим в согласии с `result::default_score_weights`, откуда берутся
+        // веса при пустой/битой секции `scoring`.
         Self {
-            performance: 50.0,
+            performance: 40.0,
             stability: 30.0,
-            worst_second: 20.0,
+            worst_second: 30.0,
         }
     }
 }
@@ -201,10 +198,6 @@ mod tests {
     #[test]
     fn defaults_match_storage_spec() {
         let s = AppSettings::default();
-        assert_eq!(s.benchmark.duration_seconds, 30);
-        assert_eq!(s.benchmark.warmup_seconds, 6);
-        assert_eq!(s.benchmark.cooling_seconds, 5);
-        assert_eq!(s.benchmark.repetitions, 3);
         assert_eq!(s.benchmark.background_threshold_percent, 5.0);
         assert_eq!(s.appearance.theme, "Graphite");
         assert_eq!(s.appearance.mode, "Dark");
@@ -219,7 +212,7 @@ mod tests {
         let dir = tmp_dir("roundtrip");
         let path = dir.join(APPSETTINGS_FILE_NAME);
         let mut s = AppSettings::default();
-        s.benchmark.duration_seconds = 60;
+        s.benchmark.background_threshold_percent = 12.5;
         s.appearance.theme = "Ocean".to_string();
         s.appearance.mode = "Light".to_string();
         s.appearance.reduce_motion = true;
@@ -231,20 +224,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Файл, написанный прошлой версией, где секция `benchmark` хранила ещё и
+    /// длительность с повторами. Приложение обязано его прочитать, а не
+    /// отвергнуть: иначе правка пресетов обнулила бы настройки пользователя.
+    #[test]
+    fn legacy_benchmark_keys_are_ignored_not_fatal() {
+        let dir = tmp_dir("legacy");
+        let path = dir.join(APPSETTINGS_FILE_NAME);
+        std::fs::write(
+            &path,
+            r#"{"benchmark":{"duration_seconds":60,"warmup_seconds":9,"cooling_seconds":7,"repetitions":4,"background_threshold_percent":8.0}}"#,
+        )
+        .unwrap();
+        let s = AppSettings::load_from(&path);
+        assert_eq!(s.benchmark.background_threshold_percent, 8.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn missing_fields_fall_back_to_defaults() {
         let dir = tmp_dir("defaults");
         let path = dir.join(APPSETTINGS_FILE_NAME);
-        // Старый/частичный файл: только секция benchmark без Duration-ключа.
+        // Старый/частичный файл: только секция benchmark с одним ключом.
         std::fs::write(
             &path,
-            r#"{"benchmark":{"warmup_seconds":9},"favorite_schemes":["x"]}"#,
+            r#"{"benchmark":{"background_threshold_percent":7.5},"favorite_schemes":["x"]}"#,
         )
         .unwrap();
         let s = AppSettings::load_from(&path);
         // Отсутствующие поля и секции дополняются дефолтами.
-        assert_eq!(s.benchmark.duration_seconds, 30);
-        assert_eq!(s.benchmark.warmup_seconds, 9);
+        assert_eq!(s.benchmark.background_threshold_percent, 7.5);
         assert_eq!(s.appearance.theme, "Graphite");
         assert_eq!(s.favorite_schemes, vec!["x"]);
         assert!(s.excluded_schemes.is_empty());
@@ -257,12 +266,15 @@ mod tests {
         let path = dir.join(APPSETTINGS_FILE_NAME);
         let mut s = AppSettings::default();
         s.update_to(&path, |s| {
-            s.benchmark.repetitions = 5;
+            s.benchmark.background_threshold_percent = 9.0;
             s.appearance.sidebar_collapsed = true;
             s.excluded_schemes.push("g".to_string());
         })
         .unwrap();
-        assert_eq!(AppSettings::load_from(&path).benchmark.repetitions, 5);
+        assert_eq!(
+            AppSettings::load_from(&path).benchmark.background_threshold_percent,
+            9.0
+        );
         assert!(AppSettings::load_from(&path).appearance.sidebar_collapsed);
         assert_eq!(AppSettings::load_from(&path).excluded_schemes, vec!["g"]);
         let _ = std::fs::remove_dir_all(&dir);

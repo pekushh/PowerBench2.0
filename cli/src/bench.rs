@@ -635,14 +635,7 @@ pub fn cmd_settings_show(_args: &[String]) -> ExitCode {
         "<дефолт, файла нет>".to_string()
     };
     println!("Файл: {src}");
-    println!(
-        "benchmark: длительность {} с, разогрев {} с, охлаждение {} с, повторов {}, порог фона {}",
-        s.benchmark.duration_seconds,
-        s.benchmark.warmup_seconds,
-        s.benchmark.cooling_seconds,
-        s.benchmark.repetitions,
-        s.benchmark.background_threshold_percent
-    );
+    println!("benchmark: порог фона {}", s.benchmark.background_threshold_percent);
     println!(
         "appearance: тема «{}», режим «{}», reduceMotion {}, sidebarCollapsed {}",
         s.appearance.theme,

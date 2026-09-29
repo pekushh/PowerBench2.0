@@ -34,10 +34,11 @@ use crate::config::{
     validate_config,
 };
 use crate::quarantine::{
-    ABSOLUTE_TICKS_FLOOR, CATASTROPHIC_SHARE_LIMIT, DEGRADED_MIN_RUNS, DEGRADED_SHARE_LIMIT,
+    CATASTROPHIC_SHARE_LIMIT, DEGRADED_MIN_RUNS, DEGRADED_SHARE_LIMIT, MACHINE_COLLAPSE_SHARE,
     MIN_RUNS_FOR_JUDGMENT, QuarantineKind, TestingMarker, UNSTABLE_MAD_LIMIT,
-    below_absolute_floor, catastrophic_share, clear_testing_marker, degraded_share, load_quarantine,
-    phase_floor_collapse, preflight_filter, quarantine_add, unstable_spread, write_testing_marker,
+    below_machine_baseline, catastrophic_share, clear_testing_marker, degraded_share,
+    load_quarantine, phase_floor_collapse, preflight_filter, quarantine_add, unstable_spread,
+    write_testing_marker,
 };
 
 /// Период опроса сторожевого таймера.
@@ -474,12 +475,14 @@ enum WatchdogVerdict {
     Collapsed { ticks_per_sec: u64 },
 }
 
-/// Насколько тиков в секунду машина должна уметь держать, чтобы замер вообще
-/// имел смысл.
+/// Доля мгновенного темпа, ниже которой фаза считается проваленной.
 ///
-/// Порог заведомо ниже любой реальной нагрузки (это 60 миллионов циклов в
-/// секунду), поэтому срабатывает не на «медленно», а на «не работает».
-pub const COLLAPSE_TICKS_FLOOR: u64 = 60;
+/// Порогов в тиках в секунду нет намеренно: абсолютное число было бы свойством
+/// машины, а не схемы, и на ноутбуке обрывало бы здоровые замеры. Ориентиром
+/// служит то, что эта же машина показывала в этой же фазе раньше; если такой
+/// истории нет, фаза не обрывается вовсе (сторож зависания по нулевому
+/// прогрессу остаётся — он от машины не зависит).
+pub const COLLAPSE_RATE_SHARE: f64 = 0.20;
 /// Первые секунды фазы не смотрим: разгон частот и холодный кэш дают низкий
 /// темп даже у совершенно здоровой машины.
 pub const COLLAPSE_ARM_SECS: u64 = 4;
@@ -497,17 +500,32 @@ pub const COLLAPSE_HOLD_SECS: u64 = 3;
 #[derive(Debug, Default)]
 pub struct CollapseDetector {
     below_since: Option<Duration>,
+    /// Порог в тиках в секунду; без ориентира по истории машины его нет.
+    floor: Option<f64>,
 }
 
 impl CollapseDetector {
+    /// Создать детектор с порогом из истории машины для этой фазы.
+    pub fn with_reference(reference_p1: Option<f64>) -> Self {
+        Self {
+            below_since: None,
+            floor: reference_p1
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .map(|v| v * COLLAPSE_RATE_SHARE),
+        }
+    }
+
     /// Отметить очередной замер темпа; вернуть, сколько секунд темп держится
     /// ниже порога, если пора прекращать замер.
     pub fn observe(&mut self, ticks_per_sec: u64, elapsed: Duration) -> Option<Duration> {
+        // Без ориентира по истории машины решение не принимаем: неизвестно, что
+        // для неё считать нормой.
+        let floor = self.floor?;
         // До разгона не смотрим вовсе.
         if elapsed.as_secs() < COLLAPSE_ARM_SECS {
             return None;
         }
-        let below = ticks_per_sec < COLLAPSE_TICKS_FLOOR;
+        let below = (ticks_per_sec as f64) < floor;
         if !below {
             // Темп восстановился — отсчёт начинается заново.
             self.below_since = None;
@@ -532,12 +550,13 @@ fn spawn_watchdog(
     scoreboard: Arc<Scoreboard>,
     cancel: Arc<AtomicBool>,
     user_cancel: Arc<AtomicBool>,
+    collapse: CollapseDetector,
 ) -> (JoinHandle<()>, Receiver<WatchdogVerdict>) {
     let (tx, rx) = mpsc::channel();
     let handle: JoinHandle<()> = std::thread::spawn(move || {
         let mut last_ticks: u64 = 0;
         let mut last_progress = Instant::now();
-        let mut collapse = CollapseDetector::default();
+        let mut collapse = collapse;
         // Фаза 1: ждём старта фазы. Если пользователь отменил раньше — выходим.
         loop {
             if user_cancel.load(Ordering::Relaxed) {
@@ -642,6 +661,7 @@ fn run_measured_phase(
     label: &str,
     monitor_map: &Arc<Mutex<BTreeMap<u64, Vec<ProcessSample>>>>,
     observer: Option<Arc<dyn TelemetryObserver>>,
+    baseline: Option<&crate::history::MachineBaseline>,
 ) -> Result<(RunReport, Vec<f64>), PhaseFailure> {
     engine.reset();
     engine.prepare_sample_buffer(phase, seconds.max(1));
@@ -651,8 +671,14 @@ fn run_measured_phase(
     let monitor_run = Arc::new(AtomicBool::new(true));
     let monitor_handle = spawn_monitor(Arc::clone(monitor_map), Arc::clone(&monitor_run));
     // Сторожевой таймер: отменяет при бездействии или пользовательском Ctrl+C.
-    let (watchdog_handle, rx) =
-        spawn_watchdog(Arc::clone(&scoreboard), cancel, Arc::clone(&user_cancel));
+    // Детектор провала получает ориентир из истории машины: без него фаза не
+    // обрывается, потому что неизвестно, что для этой машины считать нормой.
+    let (watchdog_handle, rx) = spawn_watchdog(
+        Arc::clone(&scoreboard),
+        cancel,
+        Arc::clone(&user_cancel),
+        CollapseDetector::with_reference(baseline.as_ref().and_then(|b| b.p1_of(label))),
+    );
     // Тел­еметрия ~10 Гц для интерфейса: читает снапшот ядра и зовёт наблюдателя.
     let telemetry_handle = observer.as_ref().map(|obs| {
         let obs = Arc::clone(obs);
@@ -844,6 +870,13 @@ pub fn run_session(
 
     let signature = session_signature(engine);
 
+    // Ориентир «что эта машина умеет» из её же истории. Абсолютных порогов в
+    // коде нет намеренно: 100 тик/с — это много для ноутбука и мало для
+    // станции. Пока сопоставимой истории нет, ориентира нет — и тогда решения
+    // о браке по абсолютной величине не принимаются вовсе.
+    let baseline =
+        crate::history::machine_baseline(&crate::result::IdentityJson::from_signature(&signature));
+
     // Список схем и карта «guid → имя»: имя нужно только для отображения
     // (PlanName), в идентификации/матчинге никогда не участвует.
     let schemes_list = driver.list_schemes().map_err(SessionError::Config)?;
@@ -950,6 +983,7 @@ pub fn run_session(
         &mut events,
         &name_map,
         &observer,
+        baseline.as_ref(),
     );
 
     // Гарантия ОС: исходная схема восстанавливается при любом завершении —
@@ -978,6 +1012,7 @@ pub fn run_session(
         &name_map,
         &observer,
         &mut events,
+        baseline.as_ref(),
     );
 
     note(&observer, &mut events, SessionEvent::Finished);
@@ -1004,6 +1039,7 @@ fn run_session_loop(
     events: &mut Vec<SessionEvent>,
     name_map: &BTreeMap<String, String>,
     observer: &Option<Arc<dyn TelemetryObserver>>,
+    baseline: Option<&crate::history::MachineBaseline>,
 ) -> Result<bool, SessionError> {
     let durs = phase_durations(plan.duration_seconds);
     let mut cancelled = false;
@@ -1124,8 +1160,14 @@ fn run_session_loop(
             engine.prepare_sample_buffer(Phase::Response, plan.warmup_seconds.max(1));
             let warmup_cancel = engine.canceller();
             let warmup_scoreboard = engine.scoreboard_arc();
-            let (warmup_handle, warmup_rx) =
-                spawn_watchdog(warmup_scoreboard, warmup_cancel, Arc::clone(user_cancel));
+            let (warmup_handle, warmup_rx) = spawn_watchdog(
+                warmup_scoreboard,
+                warmup_cancel,
+                Arc::clone(user_cancel),
+                // Разогрев — не измерение: обрывать его по темпу нельзя, иначе
+                // плохая схема «успела бы» не начать замер вовсе.
+                CollapseDetector::default(),
+            );
             let warmup_result = engine.run_phase(
                 Phase::Response,
                 RunTarget::Duration(Duration::from_secs(plan.warmup_seconds.max(1))),
@@ -1245,6 +1287,7 @@ fn run_session_loop(
                     label,
                     &monitor_map,
                     observer.clone(),
+                    baseline,
                 );
                 match phase_result {
                     Ok((report, times)) => {
@@ -1603,13 +1646,14 @@ fn median_of(values: &[f64]) -> f64 {
 
 /// Пост-сессия: карантин нестабильных и деградировавших схем по статистике
 /// всех записанных прогонов. Вызывается один раз после агрегации.
-/// Абсолютный брак при единственной схеме в сессии: тиков слишком мало, чтобы
-/// это вообще могла быть рабочая машина.
+/// Отказ относительно собственной истории машины при единственной схеме.
 ///
-/// Сравнивать не с чем — в сессии одна схема. Раньше такой замер проходил как
-/// годный: 10 тик/с это ~5 миллиардов циклов в секунду, а не измерение
-/// производительности. Порог заведомо ниже любой реальной нагрузки и не
-/// касается машин, где замер идёт хотя бы с десятки тиков в секунду.
+/// Сравнивать не с чем — в сессии одна схема. Единственный честный ориентир —
+/// лучший результат этой же машины при той же конфигурации; без него решение не
+/// принимается. Раньше здесь стояла константа «100 тик/с», и это была ошибка:
+/// сто тиков — много для ноутбука и мало для станции, то есть на медленной
+/// машине она браковала бы здоровые схемы, а на быстрой — пропускала бы
+/// поломку.
 fn quarantine_absolute_floor(
     checkpoint: &Checkpoint,
     medians: &BTreeMap<String, Vec<f64>>,
@@ -1617,6 +1661,7 @@ fn quarantine_absolute_floor(
     name_map: &BTreeMap<String, String>,
     observer: &Option<Arc<dyn TelemetryObserver>>,
     events: &mut Vec<SessionEvent>,
+    baseline: Option<&crate::history::MachineBaseline>,
 ) {
     let canon = |lower: &str| {
         checkpoint
@@ -1626,18 +1671,23 @@ fn quarantine_absolute_floor(
             .map(|r| r.scheme_id.clone())
             .unwrap_or_else(|| lower.to_string())
     };
+    let reference = baseline.map(|b| b.best_median);
     for (lower, values) in medians {
         let own = median_of(values);
-        if !below_absolute_floor(own) {
+        if !below_machine_baseline(own, reference) {
             continue;
         }
+        let Some(best) = reference else {
+            continue;
+        };
         quarantine_scheme(
             &canon(lower),
             name_map,
             QuarantineKind::Degraded,
             &format!(
-                "медиана {own:.1} тик/с — ниже минимума {ABSOLUTE_TICKS_FLOOR:.0} \
-                 тик/с для рабочей машины"
+                "медиана {own:.1} тик/с — менее {:.0}% от лучшего результата \
+                 этой же машины ({best:.1})",
+                MACHINE_COLLAPSE_SHARE * 100.0
             ),
             plan_guid,
             observer,
@@ -1665,8 +1715,8 @@ fn best_p1_per_phase(checkpoint: &Checkpoint) -> BTreeMap<u8, f64> {
 
 /// Причина провала фазы по худшему окну, если она есть.
 ///
-/// Схема, чей P1 в какой-либо фазе провалился ниже пола, тогда как лидер в этой
-/// же фазе держит норму. Возвращаем `None`, если такого провала нет.
+/// Схема, чей P1 в какой-либо фазе — малая доля от P1 лидера в этой же фазе.
+/// Возвращаем `None`, если такого провала нет.
 fn phase_collapse_reason(
     checkpoint: &Checkpoint,
     scheme_id: &str,
@@ -1709,6 +1759,7 @@ fn quarantine_post_session(
     name_map: &BTreeMap<String, String>,
     observer: &Option<Arc<dyn TelemetryObserver>>,
     events: &mut Vec<SessionEvent>,
+    baseline: Option<&crate::history::MachineBaseline>,
 ) {
     let mut medians: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for r in &checkpoint.runs {
@@ -1724,10 +1775,16 @@ fn quarantine_post_session(
         }
     }
     if medians.len() < 2 {
-        // Одна схема: сравнивать не с чем, но у неё есть собственная медиана —
-        // бракуем её только по абсолютному полу «рабочая машина не может столько».
+        // Одна схема: сравнивать не с чем. Единственный ориентир в этом случае —
+        // собственная история машины, и без неё решение не принимается.
         quarantine_absolute_floor(
-            checkpoint, &medians, plan_guid, name_map, observer, events,
+            checkpoint,
+            &medians,
+            plan_guid,
+            name_map,
+            observer,
+            events,
+            baseline,
         );
         return;
     }
@@ -2002,7 +2059,7 @@ mod tests {
     /// Медленно ≠ сломано: пока разгон не закончился, низкий темп нормален.
     #[test]
     fn collapse_detector_ignores_slow_start() {
-        let mut d = CollapseDetector::default();
+        let mut d = CollapseDetector::with_reference(Some(1000.0));
         // Первые секунды фазы — низкий темп из-за разгона, обрыва быть не должно,
         // сколько бы секунд мы ни наблюдали.
         for t in 0..COLLAPSE_ARM_SECS {
@@ -2014,10 +2071,51 @@ mod tests {
         }
     }
 
+    /// Без ориентира по истории машины решение не принимается вовсе.
+    #[test]
+    fn collapse_detector_is_silent_without_machine_baseline() {
+        let mut d = CollapseDetector::with_reference(None);
+        for t in 0..600 {
+            assert_eq!(
+                d.observe(1, Duration::from_secs(t)),
+                None,
+                "без истории машины обрывать нельзя: норма неизвестна"
+            );
+        }
+    }
+
+    /// Порог считается от того, что машина показывала раньше, а не от
+    /// константы: медленная машина не должна обрываться за «нормальный» темп.
+    #[test]
+    fn collapse_detector_threshold_follows_the_machine() {
+        // Медленная машина: её норма — 100 тиков, обрыв ниже 20.
+        let mut slow = CollapseDetector::with_reference(Some(100.0));
+        assert_eq!(slow.observe(50, Duration::from_secs(5)), None);
+        // Быстрая машина: норма — 5000, те же 50 тиков — обрыв.
+        let mut fast = CollapseDetector::with_reference(Some(5000.0));
+        let mut fired = false;
+        for t in COLLAPSE_ARM_SECS..=20 {
+            if fast.observe(50, Duration::from_secs(t)).is_some() {
+                fired = true;
+                break;
+            }
+        }
+        assert!(fired, "на быстрой машине 50 тиков — это обрыв");
+        // А на медленной машине 50 тиков — норма, и 10 тиков уже нет.
+        let mut stopped = false;
+        for t in COLLAPSE_ARM_SECS..=20 {
+            if slow.observe(10, Duration::from_secs(t)).is_some() {
+                stopped = true;
+                break;
+            }
+        }
+        assert!(stopped, "на медленной машине 10 тиков — это обрыв");
+    }
+
     /// Реальный случай: план душит машину до единиц тиков в секунду.
     #[test]
     fn collapse_detector_stops_a_crawling_machine() {
-        let mut d = CollapseDetector::default();
+        let mut d = CollapseDetector::with_reference(Some(1000.0));
         let mut stopped_at = None;
         for t in COLLAPSE_ARM_SECS..=20 {
             if d.observe(10, Duration::from_secs(t)).is_some() {
@@ -2036,7 +2134,7 @@ mod tests {
     /// сам скачет.
     #[test]
     fn collapse_detector_survives_single_dip() {
-        let mut d = CollapseDetector::default();
+        let mut d = CollapseDetector::with_reference(Some(1000.0));
         assert_eq!(d.observe(5000, Duration::from_secs(5)), None);
         assert_eq!(d.observe(10, Duration::from_secs(6)), None);
         // Темп вернулся — отсчёт сброшен, до упора держимся.
@@ -2047,7 +2145,7 @@ mod tests {
     /// Здоровая машина с тиками тысячами не должна обрываться никогда.
     #[test]
     fn collapse_detector_stays_quiet_on_a_healthy_machine() {
-        let mut d = CollapseDetector::default();
+        let mut d = CollapseDetector::with_reference(Some(4000.0));
         for t in 0..600 {
             assert_eq!(d.observe(3000, Duration::from_secs(t)), None);
         }
@@ -2197,6 +2295,7 @@ mod tests {
             "фаза-тест",
             &monitor_map,
             obs,
+            None,
         );
         assert!(result.is_ok());
         let got = recorded.lock().unwrap().len();

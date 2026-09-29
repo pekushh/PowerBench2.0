@@ -5,6 +5,7 @@
 //! сигнатур для ранжирования (записи с другой версией/хэшем/seed в сравнение
 //! не входят).
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -142,6 +143,116 @@ pub fn rankable_with<'a>(all: &'a [SessionJson], base: &IdentityJson) -> Vec<&'a
     all.iter()
         .filter(|s| same_identity(&s.identity, base))
         .collect()
+}
+
+/// Сколько последних сессий читать, когда ищется базовая линия машины.
+const BASELINE_SCAN_LIMIT: usize = 25;
+
+/// Что эта машина уже показывала раньше: лучший P1 каждой фазы.
+///
+/// Схему питания нельзя судить по абсолютным тиках в секунду: сто тиков — это
+/// много для ноутбука и мало для рабочей станции, и константа «ниже этого
+/// бракуем» рано или поздно бракует здоровые схемы на медленной машине. Ориентир
+/// может быть только один — собственная история этой машины при той же
+/// конфигурации замера (тот же хэш, те же воркеры).
+///
+/// Возвращает `None`, если сопоставимой истории ещё нет: тогда решения о браке
+/// по абсолютной величине принимать не на чем, и код их не принимает.
+pub fn machine_baseline(identity: &IdentityJson) -> Option<MachineBaseline> {
+    let entries = list_results().ok()?;
+    // Лучшее значение каждой сессии по фазе, а не максимум по всем: одна
+    // аномально удачная сессия иначе задрала бы планку, и сторож начал бы
+    // обрывать здоровые замеры. Медиана по сессиям к этому устойчива.
+    let mut per_session: Vec<(BTreeMap<String, f64>, f64)> = Vec::new();
+    for entry in entries.iter().take(BASELINE_SCAN_LIMIT) {
+        let Ok(s) = load_result(&entry.path) else {
+            continue;
+        };
+        if !same_identity(&s.identity, identity) {
+            continue;
+        }
+        let mut by_phase: BTreeMap<String, f64> = BTreeMap::new();
+        let mut best_median = 0.0f64;
+        for scheme in &s.schemes {
+            if scheme.median_throughput.is_finite() && scheme.median_throughput > best_median {
+                best_median = scheme.median_throughput;
+            }
+            for ph in &scheme.phases {
+                if !ph.p1_throughput.is_finite() {
+                    continue;
+                }
+                let slot = by_phase.entry(ph.name.clone()).or_insert(0.0);
+                if ph.p1_throughput > *slot {
+                    *slot = ph.p1_throughput;
+                }
+            }
+        }
+        if best_median > 0.0 || !by_phase.is_empty() {
+            per_session.push((by_phase, best_median));
+        }
+    }
+    if per_session.is_empty() {
+        return None;
+    }
+    let mut best_p1: BTreeMap<String, f64> = BTreeMap::new();
+    for phase in per_session
+        .iter()
+        .flat_map(|(phases, _)| phases.keys().cloned().collect::<Vec<_>>())
+    {
+        let values: Vec<f64> = per_session
+            .iter()
+            .filter_map(|(phases, _)| phases.get(&phase).copied())
+            .collect();
+        if let Some(m) = median_of_values(&values) {
+            best_p1.insert(phase, m);
+        }
+    }
+    let medians: Vec<f64> = per_session.iter().map(|(_, m)| *m).collect();
+    Some(MachineBaseline {
+        best_p1_by_phase: best_p1,
+        best_median: median_of_values(&medians).unwrap_or(0.0),
+    })
+}
+
+/// Медиана; `None` для пустого среза.
+fn median_of_values(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut v: Vec<f64> = values.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    Some(if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    })
+}
+
+/// Ориентир машины: что она показывала при той же конфигурации замера.
+///
+/// Собирается медианой по последним сессиям, а не максимумом: одна аномально
+/// удачная сессия не должна поднять планку до нереальной и не должна заставить
+/// сторож обрывать здоровые замеры.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MachineBaseline {
+    /// Лучший P1 каждой фазы (ключ — название фазы).
+    pub best_p1_by_phase: BTreeMap<String, f64>,
+    /// Лучшая медиана прогона среди всех схем и фаз истории.
+    pub best_median: f64,
+}
+
+impl MachineBaseline {
+    /// Лучший P1 фазы, если он известен.
+    pub fn p1_of(&self, phase_name: &str) -> Option<f64> {
+        self.best_p1_by_phase
+            .get(phase_name)
+            .copied()
+            .filter(|v| v.is_finite() && *v > 0.0)
+    }
 }
 
 /// Безопасное имя файла из произвольной строки (GUID/`plan-…`).

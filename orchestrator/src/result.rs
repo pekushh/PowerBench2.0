@@ -111,6 +111,29 @@ pub struct IdentityJson {
     pub cpu_brand: String,
 }
 
+impl IdentityJson {
+    /// Идентичность по сигнатуре совместимости прогона.
+    ///
+    /// Нужна там, где важно совпадение полей для агрегирования, а не состав
+    /// машины для человека: например, при поиске истории той же конфигурации.
+    /// Поля ОС и памяти здесь пустые намеренно — их дополняет вызывающая сторона.
+    pub fn from_signature(sig: &powerbench_metrics::CompatibilitySignature) -> Self {
+        Self {
+            workload_version: sig.workload_version.clone(),
+            config_hash: sig.config_hash.clone(),
+            seed_hex: format!("{:016X}", sig.seed),
+            worker_count: sig.worker_count,
+            logical_cpus: sig.logical_cpus,
+            timer_hz: sig.timer_hz,
+            cpu_identifier: sig.cpu_identifier.clone(),
+            diagnostics_version: sig.diagnostics_version.clone(),
+            os_build: String::new(),
+            memory_gib: 0.0,
+            cpu_brand: String::new(),
+        }
+    }
+}
+
 /// Одна схема в результате: агрегат + прогоны.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchemeJson {

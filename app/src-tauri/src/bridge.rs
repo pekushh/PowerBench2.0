@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use powerbench_core::engine::Engine;
 use powerbench_orchestrator::appsettings::{self, AppSettings};
 use powerbench_orchestrator::checkpoint::{Checkpoint, load_checkpoint};
-use powerbench_orchestrator::config::{SessionConfig, validate_config};
+use powerbench_orchestrator::config::{SessionConfig, phase_durations, validate_config};
 use powerbench_orchestrator::history::{
     self, export_csv_to, export_json, list_results, load_result,
 };
@@ -57,6 +57,10 @@ pub struct TestRequestDto {
     pub scheme_ids: Vec<String>,
     /// Продолжить текущую контрольную точку (план берётся из неё).
     pub resume: bool,
+    /// Активная в момент запуска схема — эталон для оценки дрейфа машины.
+    /// Её прогоны и так есть в каждом раунде, отдельного времени не тратится.
+    #[serde(default)]
+    pub active_scheme_id: Option<String>,
     /// Сохранять сырые выборки в результат сессии (новый UI).
     /// Поле контракта API: читается внешним фронтендом, бэкенд пока игнорирует.
     #[serde(default)]
@@ -121,6 +125,10 @@ fn build_plan(req: &TestRequestDto) -> Result<SessionConfig, String> {
         worker_count: req.worker_count,
         scheme_ids: req.scheme_ids.clone(),
         plan_guid: crate::new_plan_guid(),
+        // Эталон для оценки дрейфа — активная схема. Берётся из того же
+        // запроса: интерфейс знает, какая схема активна, и передаёт её, чтобы
+        // правило не расходилось между UI и CLI.
+        reference_scheme_id: req.active_scheme_id.clone(),
     };
     match validate_config(&plan) {
         Some(reason) => Err(reason),
@@ -727,6 +735,19 @@ pub fn estimate_session(
     }
 }
 
+/// Одна измеряемая фаза сценария (зеркало `core::config::Phase`).
+#[derive(serde::Serialize)]
+pub struct PhasePlanRow {
+    /// Порядковый номер фазы (0..3) — он же индекс в `StoredRun::phases`.
+    pub index: u8,
+    /// Подпись фазы.
+    pub name: String,
+    /// Длительность фазы при заданной общей длительности, с.
+    pub seconds: u64,
+    /// Сколько процентов пула занято в этой фазе.
+    pub active_worker_percent: u32,
+}
+
 /// Параметры режима теста для интерфейса (зеркало `config::Preset`).
 ///
 /// Нужны, потому что карточки режимов обещают конкретные «повторы» и «точность»,
@@ -741,6 +762,33 @@ pub struct PresetDto {
     pub warmup_seconds: u64,
     pub cooling_seconds: u64,
     pub repetitions: u32,
+}
+
+/// Длительности измеряемых фаз для заданной общей длительности.
+///
+/// Раньше интерфейс держал свою копию формулы деления, и после появления
+/// четвёртой фазы показал бы три фазы вместо четырёх — молча и до первого
+/// замера. Теперь единственный источник — `orchestrator::config`.
+#[tauri::command]
+pub fn phase_plan(duration_seconds: u64) -> Vec<PhasePlanRow> {
+    let d = phase_durations(duration_seconds);
+    powerbench_core::config::PHASE_ORDER
+        .iter()
+        .enumerate()
+        .map(|(i, p)| PhasePlanRow {
+            index: i as u8,
+            name: p.label().to_string(),
+            seconds: match p {
+                // Сопоставление по самой фазе, а не по номеру: иначе новая фаза
+                // в `PHASE_ORDER` молча получила бы длительность соседней.
+                powerbench_core::config::Phase::Light => d.light_seconds,
+                powerbench_core::config::Phase::Partial => d.partial_seconds,
+                powerbench_core::config::Phase::Heavy => d.heavy_seconds,
+                powerbench_core::config::Phase::Response => d.response_seconds,
+            },
+            active_worker_percent: p.active_worker_percent(),
+        })
+        .collect()
 }
 
 /// Значения обоих пресетов одним вызовом.

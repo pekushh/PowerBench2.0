@@ -252,9 +252,13 @@ impl Engine {
 
             let params = match phase {
                 Phase::Light => profile_params(Profile::Light),
+                Phase::Partial => profile_params(Profile::Partial),
                 Phase::Heavy => profile_params(Profile::Heavy),
                 Phase::Response => profile_params(response_profile(phase_index)),
             };
+            // Сколько воркеров реально берут задачи: в фазе частичной нагрузки
+            // вторая половина пула простаивает, и это и есть измеряемый режим.
+            let active_workers = active_workers_for(phase, self.pool.worker_count());
 
             // Время тика измеряется вокруг четырёх шагов (QPC/Instant).
             let tick_started = Instant::now();
@@ -264,7 +268,8 @@ impl Engine {
 
             // 2. Диспетчер задач.
             let descriptors = build_descriptors(&params);
-            self.pool.dispatch(params.worker_jobs, &descriptors);
+            self.pool
+                .dispatch(params.worker_jobs, active_workers, &descriptors);
 
             // 3. Синхронизация (bounded, кооперативная отмена).
             self.pool.wait_batch().map_err(|e| match e {
@@ -377,6 +382,16 @@ impl Engine {
 
 /// Main-стадия: последовательная обработка сущностей в предвычисленном
 /// порядке с ветвистыми переходами и накоплением контрольной суммы.
+/// Сколько воркеров занято в фазе (1..=worker_count).
+///
+/// Для пула из одного воркера результат всё равно 1: парковать последний
+/// некому, и «частичная нагрузка» выродилась бы в фазу без нагрузки вовсе.
+fn active_workers_for(phase: Phase, worker_count: usize) -> usize {
+    let pct = phase.active_worker_percent();
+    let active = worker_count.saturating_mul(pct as usize) / 100;
+    active.clamp(1, worker_count)
+}
+
 fn main_stage(entities: &RawShared<EntityBuffers>, params: &ProfileParams) -> u64 {
     let p = unsafe { &mut *entities.get() };
     let n = params.main_entity_updates.min(ENTITY_CAPACITY);

@@ -8,31 +8,31 @@ use crate::session::{
     BACKGROUND_ATTEMPTS, BACKGROUND_MEASURE_MS, BACKGROUND_RETRY_PAUSE_MS,
 };
 
-/// Пресет «Быстрый»: длительность 20 с, разогрев 3 с, охлаждение 3 с, повторов 2.
+/// Пресет «Быстрый»: длительность 30 с, разогрев 3 с, охлаждение 3 с, 1 повтор.
 ///
-/// Раньше здесь было 9/2/1/1, а девять секунд — это фазы 3/3/3. Трёх секунд
+/// Раньше здесь было 9/2/1/1, а девять секунд — это фазы по три. Трёх секунд
 /// тяжёлой фазы не хватает, чтобы замер вообще что-то различал: всё это время
 /// процессор ещё разгоняется, схемы питания ведут себя одинаково, а разница
-/// между ними тонет в шуме. Режим «Быстро» отвечает за быструю сравнику, но
-/// сравнивать нечего, если сигнала меньше шума.
+/// между ними тонется в шуме. При одном повторе доверительный интервал не
+/// строится вовсе, поэтому режим честно называется скринингом: он годен, чтобы
+/// отсеять явно слабые схемы, но не для выбора победителя.
 ///
-/// 20 секунд дают фазы 6/8/6 — тяжёлая фаза в 2.7 раза длиннее. Два повтора —
-/// минимум, при котором приложение вообще считает разброс: при одном
-/// повторе доверительный интервал пуст, и в отчёте стабильность остаётся
-/// незаполненной.
+/// 30 секунд на четыре фазы (7/6/8/9) — минимум, при котором у каждой фазы
+/// набирается выборка для перцентилей.
 pub const QUICK_PRESET: Preset = Preset {
-    duration_seconds: 20,
+    duration_seconds: 30,
     warmup_seconds: 3,
     cooling_seconds: 3,
-    repetitions: 2,
+    repetitions: 1,
 };
 
-/// Пресет «Детально» (значения по умолчанию): 45 с, 8 с, 5 с, повторов 5.
+/// Пресет «Детально» (значения по умолчанию): 60 с, 8 с, 5 с, повторов 5.
 ///
-/// 45 секунд — фазы 13/19/13: девятнадцать секунд тяжёлой фазы измеряют уже
-/// установившийся режим под нагрузкой, а не разгон, и там политика схемы
+/// 60 секунд — фазы 17/12/19/12. Девятнадцать секунд тяжёлой фазы измеряют
+/// уже установившийся режим под нагрузкой, а не разгон, и там политика схемы
 /// (максимальное состояние процессора, агрессивность разгона, охлаждение)
-/// уже вступила в силу.
+/// уже вступила в силу. Двенадцать секунд частичной нагрузки закрывают режим,
+/// где различие между схемами максимально.
 ///
 /// Пять повторов — не «больше точности вообще», а минимальное число, при
 /// котором адаптивная остановка вообще срабатывает: перевес, достаточный для
@@ -40,7 +40,7 @@ pub const QUICK_PRESET: Preset = Preset {
 /// повтора обещали экономию времени, которой на практике не происходило —
 /// сессия всё равно шла до конца.
 pub const DETAILED_PRESET: Preset = Preset {
-    duration_seconds: 45,
+    duration_seconds: 60,
     warmup_seconds: 8,
     cooling_seconds: 5,
     repetitions: 5,
@@ -72,12 +72,22 @@ pub struct SessionConfig {
     pub worker_count: Option<usize>,
     /// Идентификаторы выбранных схем (GUID), в порядке предпочтения пользователя.
     pub scheme_ids: Vec<String>,
+    /// Схема-эталон, измеряемая один раз в каждом раунде (GUID).
+    ///
+    /// Её прогоны не участвуют в ранжировании, но дают две вещи, которых
+    /// иначе нет: оценку дрейфа машины за сессию (разброс по раундам) и
+    /// «перевес против эталона» — утверждение, не зависящее от того, что
+    /// остальные схемы мерились в другие моменты. `None` — режим без эталона.
+    #[serde(default)]
+    pub reference_scheme_id: Option<String>,
     /// Идентификатор плана — попадает в ключи прогонов `"{round}:{plan-guid}"`.
     pub plan_guid: String,
 }
 
 /// Ограничения настроек (спецификация).
-pub const MIN_DURATION_SECONDS: u64 = 9;
+/// Минимум — четыре фазы по 4 с: меньше фаза не набирает выборки для
+/// перцентилей, а перцентили и есть основной результат.
+pub const MIN_DURATION_SECONDS: u64 = 16;
 /// Потолок длительности измеряемой части: защита от переполнения расчёта
 /// ёмкости буфера сэмплов (`duration * ticks_per_second`).
 pub const MAX_DURATION_SECONDS: u64 = 3600;
@@ -101,8 +111,8 @@ pub const PAUSE_AFTER_SCHEME_SECS: u64 = 3;
 pub const STABILIZATION_SECS: u64 = 2;
 /// Пауза охлаждения между прогонами по умолчанию (секунды).
 pub const DEFAULT_COOLING_SECS: u64 = 5;
-/// Число измеряемых фаз в прогоне (Лёгкая, Тяжёлая, Отклик).
-pub const PHASES_PER_RUN: u64 = 3;
+/// Число измеряемых фаз в прогоне (Лёгкая, Частичная, Тяжёлая, Отклик).
+pub const PHASES_PER_RUN: u64 = 4;
 /// Оценка времени проверки фоновой нагрузки: одна попытка, а при шуме —
 /// до трёх с паузами между ними.
 pub const BACKGROUND_CHECK_SECS: f64 =
@@ -238,22 +248,27 @@ pub fn validate_config(cfg: &SessionConfig) -> Option<String> {
     None
 }
 
-/// Деление длительности на измеряемые фазы (целочисленно, спецификация):
+/// Деление длительности на измеряемые фазы (целочисленно).
 ///
-/// ```text
-/// total = max(9, DurationSeconds);  extra = total - 9
-/// light    = 3 + extra * 3 / 10
-/// response = 3 + extra * 3 / 10
-/// heavy    = total - light - response
-/// ```
+/// Фаз стало четыре: кроме «Лёгкой», «Тяжёлой» и «Отклика» появилась
+/// «Частичная» — половина пула занята. Это единственный режим, где различие
+/// между схемами питания максимально: при полной загрузке процессор упирается в
+/// лимиты мощности, и все схемы выглядят одинаково, а при частичной работает
+/// политика разгона и минимального состояния.
+///
+/// Доли: база по 3 с на фазу, остаток — 30 % лёгкой, 20 % частичной, 35 %
+/// тяжёлой, 15 % «Отклика». Тяжёлой отдаётся больше всех сознательно: это
+/// единственная фаза, где измеряется установившаяся производительность, и её
+/// результат — самый устойчивый из четырёх.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseDurations {
     pub light_seconds: u64,
+    pub partial_seconds: u64,
     pub heavy_seconds: u64,
     pub response_seconds: u64,
 }
 
-/// Длительности измеряемых фаз по общей длительности.
+/// Деление длительности на измеряемые фазы.
 pub const fn phase_durations(total: u64) -> PhaseDurations {
     let total = if total < MIN_DURATION_SECONDS {
         MIN_DURATION_SECONDS
@@ -261,11 +276,16 @@ pub const fn phase_durations(total: u64) -> PhaseDurations {
         total
     };
     let extra = total - MIN_DURATION_SECONDS;
-    let side = MIN_DURATION_SECONDS / 3 + extra.saturating_mul(3) / 10;
+    let base = MIN_DURATION_SECONDS / 4;
+    let light = base + extra.saturating_mul(30) / 100;
+    let partial = base + extra.saturating_mul(20) / 100;
+    let heavy = base + extra.saturating_mul(35) / 100;
+    let response = total.saturating_sub(light + partial + heavy);
     PhaseDurations {
-        light_seconds: side,
-        response_seconds: side,
-        heavy_seconds: total - 2 * side,
+        light_seconds: light,
+        partial_seconds: partial,
+        heavy_seconds: heavy,
+        response_seconds: response,
     }
 }
 
@@ -415,13 +435,14 @@ mod tests {
             worker_count: None,
             scheme_ids: vec!["a".to_string()],
             plan_guid: "plan-1".to_string(),
+            reference_scheme_id: None,
         }
     }
 
     #[test]
     fn default_preset_is_detailed() {
         assert_eq!(DETAILED_PRESET.repetitions, 5);
-        assert_eq!(DETAILED_PRESET.duration_seconds, 45);
+        assert_eq!(DETAILED_PRESET.duration_seconds, 60);
     }
 
     #[test]
@@ -429,10 +450,10 @@ mod tests {
         assert_eq!(
             QUICK_PRESET,
             Preset {
-                duration_seconds: 20,
+                duration_seconds: 30,
                 warmup_seconds: 3,
                 cooling_seconds: 3,
-                repetitions: 2
+                repetitions: 1
             }
         );
     }
@@ -456,14 +477,24 @@ mod tests {
     }
 
     /// При одном повторе доверительный интервал не считается (k − 1 = 0), и
-    /// отчёт остаётся без стабильности. Оба пресета обязаны считать разброс.
+    /// Контракт пресетов по числу повторов: детальный обязан считать
+    /// доверительный интервал, быстрый — сознательно не считает (режим
+    /// «Скрининг»: один прогон, k − 1 = 0, интервала не существует).
     #[test]
-    fn every_preset_allips_a_confidence_interval() {
-        for (name, p) in [("quick", QUICK_PRESET), ("detailed", DETAILED_PRESET)] {
+    fn only_detailed_preset_allips_a_confidence_interval() {
+        // Константы проверяются на неизменность: `clippy` справедливо ругается
+        // на сравнение с литералом, но смысл теста именно в «не отвлекаемся».
+        #[allow(clippy::assertions_on_constants)]
+        {
             assert!(
-                p.repetitions >= 2,
-                "{name}: {} повтор(ов) — интервал не построить",
-                p.repetitions
+                DETAILED_PRESET.repetitions >= 3,
+                "детальный: {} повторов — интервал шумный",
+                DETAILED_PRESET.repetitions
+            );
+            assert_eq!(
+                QUICK_PRESET.repetitions, 1,
+                "быстрый режим обязан остаться скринингом, иначе он обещает \
+                 доверительный интервал, которого не существует"
             );
         }
     }
@@ -516,33 +547,45 @@ mod tests {
 
     #[test]
     fn phase_division_follows_the_spec_formula() {
-        // 9 с: 3/3/3.
-        let p9 = phase_durations(9);
+        // Минимум 16 с: по 4 с на фазу.
+        let p16 = phase_durations(16);
         assert_eq!(
-            p9,
+            p16,
             PhaseDurations {
-                light_seconds: 3,
-                heavy_seconds: 3,
-                response_seconds: 3
+                light_seconds: 4,
+                partial_seconds: 4,
+                heavy_seconds: 4,
+                response_seconds: 4
             }
         );
-        // 30 с: extra 21 → light=3+6=9, response=9, heavy=30-18=12.
-        let p30 = phase_durations(30);
+        // 45 с: extra 29 → light 4+8=12, partial 4+5=9, heavy 4+10=14,
+        // «Отклик» добирает остаток 10.
+        let p45 = phase_durations(45);
         assert_eq!(
-            p30,
+            p45,
             PhaseDurations {
-                light_seconds: 9,
-                heavy_seconds: 12,
-                response_seconds: 9
+                light_seconds: 12,
+                partial_seconds: 9,
+                heavy_seconds: 14,
+                response_seconds: 10
             }
         );
-        // Сумма всегда равна total (и total максимуется до 9).
-        for total in [0u64, 1, 9, 10, 15, 21, 30, 59, 60] {
+        // Ни одна фаза не короче 4 с и сумма равна total (для total ≥ 9,
+        // иначе значение поднимается до минимума).
+        for total in [0u64, 1, 9, 15, 16, 20, 30, 45, 60, 120] {
             let d = phase_durations(total);
-            let sum = d.light_seconds + d.heavy_seconds + d.response_seconds;
+            let sum = d.light_seconds + d.partial_seconds + d.heavy_seconds + d.response_seconds;
             assert_eq!(sum, total.max(MIN_DURATION_SECONDS), "total={total}");
+            for s in [
+                d.light_seconds,
+                d.partial_seconds,
+                d.heavy_seconds,
+                d.response_seconds,
+            ] {
+                assert!(s >= 4, "total={total}: фаза короче 4 с ({s})");
+            }
         }
-        assert_eq!(phase_durations(1), phase_durations(9));
+        assert_eq!(phase_durations(1), phase_durations(MIN_DURATION_SECONDS));
     }
 
     #[test]

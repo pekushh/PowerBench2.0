@@ -28,9 +28,10 @@ use powerbench_windows::monitor::{
 };
 use powerbench_windows::powercfg::PowerScheme;
 
-use crate::checkpoint::{Checkpoint, PhaseStats, StoredRun};
+use crate::checkpoint::{Checkpoint, PhaseStats, PowerSnapshot, StoredRun};
 use crate::config::{
-    SessionConfig, canonical_scheme_order, phase_durations, round_order, run_key, validate_config,
+    PHASES_PER_RUN, SessionConfig, canonical_scheme_order, phase_durations, round_order, run_key,
+    validate_config,
 };
 use crate::quarantine::{
     DEGRADED_MIN_RUNS, DEGRADED_SHARE_LIMIT, MIN_RUNS_FOR_JUDGMENT, QuarantineKind, TestingMarker,
@@ -370,13 +371,10 @@ fn now_unix_secs() -> u64 {
     now_unix_ns() / 1_000_000_000
 }
 
-/// Человекочитаемое имя фазы.
+/// Человекочитаемое имя фазы. Подписи живут в `core::config::Phase::label()`,
+/// иначе отчёт, JSON и тесты рано или поздно разойдутся между собой.
 pub fn phase_label(phase: Phase) -> &'static str {
-    match phase {
-        Phase::Light => "Лёгкая",
-        Phase::Heavy => "Тяжёлая",
-        Phase::Response => "Отклик",
-    }
+    phase.label()
 }
 
 /// Порог скачка латентности.
@@ -652,6 +650,34 @@ enum PhaseFailure {
     LoadDidNotStop,
 }
 
+/// Медиана и 95-й перцентиль фоновой нагрузки за интервал прогона.
+///
+/// Суммируется `cpu_percent` всех процессов в снимке (норма sysinfo — процент
+/// **одного** ядра). Возвращается `(p50, p95, сколько секунд набралось)`.
+/// Снимки вне интервала прогона не берутся: между прогонами сэмплер всё равно
+/// не ходит, но при переходе между схемами в карту могли попасть чужие секунды.
+fn background_cpu_stats(
+    map: &BTreeMap<u64, Vec<ProcessSample>>,
+    from_secs: u64,
+    to_secs: u64,
+) -> (f64, f64, u32) {
+    let mut series: Vec<f64> = map
+        .iter()
+        .filter(|(sec, _)| **sec >= from_secs && **sec <= to_secs)
+        .map(|(_, samples)| samples.iter().map(|s| s.cpu_percent).sum())
+        .collect();
+    if series.is_empty() {
+        return (0.0, 0.0, 0);
+    }
+    let n = series.len();
+    series.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let at = |q: f64| -> f64 {
+        let idx = ((q * n as f64).ceil() as usize).clamp(1, n) - 1;
+        series[idx]
+    };
+    (at(0.50), at(0.95), n as u32)
+}
+
 /// Результат одного прогона схемы.
 #[derive(Debug)]
 struct RunData {
@@ -662,14 +688,22 @@ struct RunData {
     duration_ms: u64,
     ticks: u64,
     supercycles: u64,
-    first_tick_checksums: [u64; 3],
-    run_checksums: [u64; 3],
+    first_tick_checksums: [u64; PHASES_PER_RUN as usize],
+    run_checksums: [u64; PHASES_PER_RUN as usize],
     phase_times: Vec<(u8, Vec<f64>)>,
     combined: RunStats,
     cross_phase_consistency: f64,
     burst_retention_percent: f64,
     background: Vec<CorrelatedProcess>,
     spike_windows_total: usize,
+    /// Срез питания в конце каждой измеряемой фазы (индексы фаз в том же
+    /// порядке, что `phase_times`).
+    phase_power: Vec<PowerSnapshot>,
+    /// Снимок питания в конце прогона.
+    power: PowerSnapshot,
+    /// Фоновая нагрузка (сумма по процессам, % одного ядра) по секундам
+    /// прогона: p50 и p95.
+    background_cpu: (f64, f64, u32),
 }
 
 const fn zero_run_stats() -> RunStats {
@@ -1078,6 +1112,7 @@ fn run_session_loop(
             // --- Измеряемые фазы (с подключённым «пользовательским» флагом) ---
             let phase_secs = [
                 durs.light_seconds,
+                durs.partial_seconds,
                 durs.heavy_seconds,
                 durs.response_seconds,
             ];
@@ -1085,16 +1120,18 @@ fn run_session_loop(
                 Arc::new(Mutex::new(BTreeMap::new()));
 
             let started_at_ns = now_unix_ns();
+            let run_started_secs = now_unix_secs();
             let phase_started = Instant::now();
             let mut times_by_phase: Vec<(u8, Vec<f64>)> = Vec::new();
             let mut spike_count_total = 0usize;
             let mut all_spike_windows: Vec<SpikeWindow> = Vec::new();
-            let mut first_tick_checksums = [0u64; 3];
-            let mut run_checksums = [0u64; 3];
+            let mut phase_power: Vec<PowerSnapshot> = Vec::new();
+            let mut first_tick_checksums = [0u64; PHASES_PER_RUN as usize];
+            let mut run_checksums = [0u64; PHASES_PER_RUN as usize];
             let mut ticks = 0u64;
             let mut supercycles = 0u64;
 
-            let phases = [Phase::Light, Phase::Heavy, Phase::Response];
+            let phases = powerbench_core::config::PHASE_ORDER;
             for (idx, (&phase, &secs)) in phases.iter().zip(phase_secs.iter()).enumerate() {
                 if user_wants_stop(user_cancel) {
                     cancelled = true;
@@ -1167,6 +1204,10 @@ fn run_session_loop(
                         }
                         first_tick_checksums[idx] = report.first_tick_checksum;
                         run_checksums[idx] = report.run_checksum;
+                        // Срез питания в конце фазы: троттлинг может начаться
+                        // и кончиться внутри прогона, и по одному срезу в
+                        // конце всего прогона это не поймать.
+                        phase_power.push(PowerSnapshot::capture());
                         // Шаг перевода индекса сэмпла в секунды и начало фазы
                         // считаем по ФАКТИЧЕСКОМУ времени, а не по номинальному
                         // `secs`: фаза включает запуск нагрузки и разгон, из-за
@@ -1245,6 +1286,7 @@ fn run_session_loop(
                 }
             }
             let duration_ms = phase_started.elapsed().as_millis() as u64;
+            let run_ended_secs = now_unix_secs();
 
             let light_avg = times_by_phase
                 .iter()
@@ -1275,6 +1317,13 @@ fn run_session_loop(
             // Фоновые корреляции по окнам скачков этого прогона.
             let map_snapshot = monitor_map.lock().unwrap().clone();
             let background = correlate(&all_spike_windows, &map_snapshot);
+            // Непрерывная оценка фона: сэмплер уже ходит раз в секунду на
+            // протяжении всех фаз, но вердикт до этого строился на одной
+            // пробе 700 мс *перед* прогоном. Пятисекундная проверка Defender
+            // попадала в неё случайно, а постоянная внешняя нагрузка (VPN,
+            // синхронизация) либо не попадала вовсе, либо обрушивала «чистоту»
+            // в ноль. Теперь у прогона есть собственные p50/p95.
+            let background_cpu = background_cpu_stats(&map_snapshot, run_started_secs, run_ended_secs);
 
             let run_outcome = Some(RunData {
                 key: key.clone(),
@@ -1292,6 +1341,9 @@ fn run_session_loop(
                 burst_retention_percent: burst,
                 background,
                 spike_windows_total: spike_count_total,
+                phase_power,
+                power: PowerSnapshot::capture(),
+                background_cpu,
             });
 
             if let Some(run) = run_outcome {
@@ -1553,9 +1605,11 @@ fn build_stored_run(
         phases: run
             .phase_times
             .iter()
-            .map(|(idx, times)| PhaseStats {
+            .enumerate()
+            .map(|(i, (idx, times))| PhaseStats {
                 phase_index: *idx,
                 stats: matched_stats(times),
+                power: run.phase_power.get(i).copied(),
             })
             .collect(),
         combined: run.combined,
@@ -1563,6 +1617,10 @@ fn build_stored_run(
         burst_retention_percent: run.burst_retention_percent,
         background: run.background.clone(),
         spike_windows: run.spike_windows_total,
+        power: Some(run.power),
+        background_cpu_p50: run.background_cpu.0,
+        background_cpu_p95: run.background_cpu.1,
+        background_sample_seconds: run.background_cpu.2,
     }
 }
 
@@ -1759,6 +1817,7 @@ mod tests {
             worker_count: None,
             scheme_ids: vec!["a".to_string(), "b".to_string()],
             plan_guid: "g".to_string(),
+            reference_scheme_id: None,
         };
         // В последнем раунде (1): cycle 0, source [a,b], shift 1 → порядок [b, a],
         // последняя схема — «a».

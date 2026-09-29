@@ -6,6 +6,7 @@ import {
   onTelemetry,
   onTestFinished,
   type CheckpointDto,
+  type PhasePlanRow,
   type PresetDto,
   type QuarantineEntry,
   type Readiness,
@@ -32,7 +33,7 @@ const PRESETS: Record<"quick" | "detailed", PresetDef> = {
     title: "Быстро",
     desc: "Быстрая проверка производительности системы с минимальным временем тестирования.",
     expand:
-      "Два повтора и короткие фазы — ответ за пару минут. Разница между схемами видна, но погрешность заметно выше, чем в детальном режиме.",
+      "Один повтор и короткие фазы — ответ за пару минут. Разница между схемами видна, но это режим скрининга: доверительного интервала здесь не существует, поэтому итог не будет обещать подтверждённый выбор.",
   },
   detailed: {
     title: "Детально",
@@ -127,24 +128,15 @@ function plural(n: number, one: string, few: string, many: string): string {
 }
 
 /**
- * Длительности фаз — та же формула, что в `orchestrator::config::phase_durations`:
- * `side = 3 + (total - 9) * 3 / 10`, лёгкая и отклик по `side`,
- * тяжёлая — остаток. Нужна для подписей в интерфейсе.
+ * Порядковый номер текущей фазы в плане замера (для «готово» / «текущая»).
+ *
+ * Список фаз приходит из бэкенда (`phasePlan`): там же живёт формула деления
+ * длительности. Раньше её копия стояла здесь, и после появления четвёртой фазы
+ * интерфейс молча показывал бы три фазы вместо четырёх.
  */
-function phaseSeconds(total: number): { name: string; seconds: number }[] {
-  const t = Math.max(9, total);
-  const side = 3 + Math.floor((t - 9) * 3 / 10);
-  return [
-    { name: "Лёгкая", seconds: side },
-    { name: "Тяжёлая", seconds: Math.max(1, t - 2 * side) },
-    { name: "Отклик", seconds: side },
-  ];
-}
-
-/** Порядковый номер фазы по имени (для «готово»/«текущая»). */
-function phaseIndex(name: string | undefined): number {
+function phaseIndex(plan: PhasePlanRow[], name: string | undefined): number {
   if (!name) return -1;
-  return ["Лёгкая", "Тяжёлая", "Отклик"].indexOf(name);
+  return plan.findIndex((p) => p.name === name);
 }
 
 export default function BenchmarkPage() {
@@ -187,7 +179,24 @@ export default function BenchmarkPage() {
   // что и планировщик: интерфейс не должен переписывать формулу, иначе цифры
   // в карточке режима и реальная длительность разойдутся.
   const [presetEstimates, setPresetEstimates] = useState<Record<string, string>>({});
+  // План фаз приходит из бэкенда: формула деления длительности живёт там
+  // одна, и копия в интерфейсе рано или поздно разошлась бы с планировщиком.
+  const [phasePlan, setPhasePlan] = useState<PhasePlanRow[]>([]);
   const [oneScheme, setOneScheme] = useState("—");
+
+  // План фаз перечитывается при смене длительности: это подписи на экране
+  // запуска, и брать их надо у того, кто действительно делит время.
+  useEffect(() => {
+    let alive = true;
+    commands
+      .phasePlan(duration)
+      .then((rows) => alive && setPhasePlan(rows))
+      .catch(() => alive && setPhasePlan([]));
+    return () => {
+      alive = false;
+    };
+  }, [duration]);
+
   useEffect(() => {
     let alive = true;
     // Параметров ещё нет — считать нечего, и нули в `estimateSession` вернули
@@ -467,6 +476,10 @@ export default function BenchmarkPage() {
           worker_count: null,
           scheme_ids: resume ? [] : chosen,
           export_raw_samples: resume ? false : rawSamples,
+          // Активная схема идёт эталоном: по её прогонам оценивается дрейф
+          // машины за сессию, и вердикт понижается, если машина «плывёт»
+      // сильнее, чем различаются схемы.
+          active_scheme_id: schemes.find((s) => s.active)?.guid ?? null,
           resume,
         })
         .then(() => {
@@ -618,11 +631,13 @@ export default function BenchmarkPage() {
                             <div className="mode-stat">
                               <div className="ms-label">Точность</div>
                               <div className="ms-value">
-                                {p
-                                  ? p.duration >= ACCURATE_DURATION_SECONDS
-                                    ? "Повышенная"
-                                    : "Стандартная"
-                                  : "—"}
+                                {!p
+                                  ? "—"
+                                  : p.reps <= 1
+                                    ? "Скрининг"
+                                    : p.duration >= ACCURATE_DURATION_SECONDS
+                                      ? "Повышенная"
+                                      : "Стандартная"}
                               </div>
                             </div>
                           </div>
@@ -879,10 +894,11 @@ export default function BenchmarkPage() {
                 <div className="run-grid">
                   <Panel title="Фазы замера" hint={`по ${duration} с на прогон · фазы повторяются в каждом раунде`}>
                     <div className="run-phases">
-                      {phaseSeconds(duration).map((p) => {
+                      {phasePlan.map((p) => {
                         const active = telemetry?.phase === p.name;
                         const done =
-                          telemetry != null && phaseIndex(telemetry.phase) > phaseIndex(p.name);
+                          telemetry != null &&
+                          phaseIndex(phasePlan, telemetry.phase) > phaseIndex(phasePlan, p.name);
                         const pct = active ? phaseProgress : done ? 100 : 0;
                         return (
                           <div

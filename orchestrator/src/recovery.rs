@@ -272,6 +272,7 @@ mod tests {
             worker_count: None,
             scheme_ids: vec!["test-a".to_string()],
             plan_guid: "recovery-plan".to_string(),
+        reference_scheme_id: None,
         }
     }
 

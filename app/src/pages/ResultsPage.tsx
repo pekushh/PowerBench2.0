@@ -482,7 +482,7 @@ function SessionDetail({
           <div className="k">Конфигурация</div>
           <div className="v mono break">{s.identity.config_hash || "—"}</div>
           <div className="s">
-            seed {s.identity.seed_hex || "—"} · воркеров {s.identity.worker_count} /{" "}
+            seed {s.identity.seed_hex || "-"} · воркеров {s.identity.worker_count} /{" "}
             {s.identity.logical_cpus}
           </div>
         </div>
@@ -507,6 +507,20 @@ function SessionDetail({
         </div>
       </div>
 
+      {/* Состав машины вынесен под карточки: в узкой плитке строка с CPU, ОС и
+          памятью обрезалась многоточием и половина условий была не видна. */}
+      <div className="rd-machine">
+        <span>
+          {s.identity.cpu_brand || s.identity.cpu_identifier}
+        </span>
+        <span>ОС {s.identity.os_build || "—"}</span>
+        <span>
+          {s.identity.memory_gib > 0
+            ? `${s.identity.memory_gib.toFixed(0)} ГБ ОЗУ`
+            : "память неизвестна"}
+        </span>
+      </div>
+
       <div className={`rd-note ${trustNote.kind}`}>
         <b>{trustNote.title}</b>
         <ul>
@@ -516,7 +530,59 @@ function SessionDetail({
         </ul>
         {rec.reason ? <span className="why">{rec.reason}</span> : null}
       </div>
+      {/* Условия замера: без них «уверенный» вердикт выглядит так же, как
+          вердикт на зашумлённой и перегретой машине. Про сам скрининг уже
+          сказано в плашке выше, поэтому здесь только измерения. */}
+      {s.reference ? (
+        <div className={`rd-note ${s.reference.unstable ? "warn" : ""}`}>
+          <b>Опорная схема:</b> {s.reference.scheme_name ?? s.reference.scheme_id} —{" "}
+          {s.reference.per_round.map((v) => f1(v, 0)).join(" → ")} тик/с по раундам.{" "}
+          разброс {s.reference.span_percent.toFixed(1)} % (порог{" "}
+          {s.reference.span_limit_percent.toFixed(1)} %), тренд{" "}
+          {s.reference.trend_percent_per_round >= 0 ? "+" : ""}
+          {s.reference.trend_percent_per_round.toFixed(1)} %/раунд.
+          {s.reference.unstable
+            ? " Машина плавает сильнее, чем различаются схемы: вердикт понижен."
+            : " Разброс в пределах нормы."}
+        </div>
+      ) : null}
+      {s.warnings.length > 0 ? (
+        <div className="rd-note warn">{s.warnings.join(" ")}</div>
+      ) : null}
 
+      {/* Метрики по фазам: внутри фазы схемы сравнимы, между фазами «тик/с» —
+          нет, потому что работа на тик различается. */}
+      {leader && leader.phases.length > 0 ? (
+        <div className="modal-scrollx">
+          <table className="grid evid-table rd-table">
+            <thead>
+              <tr>
+                <th>Фаза</th>
+                <th className="num">Медиана, тик/с</th>
+                <th className="num">P1, тик/с</th>
+                <th className="num">Стабильность</th>
+                <th>Частота</th>
+              </tr>
+            </thead>
+            <tbody>
+              {leader.phases.map((p) => (
+                <tr key={p.name} className={p.throttled ? "warn-row" : undefined}>
+                  <td className="nm">{p.name}</td>
+                  <td className="num">{f1(p.median_throughput)}</td>
+                  <td className="num">{f1(p.p1_throughput)}</td>
+                  <td className="num">{f1(p.consistency_percent, 2)}</td>
+                  <td>{p.throttled ? "троттлинг" : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="field-hint">
+            Лидер по фазам. Внутри фазы схемы сравнимы столбик к столбику; между
+            разными фазами «тик/с» сравнивать нельзя — у лёгкой фазы работы на
+            тик меньше.
+          </div>
+        </div>
+      ) : null}
       {/* Что было до и после сессии: пользователю важно знать, вернулась ли
           система к прежней схеме питания. */}
       {s.original_scheme_guid || s.original_restored ? (

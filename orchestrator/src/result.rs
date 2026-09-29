@@ -7,7 +7,7 @@ use powerbench_metrics::AggregateResult;
 use powerbench_recommend::bootstrap::BootMode;
 use powerbench_recommend::{EvidenceLevel, TieCriterion};
 
-use crate::checkpoint::{Checkpoint, StoredRun};
+use crate::checkpoint::{Checkpoint, PhaseStats, StoredRun};
 
 /// Строка рекомендации по схеме: идентификатор, активность, имя, агрегат, прогоны.
 pub type RecommendationScheme = (
@@ -25,6 +25,7 @@ pub fn evidence_level_label(level: EvidenceLevel) -> &'static str {
         EvidenceLevel::Probable => "Вероятно",
         EvidenceLevel::StabilityTieBreak => "Решено стабильностью",
         EvidenceLevel::Preliminary => "Предварительно",
+        EvidenceLevel::Screening => "Скрининг",
         EvidenceLevel::KeepCurrent => "Оставить текущую",
         EvidenceLevel::Equivalent => "Эквиваленты",
         EvidenceLevel::None => "Нет данных",
@@ -38,6 +39,7 @@ pub fn evidence_level_id(level: EvidenceLevel) -> &'static str {
         EvidenceLevel::Probable => "Probable",
         EvidenceLevel::StabilityTieBreak => "StabilityTieBreak",
         EvidenceLevel::Preliminary => "Preliminary",
+        EvidenceLevel::Screening => "Screening",
         EvidenceLevel::KeepCurrent => "KeepCurrent",
         EvidenceLevel::Equivalent => "Equivalent",
         EvidenceLevel::None => "None",
@@ -94,6 +96,19 @@ pub struct IdentityJson {
     pub timer_hz: u64,
     pub cpu_identifier: String,
     pub diagnostics_version: String,
+    /// Сборка и ревизия ОС (например, «22631.4169»).
+    ///
+    /// Обновление Windows меняет планировщик и политики питания, поэтому две
+    /// сессии до и после патча нельзя считать сопоставимыми: раньше об этом
+    /// можно было только догадываться.
+    #[serde(default)]
+    pub os_build: String,
+    /// Объём физической памяти, ГБ.
+    #[serde(default)]
+    pub memory_gib: f64,
+    /// Брендовое имя CPU для человека («AMD Ryzen 7 5800X3D»).
+    #[serde(default)]
+    pub cpu_brand: String,
 }
 
 /// Одна схема в результате: агрегат + прогоны.
@@ -126,6 +141,15 @@ pub struct SchemeJson {
     /// Медиана чистоты фона (%) — None, если данные недоступны.
     #[serde(default)]
     pub median_background_purity: Option<f64>,
+    /// Метрики по фазам (медиана по прогонам).
+    ///
+    /// Три фазы измеряют разные вещи: лёгкая и «Отклик» реагируют на
+    /// boost-политику схемы, тяжёлая упирается в лимиты мощности и может не
+    /// отличаться вовсе. Усреднение их в одно число прячет случай, когда
+    /// схема выигрывает в одной фазе и проигрывает в другой, — а это ровно
+    /// тот вывод, который нужен пользователю, выбирающему схему.
+    #[serde(default)]
+    pub phases: Vec<PhaseSummaryJson>,
     pub run_duration_ms: u64,
     pub started_at_min_ns: u64,
     pub per_run: Vec<StoredRun>,
@@ -169,9 +193,77 @@ impl SchemeJson {
             median_background_purity: a.median_background_purity.map(finite_or_zero),
             run_duration_ms: a.run_duration_ms,
             started_at_min_ns: a.started_at_min_ns,
+            phases: phase_summaries(&per_run),
             per_run,
         }
     }
+}
+
+/// Медианы по фазам из прогонов схемы.
+///
+/// Фазы идентифицируются индексом, а имена берутся из канонического списка:
+/// так порядок и подписи не зависят от того, в каком порядке фазы попали в
+/// прогон.
+///
+/// Подпись фазы по индексу; неизвестный индекс (старый JSON) не выдумывает
+/// подпись.
+fn phase_label_for(index: u8) -> &'static str {
+    match powerbench_core::config::Phase::from_index(index) {
+        Some(p) => p.label(),
+        None => "—",
+    }
+}
+
+/// Медианы по фазам из прогонов схемы.
+fn phase_summaries(per_run: &[StoredRun]) -> Vec<PhaseSummaryJson> {
+    let mut out: Vec<PhaseSummaryJson> = Vec::new();
+    for idx in 0..=u8::MAX {
+        let group: Vec<&PhaseStats> = per_run
+            .iter()
+            .flat_map(|r| r.phases.iter())
+            .filter(|p| p.phase_index == idx)
+            .collect();
+        if group.is_empty() {
+            continue;
+        }
+        let med = |f: fn(&PhaseStats) -> f64| -> f64 {
+            let mut v: Vec<f64> = group
+                .iter()
+                .map(|p| finite_or_zero(f(p)))
+                .filter(|x| *x > 0.0)
+                .collect();
+            if v.is_empty() {
+                return 0.0;
+            }
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            v[v.len() / 2]
+        };
+        out.push(PhaseSummaryJson {
+            name: phase_label_for(idx).to_string(),
+            median_throughput: med(|p| p.stats.average_throughput),
+            p1_throughput: med(|p| p.stats.p1_throughput),
+            consistency_percent: med(|p| p.stats.consistency_percent),
+            throttled: group
+                .iter()
+                .any(|p| p.power.map(|x| x.throttled || x.thermal_throttle).unwrap_or(false)),
+        });
+    }
+    out
+}
+
+/// Сводка по одной измеряемой фазе: медианы по прогонам.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PhaseSummaryJson {
+    /// Название фазы («Лёгкая», «Тяжёлая», «Отклик», «Частичная»).
+    pub name: String,
+    /// Медиана throughput фазы, тик/с.
+    pub median_throughput: f64,
+    /// 1-й перцентиль throughput фазы (худшее поведение), тик/с.
+    pub p1_throughput: f64,
+    /// Медиана стабильности фазы, %.
+    pub consistency_percent: f64,
+    /// Наблюдался ли троттлинг частоты в этой фазе.
+    pub throttled: bool,
 }
 
 /// `NaN`/`inf` → `0.0`; конечные значения проходят без изменений.
@@ -191,6 +283,115 @@ pub struct RecommendationJson {
     pub expected_margin_percent: Option<f64>,
     pub bootstrap_mode: Option<String>,
     pub tie_criterion: Option<String>,
+}
+
+/// Порог разброса опорной схемы, выше которого вердикт понижается.
+///
+/// Смысл: если сама эталонная схема «плавает» сильнее, чем различаются
+/// участники, то любое ранжирование — шум. 1.5 % — заметно типичный разброс
+/// повторов на одной машине, поэтому граница именно такая: ниже неё разницу
+/// между схемами видно, выше — уже нет.
+pub const REFERENCE_SPAN_LIMIT_PERCENT: f64 = 1.5;
+
+/// Наибольшее число прогонов на схему, при котором сессия считается
+/// скринингом. При одном прогоне доверительный интервал не строится вовсе
+/// (k − 1 = 0), и любое утверждение «схема A лучше B» опирается на единственный
+/// замер. Такой результат годится, чтобы отсеять явно слабые схемы, но не для
+/// выбора победителя.
+pub const SCREENING_MAX_RUNS: usize = 1;
+
+/// Порог фоновой нагрузки (p95 за прогон), при котором результат считается
+/// измеренным на загруженной машине. Задаётся в % одного ядра и умножается на
+/// число логических CPU при сравнении.
+pub const BACKGROUND_P95_NOTE_PERCENT: f64 = 20.0;
+
+/// Оценка стабильности машины по опорной схеме.
+///
+/// Сравнение «самой высокой из N схем» неявно опирается на то, что за все часы
+/// замера машина вела себя одинаково. Допущение это нарушается постоянно (нагрев,
+/// фон, обновления), а проверить его было нечем. Опорная схема меряется наравне
+/// со всеми (дополнительного времени не требуется), а разброс её прогонов по
+/// раундам показывает, насколько сама машина «плывёт» за сессию.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ReferenceSummary {
+    /// Идентификатор опорной схемы.
+    pub scheme_id: String,
+    /// Отображаемое имя опорной схемы.
+    pub scheme_name: Option<String>,
+    /// Throughput опорной схемы по раундам, тик/с.
+    pub per_round: Vec<f64>,
+    /// Размах по раундам относительно среднего, %.
+    pub span_percent: f64,
+    /// Наклон по раундам, % за раунд (линейный тренд).
+    pub trend_percent_per_round: f64,
+    /// Порог, при котором вердикт понижается: разброс эталона больше него
+    /// означает, что машина плавает сильнее, чем различаются схемы.
+    pub span_limit_percent: f64,
+    /// Превышен ли порог.
+    pub unstable: bool,
+}
+
+impl ReferenceSummary {
+    /// Сводка по прогонам опорной схемы (уже отсортированным по раунду).
+    ///
+    /// `None`, если опорных прогонов меньше двух: по одному замеру дрейф не
+    /// оценить, а выдавать за оценку ноль означало бы утверждать стабильность,
+    /// которой никто не измерял.
+    pub fn build(
+        scheme_id: &str,
+        scheme_name: Option<String>,
+        per_round: Vec<f64>,
+        span_limit_percent: f64,
+    ) -> Option<Self> {
+        let vals: Vec<f64> = per_round
+            .into_iter()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .collect();
+        if vals.len() < 2 {
+            return None;
+        }
+        let n = vals.len() as f64;
+        let mean = vals.iter().sum::<f64>() / n;
+        let max = vals.iter().cloned().fold(f64::MIN, f64::max);
+        let min = vals.iter().cloned().fold(f64::MAX, f64::min);
+        let span_percent = if mean > 0.0 {
+            (max - min) / mean * 100.0
+        } else {
+            0.0
+        };
+        // Линейный тренд по индексам раундов: Σ(x−x̄)(y−ȳ) / Σ(x−x̄)².
+        let x_mean = (n - 1.0) / 2.0;
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for (i, y) in vals.iter().enumerate() {
+            let dx = i as f64 - x_mean;
+            num += dx * (y - mean);
+            den += dx * dx;
+        }
+        let slope = if den > 0.0 { num / den } else { 0.0 };
+        let trend_percent_per_round = if mean > 0.0 {
+            slope / mean * 100.0
+        } else {
+            0.0
+        };
+        Some(Self {
+            scheme_id: scheme_id.to_string(),
+            scheme_name,
+            per_round: vals,
+            span_percent,
+            trend_percent_per_round,
+            span_limit_percent,
+            unstable: span_percent > span_limit_percent,
+        })
+    }
+
+    /// Пояснение одним предложением (для отчёта и подсказки в интерфейсе).
+    pub fn note(&self) -> String {
+        format!(
+            "опорная схема: разброс {:.1} % по раундам (тренд {:+.1} %/раунд), порог {:.1} %",
+            self.span_percent, self.trend_percent_per_round, self.span_limit_percent
+        )
+    }
 }
 
 /// Итог сессии: JSON, готовый к записи на диск.
@@ -216,6 +417,13 @@ pub struct SessionJson {
     /// стабильность, худшая секунда), в процентах.
     #[serde(default)]
     pub score_weights: [f64; 3],
+    /// Оценка дрейфа машины по опорной схеме.
+    #[serde(default)]
+    pub reference: Option<ReferenceSummary>,
+    /// Режим скрининга: прогона на схему недостаточно для ранжирования,
+    /// сессия годна только для отбраковки очевидно слабых схем.
+    #[serde(default)]
+    pub screening: bool,
 }
 
 /// Построить машинный JSON из контрольной точки и рекомендации.
@@ -231,7 +439,7 @@ pub fn build_session_json(
     score_weights: [f64; 3],
 ) -> SessionJson {
     let _ = &aggregated;
-    let schemes = recommendation_schemes
+    let schemes: Vec<SchemeJson> = recommendation_schemes
         .iter()
         .map(|(id, rejected, reason, agg, per_run)| {
             SchemeJson::from_aggregate(id.clone(), *rejected, reason.clone(), agg, per_run.clone())
@@ -255,6 +463,101 @@ pub fn build_session_json(
     } else {
         None
     };
+    // Дрейф по опорной схеме: её прогоны уже лежат в чекпоинте, отдельного
+    // времени на эталон не тратится.
+    let reference = checkpoint
+        .plan
+        .reference_scheme_id
+        .as_ref()
+        .and_then(|id| {
+            let mut per_round: Vec<(u32, f64)> = checkpoint
+                .runs
+                .iter()
+                .filter(|r| r.scheme_id.eq_ignore_ascii_case(id))
+                .map(|r| (r.round, r.combined.average_throughput))
+                .collect();
+            per_round.sort_by_key(|(r, _)| *r);
+            let name = checkpoint
+                .runs
+                .iter()
+                .find(|r| r.scheme_id.eq_ignore_ascii_case(id))
+                .and_then(|r| r.scheme_name.clone());
+            ReferenceSummary::build(
+                id,
+                name,
+                per_round.into_iter().map(|(_, v)| v).collect(),
+                REFERENCE_SPAN_LIMIT_PERCENT,
+            )
+        });
+    let screening = aggregated
+        .iter()
+        .filter(|(_, a)| a.runs > 0)
+        .map(|(_, a)| a.runs)
+        .min()
+        .map(|min_runs| min_runs <= SCREENING_MAX_RUNS)
+        .unwrap_or(false);
+    // Условия среды, способные обесценить вердикт, собираются здесь, а не в
+    // вызывающем коде: и приложение, и CLI должны понижать одинаково.
+    let mut warnings = warnings;
+    let mut level = recommendation.level;
+    if screening {
+        // Собственное предупреждение здесь было бы третьим повтором одного и
+        // того же текста: уровень «Скрининг» уже назван в шапке отчёта и в
+        // плашке результата, а пояснение печатается рядом с условиями замера.
+        level = EvidenceLevel::Screening;
+    }
+    if let Some(r) = &reference {
+        // Дрейф машины больше, чем разница между схемами: любой уровень выше
+        // «Предварительно» здесь был бы обещанием, которого замер не поддерживает.
+        if r.unstable && matches!(level, EvidenceLevel::Confirmed | EvidenceLevel::Probable) {
+            level = EvidenceLevel::Preliminary;
+        }
+        if r.unstable {
+            warnings.push(format!(
+                "машина нестабильна: {} — вердикт понижен",
+                r.note()
+            ));
+        }
+    }
+    // Фон по каждому прогону: p95 вместо одной пробы 700 мс перед замером.
+    let mut bg_p95 = 0.0f64;
+    let mut bg_runs: usize = 0;
+    for s in &schemes {
+        for r in &s.per_run {
+            if r.background_cpu_p95 > bg_p95 {
+                bg_p95 = r.background_cpu_p95;
+            }
+            if r.background_sample_seconds > 0 {
+                bg_runs += 1;
+            }
+        }
+    }
+    if bg_runs > 0 && bg_p95 > BACKGROUND_P95_NOTE_PERCENT {
+        warnings.push(format!(
+            "фон на загруженной машине: до {:.0} % CPU (пиковое, 95-й перцентиль прогона)",
+            bg_p95
+        ));
+    }
+    // Троттлинг по фазам: если система ограничивала частоту, это нужно сказать
+    // прямо — иначе «медленную» схему можно принять за неудачную.
+    let throttled: Vec<String> = schemes
+        .iter()
+        .filter_map(|s| {
+            let hit = s
+                .per_run
+                .iter()
+                .flat_map(|r| r.phases.iter())
+                .filter(|p| p.power.map(|x| x.throttled || x.thermal_throttle).unwrap_or(false))
+                .count();
+            (hit > 0).then(|| format!("{} ({} фаз)", s.name.clone().unwrap_or(s.scheme_id.clone()), hit))
+        })
+        .collect();
+    if !throttled.is_empty() {
+        warnings.push(format!(
+            "троттлинг частоты наблюдался: {}",
+            throttled.join(", ")
+        ));
+    }
     SessionJson {
         plan_guid: checkpoint.plan.plan_guid.clone(),
         original_scheme_guid: checkpoint.original_scheme_guid.clone(),
@@ -262,8 +565,8 @@ pub fn build_session_json(
         identity,
         schemes,
         recommendation: RecommendationJson {
-            level: evidence_level_id(recommendation.level).to_string(),
-            level_label: evidence_level_label(recommendation.level).to_string(),
+            level: evidence_level_id(level).to_string(),
+            level_label: evidence_level_label(level).to_string(),
             recommended_scheme: recommendation.recommended_scheme.clone(),
             runner_up_scheme: recommendation.runner_up_scheme.clone(),
             reason: recommendation.reason.clone(),
@@ -283,6 +586,8 @@ pub fn build_session_json(
         rounds_completed,
         early_stop_reason,
         score_weights,
+        reference,
+        screening,
     }
 }
 

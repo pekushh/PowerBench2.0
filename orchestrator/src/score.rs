@@ -89,7 +89,13 @@ pub fn score_schemes(schemes: &[SchemeJson], weights: &ScoreWeights) -> Vec<Sche
         if let Some(v) = usable_score(s.median_consistency_percent) {
             best_stab = Some(best_stab.map_or(v, |b: f64| b.max(v)));
         }
-        if let Some(v) = usable_score(s.median_worst_window_throughput) {
+        // Худшая секунда — это 1-й перцентиль throughput, а не минимум по
+        // секундным окнам. Минимум из N окон смещён вниз и тем сильнее, чем
+        // длиннее прогон: при 45 с это 45 окон, у которых мгновенный провал
+        // одного окна тянет оценку вниз независимо от реального поведения схемы.
+        // P1 — устойчивая оценка «как часто машина проваливалась», и именно
+        // она отражает политику схемы питания под нагрузкой.
+        if let Some(v) = usable_score(s.median_p1_throughput) {
             best_worst = Some(best_worst.map_or(v, |b: f64| b.max(v)));
         }
     }
@@ -117,7 +123,7 @@ pub fn score_schemes(schemes: &[SchemeJson], weights: &ScoreWeights) -> Vec<Sche
                 usable_score(s.median_consistency_percent).map_or(0.0, |v| v / b * 100.0)
             });
             let worst = best_worst.map_or(0.0, |b| {
-                usable_score(s.median_worst_window_throughput).map_or(0.0, |v| v / b * 100.0)
+                usable_score(s.median_p1_throughput).map_or(0.0, |v| v / b * 100.0)
             });
             let score = w_p * perf + w_s * stab + w_w * worst;
             SchemeScore {
@@ -147,6 +153,8 @@ mod tests {
     use super::*;
     use crate::result::SchemeJson;
 
+    /// worst — P1 («худшая секунда»): именно она входит в скоринг, потому что
+    /// минимум по окнам смещён вниз и зависит от длины прогона.
     fn scheme(id: &str, rejected: bool, perf: f64, stab: f64, worst: f64) -> SchemeJson {
         SchemeJson {
             scheme_id: id.to_string(),
@@ -162,7 +170,7 @@ mod tests {
             run_variation_percent: 0.0,
             cv_warning: false,
             median_throughput: perf,
-            median_p1_throughput: 0.0,
+            median_p1_throughput: worst,
             median_p01_throughput: 0.0,
             median_p95_execution_time_ms: 0.0,
             median_p99_execution_time_ms: 0.0,
@@ -171,6 +179,7 @@ mod tests {
             median_jitter_p99_ms: 0.0,
             median_worst_window_throughput: worst,
             median_background_purity: None,
+            phases: Vec::new(),
             run_duration_ms: 0,
             started_at_min_ns: 0,
             per_run: Vec::new(),

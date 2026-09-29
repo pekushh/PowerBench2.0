@@ -65,6 +65,14 @@ struct PoolInner {
     descriptors: [JobDescriptor; MAXIMUM_JOBS],
     job_slots: [u64; MAXIMUM_JOBS],
     active_jobs: usize,
+    /// Сколько воркеров реально берут задачи в текущем батче (1..=worker_count).
+    ///
+    /// Меньше `worker_count` — это фаза частичной нагрузки: вторая половина
+    /// пула «припаркована». Припаркованный воркер не берёт задач, но обязан
+    /// отчитаться о завершении батча, иначе ожидание в `wait_batch` не
+    /// закончится. Поэтому счётчик `workers_done` считает **все** воркеры, и
+    /// условие завершения батча не меняется.
+    active_workers: usize,
     /// Сколько воркеров отчитались о завершении **текущей** эпохи.
     /// Отчёты по устаревшим эпохам игнорируются (см. `worker_loop`).
     workers_done: usize,
@@ -169,6 +177,11 @@ fn process_jobs(
     let mut n = 0usize;
     {
         let guard = lock_pool(shared);
+        // Фаза частичной нагрузки: припаркованный воркер не берёт задач, но
+        // отчёт о завершении батча всё равно отправит — иначе main ждёт вечно.
+        if worker_index >= guard.active_workers {
+            return;
+        }
         debug_assert_eq!(guard.epoch, epoch, "воркер обработал не тот батч");
         let active = guard.active_jobs;
         let mut j = worker_index;
@@ -278,6 +291,7 @@ impl Pool {
                 descriptors: [JobDescriptor::dummy(); MAXIMUM_JOBS],
                 job_slots: [0u64; MAXIMUM_JOBS],
                 active_jobs: 0,
+                active_workers: 1,
                 workers_done: 0,
                 faulted: false,
                 completed_epoch: 0,
@@ -362,6 +376,7 @@ impl Pool {
         self.quiesce();
         let mut guard = lock_pool(&self.shared);
         guard.active_jobs = 0;
+        guard.active_workers = 1;
         guard.workers_done = 0;
         guard.faulted = false;
     }
@@ -391,8 +406,12 @@ impl Pool {
     }
 
     /// Опубликовать батч из `active_jobs` задач и разбудить воркеров.
-    pub fn dispatch(&self, active_jobs: usize, descriptors: &[JobDescriptor]) {
+    ///
+    /// `active_workers` — сколько воркеров берут задачи (1..=worker_count).
+    /// Значение меньше полного даёт фазу частичной нагрузки.
+    pub fn dispatch(&self, active_jobs: usize, active_workers: usize, descriptors: &[JobDescriptor]) {
         assert!((1..=MAXIMUM_JOBS).contains(&active_jobs));
+        assert!((1..=self.worker_count).contains(&active_workers));
         // Короткий слайс молча оставил бы stale-дескрипторы прошлого батча.
         assert!(descriptors.len() >= active_jobs);
         let mut guard = lock_pool(&self.shared);
@@ -400,6 +419,7 @@ impl Pool {
         guard.workers_done = 0;
         guard.faulted = false;
         guard.active_jobs = active_jobs;
+        guard.active_workers = active_workers;
         guard.busy = true;
         for (i, d) in descriptors.iter().enumerate().take(active_jobs) {
             guard.descriptors[i] = *d;

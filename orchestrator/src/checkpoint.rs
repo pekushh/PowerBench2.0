@@ -74,12 +74,83 @@ impl Checkpoint {
     }
 }
 
+/// Снимок ограничений питания на момент прогона.
+///
+/// Читается через `CallNtPowerInformation` (`powerbench_windows::power`).
+/// Градусов температуры без драйвера не достать, но и не нужно: важнее, что
+/// система ограничивала частоту и по какой причине. Нагрев смещает все
+/// последующие прогоны сессии, а ротация порядка схем его не компенсирует —
+/// поэтому признак пишется в каждый прогон.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct PowerSnapshot {
+    /// Наибольшая разрешённая частота по ядрам, МГц.
+    pub max_mhz: u32,
+    /// Частота, которую система выдавала, МГц.
+    pub current_mhz: u32,
+    /// Частота была ограничена схемой питания или термограницей.
+    pub throttled: bool,
+    /// Причина ограничения — температура (пассивное охлаждение).
+    pub thermal_throttle: bool,
+    /// Код ACPI-ограничения системы; 0 — ограничений нет.
+    pub policy_reason: u32,
+    /// Питание от сети.
+    pub on_ac: bool,
+    /// Снимок получить не удалось (нет данных, а не «ограничений нет»).
+    pub unavailable: bool,
+}
+
+impl PowerSnapshot {
+    /// Снимок из системного источника.
+    pub fn capture() -> Self {
+        let p = powerbench_windows::power::power_state();
+        Self {
+            max_mhz: p.max_mhz,
+            current_mhz: p.current_mhz,
+            throttled: p.throttled,
+            thermal_throttle: p.thermal_throttle,
+            policy_reason: p.policy_reason,
+            on_ac: p.on_ac,
+            unavailable: p.unavailable,
+        }
+    }
+
+    /// Короткое описание для отчёта; `None`, если ограничений не было.
+    pub fn note(&self) -> Option<String> {
+        if self.unavailable {
+            return None;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if self.throttled {
+            parts.push(format!(
+                "троттлинг ({}/{} МГц)",
+                self.current_mhz, self.max_mhz
+            ));
+        }
+        if self.thermal_throttle {
+            parts.push("термоограничение".to_string());
+        }
+        if self.policy_reason != 0 {
+            parts.push(format!("ACPI-причина {}", self.policy_reason));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(", "))
+        }
+    }
+}
+
 /// Статистика одной измеряемой фазы прогона.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PhaseStats {
-    /// 0 = Лёгкая, 1 = Тяжёлая, 2 = Отклик.
+    /// Индекс фазы: 0 = Лёгкая, 1 = Частичная, 2 = Тяжёлая, 3 = Отклик
+    /// (`powerbench_core::config::Phase::index`).
     pub phase_index: u8,
     pub stats: RunStats,
+    /// Состояние питания в конце фазы: троттлинг может начаться и закончиться
+    /// внутри прогона, и по одному срезу в конце прогона это не поймать.
+    #[serde(default)]
+    pub power: Option<PowerSnapshot>,
 }
 
 /// Завершённый прогон одной схемы (компактная сводка для checkpoint).
@@ -96,9 +167,9 @@ pub struct StoredRun {
     pub ticks: u64,
     pub supercycles: u64,
     /// Первые тики измеряемых фаз (Лёгкая/Тяжёлая/Отклик) — подпись детерминизма.
-    pub first_tick_checksums: [u64; 3],
+    pub first_tick_checksums: [u64; crate::config::PHASES_PER_RUN as usize],
     /// Итоговые контрольные суммы измеряемых фаз.
-    pub run_checksums: [u64; 3],
+    pub run_checksums: [u64; crate::config::PHASES_PER_RUN as usize],
     /// Статистики измеряемых фаз в порядке «Лёгкая/Тяжёлая/Отклик».
     pub phases: Vec<PhaseStats>,
     /// Объединённая статистика прогона (consistency — по фазам).
@@ -108,6 +179,20 @@ pub struct StoredRun {
     pub burst_retention_percent: f64,
     pub background: Vec<CorrelatedProcess>,
     pub spike_windows: usize,
+    /// Снимок питания в конце прогона.
+    #[serde(default)]
+    pub power: Option<PowerSnapshot>,
+    /// Медианная фоновая нагрузка за прогон, % одного ядра.
+    /// Раньше фон оценивался только пробой 700 мс *перед* прогоном, и весь
+    /// прогон считался «чистым» или «грязным» по одному моменту.
+    #[serde(default)]
+    pub background_cpu_p50: f64,
+    /// 95-й перцентиль той же фоновой нагрузки.
+    #[serde(default)]
+    pub background_cpu_p95: f64,
+    /// Сколько секунд фона набралось (раз в секунду).
+    #[serde(default)]
+    pub background_sample_seconds: u32,
 }
 
 /// Каталог данных приложения: `%LOCALAPPDATA%\PowerBench\`.
@@ -200,6 +285,7 @@ mod tests {
             worker_count: None,
             scheme_ids: vec!["s1".to_string()],
             plan_guid: "g1".to_string(),
+            reference_scheme_id: None,
         }
     }
 
@@ -220,20 +306,23 @@ mod tests {
             duration_ms: 1000,
             ticks: 100,
             supercycles: 0,
-            first_tick_checksums: [1, 2, 3],
-            run_checksums: [4, 5, 6],
+            first_tick_checksums: [1, 2, 3, 4],
+            run_checksums: [4, 5, 6, 7],
             phases: vec![
                 PhaseStats {
                     phase_index: 0,
                     stats: stats(10, 1.0),
+                    power: None,
                 },
                 PhaseStats {
                     phase_index: 1,
                     stats: stats(10, 1.0),
+                    power: None,
                 },
                 PhaseStats {
                     phase_index: 2,
                     stats: stats(10, 1.0),
+                    power: None,
                 },
             ],
             combined: stats(30, 1.0),
@@ -241,6 +330,10 @@ mod tests {
             burst_retention_percent: 100.0,
             background: Vec::new(),
             spike_windows: 0,
+            power: None,
+            background_cpu_p50: 0.0,
+            background_cpu_p95: 0.0,
+            background_sample_seconds: 0,
         }
     }
 
@@ -320,7 +413,7 @@ mod tests {
         });
         assert_eq!(summary.stats.consistency_percent, 99.0);
         assert_eq!(summary.burst_retention_percent, 100.0);
-        assert_eq!(summary.determinism.checksums, vec![1, 2, 3]);
+        assert_eq!(summary.determinism.checksums, vec![1, 2, 3, 4]);
         assert_eq!(summary.duration_ms, 1000);
     }
 }

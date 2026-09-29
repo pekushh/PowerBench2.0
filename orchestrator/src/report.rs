@@ -3,7 +3,30 @@
 //! зависимостей — все стили и SVG встроены.
 
 use crate::history::{date_time_stamp, session_started_at_ns};
-use crate::result::SessionJson;
+use crate::result::{IdentityJson, SessionJson};
+
+/// Описание машины одной строкой для подвала отчёта.
+///
+/// Сборка ОС и объём памяти добавлены не для красоты: обновление Windows меняет
+/// планировщик и политики питания, поэтому по отчёту должно быть видно, что все
+/// сессии измерялись на одной и той же системе.
+fn machine_line(id: &IdentityJson) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !id.cpu_brand.is_empty() {
+        parts.push(id.cpu_brand.clone());
+    }
+    if !id.os_build.is_empty() {
+        parts.push(format!("ОС {}", id.os_build));
+    }
+    if id.memory_gib > 0.0 {
+        parts.push(format!("{:.0} ГБ", id.memory_gib));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("машина: {}", parts.join(" · "))
+    }
+}
 
 /// Цвета серий на графике тенденций.
 ///
@@ -544,15 +567,19 @@ pub fn build_session_report(s: &SessionJson) -> String {
           {schemes}\
           {score}\
           {background}\
+          {conditions}\
+          {phases}\
           </div>\
-         <div class=\"foot\">Сгенерировано {now_stamp} · PowerBench\
-         <span class=\"prov\">план <span class=\"mono\">{plan}</span> · хэш \
-         <span class=\"mono\">{hash}</span> · seed <span class=\"mono\">{seed}</span></span></div>\
+          <div class=\"foot\">Сгенерировано {now_stamp} · PowerBench\
+          <span class=\"prov\">план <span class=\"mono\">{plan}</span> · хэш \
+          <span class=\"mono\">{hash}</span> · seed <span class=\"mono\">{seed}</span>\
+          · {machine}</span></div>\
          </div><button type=\"button\" class=\"to-top\" aria-label=\"Наверх\">↑</button>\
          {js}</body></html>",
         wl = esc(&id.workload_version),
         wc = id.worker_count,
         lcpus = id.logical_cpus,
+        machine = esc(&machine_line(id)),
         day = esc(&pretty_dt(&stamp)),
         lead_value = lead_value,
         leader_name = esc(&lead_sub),
@@ -572,6 +599,8 @@ pub fn build_session_report(s: &SessionJson) -> String {
         )),
         score = score_section(s),
         background = background_section(s, "<h2>Фоновая нагрузка</h2>", ""),
+        conditions = conditions_section(s),
+        phases = phase_table_section(s),
         now_stamp = esc(&pretty_dt(&date_time_stamp(now_unix_ns()))),
         plan = esc(&s.plan_guid),
         hash = esc(&id.config_hash),
@@ -1137,6 +1166,179 @@ fn background_section(s: &SessionJson, heading: &str, table_class: &str) -> Stri
     )
 }
 
+/// Пофазная таблица: медиана и P1 по каждой фазе плюс отметка троттлинга.
+///
+/// Фазы различаются объёмом работы на тик, поэтому «тик/с» между ними
+/// сравнивать нельзя: фаза с меньшей работой на тик даёт больше тиков в
+/// секунду при меньшей реальной нагрузке. Сравнивать нужно *внутри* фазы — там
+/// работа на тик одинакова, и разница схем видна честно. Именно поэтому
+/// таблица показывает фазы рядом, а не прячет их за одним средним.
+fn phase_table_section(s: &SessionJson) -> String {
+    if s.schemes.iter().all(|x| x.phases.is_empty()) {
+        return String::new();
+    }
+    let mut rows = String::new();
+    for sch in &s.schemes {
+        if sch.phases.is_empty() {
+            continue;
+        }
+        let cells: String = sch
+            .phases
+            .iter()
+            .map(|p| {
+                format!(
+                    "<td class=\"num\">{m:.1}</td><td class=\"num\">{p1:.1}</td>\
+                     <td class=\"num\">{c:.1}</td><td>{state}</td>",
+                    m = p.median_throughput,
+                    p1 = p.p1_throughput,
+                    c = p.consistency_percent,
+                    state = if p.throttled { "троттлинг" } else { "—" }
+                )
+            })
+            .collect();
+        rows.push_str(&format!(
+            "<tr><td>{}</td>{cells}</tr>",
+            esc(&name_of(sch))
+        ));
+    }
+    if rows.is_empty() {
+        return String::new();
+    }
+    let head: String = s
+        .schemes
+        .iter()
+        .filter(|x| !x.phases.is_empty())
+        .flat_map(|x| x.phases.iter())
+        .map(|p| {
+            format!(
+                "<th class=\"num\" colspan=\"4\">{}</th>",
+                esc(&p.name)
+            )
+        })
+        .collect();
+    format!(
+        "<h2>Метрики по фазам</h2>\
+         <table><thead><tr><th>Схема</th>{head}</tr>\
+         <tr><th></th><th class=\"num\">Медиана</th><th class=\"num\">P1</th>\
+         <th class=\"num\">Стабильность</th><th>Частота</th></tr></thead>\
+         <tbody>{rows}</tbody></table>\
+         <div class=\"note\">Внутри одной фазы работа на тик одинакова, поэтому схемы\
+         сравнимы столбик к столбику. Между разными фазами «тик/с» сравнивать\
+         нельзя: у лёгкой фазы работы на тик меньше, значит и тиков в секунду\
+         больше.</div>"
+    )
+}
+
+/// Секция «Условия замера»: опорная схема (дрейф машины), состояние питания и
+/// фон — всё, что решает, можно ли вообще доверять ранжированию.
+///
+/// Раньше в отчёте не было ни одного из этих пунктов, и вердикт выглядел
+/// уверенным даже тогда, когда машина грелась, фон шумел, а частоты упирались
+/// в лимит мощности.
+fn conditions_section(s: &SessionJson) -> String {
+    let mut out = String::new();
+
+    if s.screening {
+        out.push_str("<h2>Условия замера</h2>");
+        out.push_str(
+            "<div class=\"note warn\"><b>Скрининг.</b> На схему меньше прогонов, чем нужно \
+             для доверительного интервала: ранжирование ориентировочное, вердикт \
+             не выдаётся.</div>",
+        );
+    }
+    if let Some(r) = &s.reference {
+        let name = r.scheme_name.clone().unwrap_or_else(|| r.scheme_id.clone());
+        let rows: String = r
+            .per_round
+            .iter()
+            .map(|v| format!("<td class=\"num\">{v:.1}</td>"))
+            .collect();
+        let header: String = r
+            .per_round
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("<th class=\"num\">{}</th>", i + 1))
+            .collect();
+        out.push_str(&format!(
+            "<h2>Условия замера</h2>\
+             <div class=\"sub\"><div class=\"dhead\">Опорная схема — дрейф машины</div>\
+             <table class=\"sub\"><thead><tr><th>Опорная</th>{header}</tr></thead>\
+             <tbody><tr><td>{name}</td>{rows}</tr></tbody></table>\
+             <div class=\"note\">{note}{state}</div></div>",
+            name = esc(&name),
+            header = header,
+            rows = rows,
+            note = esc(&r.note()),
+            state = if r.unstable {
+                " Разброс выше порога: машина плавает сильнее, чем различаются \
+                 схемы, поэтому вердикт понижен."
+            } else {
+                " Разброс в пределах нормы — ранжирование устойчиво."
+            },
+        ));
+    }
+
+    // Фон и троттлинг — по каждому прогону, сводно по худшему.
+    let mut bg_p50: f64 = 0.0;
+    let mut bg_p95: f64 = 0.0;
+    let mut throttled: Vec<String> = Vec::new();
+    let mut power: Vec<String> = Vec::new();
+    for sch in &s.schemes {
+        for r in &sch.per_run {
+            bg_p50 = bg_p50.max(r.background_cpu_p50);
+            bg_p95 = bg_p95.max(r.background_cpu_p95);
+            let hits = r
+                .phases
+                .iter()
+                .filter(|p| {
+                    p.power
+                        .map(|x| x.throttled || x.thermal_throttle)
+                        .unwrap_or(false)
+                })
+                .count();
+            if hits > 0 {
+                let name = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
+                let entry = format!("{name} ({hits})");
+                if !throttled.contains(&entry) {
+                    throttled.push(entry);
+                }
+            }
+            if let Some(p) = r.power.as_ref().and_then(|p| p.note()) {
+                let entry = format!("{}: {p}", name_of(sch));
+                if !power.contains(&entry) {
+                    power.push(entry);
+                }
+            }
+        }
+    }
+    if bg_p95 > 0.0 || !power.is_empty() {
+        out.push_str("<h2>Условия замера</h2>");
+        out.push_str("<div class=\"note\"><b>Состояние системы во время замера:</b>");
+        if bg_p95 > 0.0 {
+            out.push_str(&format!(
+                " фон до {:.0} % CPU (медиана {:.0} %, пик {:.0} % одного ядра)",
+                bg_p95, bg_p50, bg_p95
+            ));
+        }
+        if !power.is_empty() {
+            out.push_str(&format!("; {}", power.join("; ")));
+        }
+        if !throttled.is_empty() {
+            out.push_str(&format!("; троттлинг частоты: {}", throttled.join(", ")));
+        }
+        out.push_str(".</div>");
+    }
+    if out.is_empty() {
+        String::new()
+    } else {
+        out
+    }
+}
+
+fn name_of(sch: &crate::result::SchemeJson) -> String {
+    sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone())
+}
+
 /// Секция отчёта «Балл по вашим весам» + информирование о досрочной остановке.
 fn score_section(s: &SessionJson) -> String {
     let weights = crate::score::ScoreWeights {
@@ -1411,6 +1613,9 @@ mod tests {
                 timer_hz: 10_000_000,
                 cpu_identifier: "cpu".into(),
                 diagnostics_version: "0.1.0".into(),
+                os_build: String::new(),
+                memory_gib: 0.0,
+                cpu_brand: String::new(),
             },
             schemes: vec![sch],
             recommendation: RecommendationJson {
@@ -1429,6 +1634,8 @@ mod tests {
             rounds_completed: 3,
             early_stop_reason: None,
             score_weights: [50.0, 30.0, 20.0],
+            reference: None,
+            screening: false,
         }
     }
 
@@ -1708,11 +1915,12 @@ mod tests {
             duration_ms: 1000,
             ticks: 10,
             supercycles: 1,
-            first_tick_checksums: [0; 3],
-            run_checksums: [0; 3],
+            first_tick_checksums: [0; 4],
+            run_checksums: [0; 4],
             phases: vec![PhaseStats {
                 phase_index: 0,
                 stats: zero,
+                power: None,
             }],
             combined: zero,
             cross_phase_consistency: 0.0,
@@ -1727,7 +1935,77 @@ mod tests {
                 phases: vec!["Тяжёлая".to_string()],
             }],
             spike_windows: 8,
+            power: None,
+            background_cpu_p50: 0.0,
+            background_cpu_p95: 0.0,
+            background_sample_seconds: 0,
         }
+    }
+
+    /// Дрейф по опорной схеме: разброс считается по раундам, вердикт при
+    /// превышении порога понижается, а при одном замере оценки не выдумывается.
+    #[test]
+    fn reference_drift_marks_unstable_and_needs_two_rounds() {
+        use crate::result::ReferenceSummary;
+        let r = ReferenceSummary::build("g", Some("Эталон".into()), vec![100.0, 100.0, 103.0], 1.5)
+            .expect("двух замеров достаточно");
+        assert!(r.unstable, "разброс 3 % должен считаться нестабильностью");
+        assert!(r.note().contains("разброс"));
+        // Один замер дрейф не показывает: иначе это утверждение «машина стабильна».
+        assert!(
+            ReferenceSummary::build("g", Some("Эталон".into()), vec![100.0], 1.5).is_none()
+        );
+    }
+
+    /// Пофазная таблица обязана быть в отчёте: без неё вердикт по смешанному
+    /// среднему скрывает случай «выиграл в одной фазе, проиграл в другой».
+    #[test]
+    fn report_has_phase_table() {
+        let mut s = sample_session("AAA", 500.0);
+        let mut run = stored_run_with_background("aaa", "svc.exe", 3);
+        let stats: powerbench_metrics::run::RunStats =
+            powerbench_metrics::run::run_stats(&[1.0; 4]).unwrap();
+        run.phases.push(crate::checkpoint::PhaseStats {
+            phase_index: 0,
+            stats,
+            power: None,
+        });
+        s.schemes[0].per_run = vec![run];
+        s.schemes[0].phases = crate::result::SchemeJson::from_aggregate(
+            "aaa".into(),
+            false,
+            None,
+            &empty_aggregate(500.0),
+            s.schemes[0].per_run.clone(),
+        )
+        .phases;
+        let html = build_session_report(&s);
+        assert!(html.contains("Метрики по фазам"), "нет пофазной таблицы");
+    }
+
+    /// Отчёт обязан называть условия замера: без них «уверенный» вердикт
+    /// выглядит так же, как вердикт на зашумлённой машине.
+    #[test]
+    fn report_shows_measurement_conditions() {
+        let mut s = sample_session("AAA", 500.0);
+        let mut run = stored_run_with_background("aaa", "svc.exe", 5);
+        run.background_cpu_p95 = 44.0;
+        run.background_cpu_p50 = 12.0;
+        run.background_sample_seconds = 20;
+        s.schemes[0].per_run = vec![run];
+        let html = build_session_report(&s);
+        assert!(html.contains("Условия замера"), "нет секции условий");
+        assert!(html.contains("44"), "не показан пик фоновой нагрузки");
+    }
+
+    /// Скрининг (один прогон на схему) должен быть назван скринингом, а не
+    /// «Предварительно»: обе подписи звучат уверенно, а обещают разные вещи.
+    #[test]
+    fn screening_session_is_labelled_as_such() {
+        let mut s = sample_session("AAA", 500.0);
+        s.screening = true;
+        let html = build_session_report(&s);
+        assert!(html.contains("Скрининг"), "скрининг не помечен в отчёте");
     }
 
     /// Регресс: палитра графика не должна содержать синих тонов — отчёт

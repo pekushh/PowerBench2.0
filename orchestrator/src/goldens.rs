@@ -42,6 +42,9 @@ fn snapshot_session(id: &str, median: f64, margin: f64) -> SessionJson {
             timer_hz: 10_000_000,
             cpu_identifier: "Golden CPU".into(),
             diagnostics_version: "1.0.0".into(),
+            os_build: String::new(),
+            memory_gib: 0.0,
+            cpu_brand: String::new(),
         },
         schemes: vec![sch, second],
         recommendation: RecommendationJson {
@@ -60,6 +63,8 @@ fn snapshot_session(id: &str, median: f64, margin: f64) -> SessionJson {
         rounds_completed: 5,
         early_stop_reason: None,
         score_weights: [50.0, 30.0, 20.0],
+        reference: None,
+        screening: false,
     }
 }
 

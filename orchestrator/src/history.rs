@@ -315,7 +315,7 @@ fn probability(rec: &RecommendationJson, i: usize) -> String {
         .unwrap_or_default()
 }
 
-fn checksums_hex(a: [u64; 3]) -> String {
+fn checksums_hex(a: [u64; crate::config::PHASES_PER_RUN as usize]) -> String {
     a.map(|v| format!("{v:016X}")).join(",")
 }
 
@@ -374,6 +374,9 @@ mod tests {
                 timer_hz: 10_000_000,
                 cpu_identifier: "cpu".to_string(),
                 diagnostics_version: "0.1.0".to_string(),
+                os_build: String::new(),
+                memory_gib: 0.0,
+                cpu_brand: String::new(),
             },
             schemes: vec![SchemeJson::from_aggregate(
                 "s1".to_string(),
@@ -398,6 +401,8 @@ mod tests {
             rounds_completed: 1,
             early_stop_reason: None,
             score_weights: crate::result::default_score_weights(),
+            reference: None,
+            screening: false,
         }
     }
 
@@ -439,14 +444,18 @@ mod tests {
             duration_ms: 1000,
             ticks: 100,
             supercycles: 1,
-            first_tick_checksums: [1, 2, 3],
-            run_checksums: [4, 5, 6],
+            first_tick_checksums: [1, 2, 3, 4],
+            run_checksums: [4, 5, 6, 7],
             phases: Vec::new(),
             combined: s,
             cross_phase_consistency: 95.0,
             burst_retention_percent: 90.0,
             background: Vec::new(),
             spike_windows: 0,
+            power: None,
+            background_cpu_p50: 0.0,
+            background_cpu_p95: 0.0,
+            background_sample_seconds: 0,
         }
     }
 

@@ -22,6 +22,35 @@ export interface PresetDto {
   repetitions: number;
 }
 
+/** Одна измеряемая фаза (зеркало `core::config::Phase`). */
+export interface PhasePlanRow {
+  index: number;
+  name: string;
+  seconds: number;
+  active_worker_percent: number;
+}
+
+/** Сводка по одной фазе в результате сессии. */
+export interface PhaseSummaryJson {
+  name: string;
+  median_throughput: number;
+  p1_throughput: number;
+  consistency_percent: number;
+  throttled: boolean;
+}
+
+/** Оценка дрейфа машины по опорной схеме. */
+export interface ReferenceSummary {
+  scheme_id: string;
+  scheme_name: string | null;
+  per_round: number[];
+  span_percent: number;
+  trend_percent_per_round: number;
+  span_limit_percent: number;
+  unstable: boolean;
+  note: string;
+}
+
 export interface QuarantineEntry {
   scheme_id: string;
   scheme_name: string | null;
@@ -73,6 +102,10 @@ export interface IdentityDto {
   timer_hz: number;
   cpu_identifier: string;
   diagnostics_version: string;
+  /** Сборка и ревизия ОС — обновление Windows меняет сопоставимость. */
+  os_build: string;
+  memory_gib: number;
+  cpu_brand: string;
 }
 
 export interface HistoryRow {
@@ -166,6 +199,8 @@ export interface SchemeJson {
   median_jitter_p99_ms: number;
   /** Медиана прохода фоновой нагрузки, %; `null`, если фона не было. */
   median_background_purity: number | null;
+  /** Метрики по фазам (медиана, P1, стабильность, троттлинг). */
+  phases: PhaseSummaryJson[];
   run_duration_ms: number;
   started_at_min_ns: number;
   per_run: StoredRun[];
@@ -195,6 +230,10 @@ export interface SessionJson {
   rounds_completed: number;
   early_stop_reason: string | null;
   score_weights: [number, number, number];
+  /** Сессия-скрининг: прогона на схему недостаточно для вердикта. */
+  screening: boolean;
+  /** Оценка дрейфа машины по опорной схеме. */
+  reference: ReferenceSummary | null;
 }
 
 export interface TestRequestDto {
@@ -207,6 +246,8 @@ export interface TestRequestDto {
   worker_count: number | null;
   scheme_ids: string[];
   resume: boolean;
+  /** Активная схема — эталон для оценки дрейфа машины. */
+  active_scheme_id: string | null;
   export_raw_samples?: boolean;
 }
 
@@ -323,6 +364,9 @@ export const commands = {
     }),
   /** Значения обоих пресетов — единственный источник для карточек режимов. */
   testPresets: () => invoke<PresetDto[]>("test_presets"),
+  /** Длительности фаз для заданной длительности — единственный источник. */
+  phasePlan: (durationSeconds: number) =>
+    invoke<PhasePlanRow[]>("phase_plan", { durationSeconds }),
   historyDelete: (fileName: string) => invoke<void>("history_delete", { fileName }),
   historyOpenFolder: () => invoke<void>("history_open_folder"),
   openFolder: (path: string) => invoke<void>("open_folder", { path }),

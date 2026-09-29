@@ -141,6 +141,11 @@ impl BenchCli {
     }
 }
 
+/// «да»/«нет» для вывода состояния.
+fn yes_no(v: bool) -> &'static str {
+    if v { "да" } else { "нет" }
+}
+
 fn parse_u64(option: &str, v: &str) -> Result<u64, String> {
     v.parse()
         .map_err(|_| format!("{option}: ожидалось целое число, получено «{v}»"))
@@ -181,6 +186,9 @@ fn build_plan(cli: &BenchCli) -> Result<SessionConfig, String> {
         worker_count: cli.workers,
         scheme_ids: cli.schemes.clone().unwrap_or_default(),
         plan_guid: cli.plan.clone().unwrap_or_else(crate::new_plan_guid),
+        // Эталон по умолчанию — активная схема: она и так мерится в каждом
+        // раунде, и по её прогонам видно, насколько «плывёт» машина за сессию.
+        reference_scheme_id: None,
     };
     match validate_config(&plan) {
         Some(reason) => Err(reason),
@@ -334,11 +342,10 @@ fn finish_session(
         tie_criterion: None,
     });
     println!();
-    println!(
-        "Рекомендация [{}]: {}",
-        evidence_label(rec.level),
-        rec.reason
-    );
+    // Уровень до понижения здесь намеренно не печатается: он не учитывает
+    // дрейф, фон и число прогонов, поэтому рядом с итоговым вердиктом два
+    // разных уровня выглядели бы как противоречие.
+    println!("Рекомендация: {}", rec.reason);
     if let Some(id) = &rec.recommended_scheme {
         let rname = outcome
             .checkpoint
@@ -412,11 +419,27 @@ fn finish_session(
         &rec,
         warnings,
         outcome.cancelled,
-        [50.0, 30.0, 20.0],
+        powerbench_orchestrator::result::default_score_weights(),
     );
     if let Err(e) = crate::write_json(&json, out) {
         eprintln!("PowerBench CLI: {e}");
         return ExitCode::FAILURE;
+    }
+    // Итоговые условия замера печатаем из готового JSON: раньше CLI показывал
+    // уровень до понижения (дрейф, фон, скрининг), и на экране и в файле
+    // получались разные вердикты.
+    println!(
+        "Итоговый вердикт [{}]{}",
+        json.recommendation.level_label,
+        if json.screening { " — режим скрининга" } else { "" }
+    );
+    if let Some(r) = &json.reference {
+        println!("{}", r.note());
+    }
+    for w in json.warnings.iter().filter(|w| {
+        w.contains("фон") || w.contains("троттлинг") || w.contains("нестабильна")
+    }) {
+        println!("Предупреждение: {w}");
     }
     println!("Итоговый результат: {}", out.display());
     // История (Этап 6): завершённая сессия сохраняется в `Results\`
@@ -425,20 +448,27 @@ fn finish_session(
         Ok(path) => println!("История: {}", path.display()),
         Err(e) => eprintln!("PowerBench CLI: предупреждение: не удалось сохранить в историю: {e}"),
     }
+    // HTML-отчёт пишется рядом с JSON. Раньше CLI оставлял после замера только
+    // цифры в консоли, и посмотреть разбор сессии можно было лишь в приложении.
+    match write_report_next_to(&json) {
+        Ok(path) => println!("HTML-отчёт: {path}"),
+        Err(e) => eprintln!("PowerBench CLI: предупреждение: не удалось сохранить HTML-отчёт: {e}"),
+    }
     ExitCode::SUCCESS
 }
 
-fn evidence_label(level: EvidenceLevel) -> &'static str {
-    use EvidenceLevel::*;
-    match level {
-        Confirmed => "Подтверждено",
-        Probable => "Вероятно",
-        StabilityTieBreak => "Решено стабильностью",
-        Preliminary => "Предварительно",
-        KeepCurrent => "Оставить текущую",
-        Equivalent => "Эквиваленты",
-        None => "Нет данных",
-    }
+/// Записать HTML-отчёт сессии рядом с её JSON.
+fn write_report_next_to(json: &powerbench_orchestrator::result::SessionJson) -> Result<String, String> {
+    use powerbench_orchestrator::history;
+    let dir = history::results_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("не удалось создать {}: {e}", dir.display()))?;
+    let start = history::session_started_at_ns(json).unwrap_or(0);
+    let stamp = history::date_time_stamp(start);
+    let plan = history::sanitize(&json.plan_guid);
+    let path = dir.join(format!("PowerBench-Session_{plan}_{stamp}.html"));
+    let html = powerbench_orchestrator::report::build_session_report(json);
+    std::fs::write(&path, html).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path.display().to_string())
 }
 
 fn identity_of(engine: &Engine) -> IdentityJson {
@@ -452,6 +482,9 @@ fn identity_of(engine: &Engine) -> IdentityJson {
         timer_hz: sig.timer_hz,
         cpu_identifier: sig.cpu_identifier,
         diagnostics_version: sig.diagnostics_version,
+        os_build: powerbench_windows::power::os_build(),
+        memory_gib: powerbench_windows::power::memory_gib(),
+        cpu_brand: powerbench_windows::power::cpu_brand(),
     }
 }
 
@@ -538,7 +571,7 @@ pub fn cmd_bench(args: &[String]) -> ExitCode {
         reps = plan.repetitions
     );
     println!(
-        "  длительность {} с (фаз: Лёгкая/Тяжёлая/Отклик), разогрев {} с, охлаждение {} с",
+        "  длительность {} с (фазы: Лёгкая/Частичная/Тяжёлая/Отклик), разогрев {} с, охлаждение {} с",
         plan.duration_seconds, plan.warmup_seconds, plan.cooling_seconds
     );
     println!("  запрет сна включён; активная схема будет восстановлена после теста.");
@@ -636,6 +669,35 @@ pub fn cmd_settings_show(_args: &[String]) -> ExitCode {
     };
     println!("Файл: {src}");
     println!("benchmark: порог фона {}", s.benchmark.background_threshold_percent);
+    // Состояние машины: без него нельзя понять, сопоставимы ли две сессии,
+    // и не объяснить, почему замер вдруг замедлился.
+    let p = powerbench_windows::power::power_state();
+    let brand = powerbench_windows::power::cpu_brand();
+    let id = powerbench_windows::power::cpu_identifier();
+    // Бренд — для человека, идентификатор — для сравнения сессий между собой.
+    let cpu = if brand.is_empty() {
+        id.clone()
+    } else {
+        format!("{brand} ({id})")
+    };
+    println!(
+        "система: ОС {}, память {:.1} ГБ, CPU {}",
+        {
+            let b = powerbench_windows::power::os_build();
+            if b.is_empty() { "—".to_string() } else { b }
+        },
+        powerbench_windows::power::memory_gib(),
+        cpu
+    );
+    println!(
+        "питание: {}, частота {}/{} МГц, троттлинг {}, термолимит {}, ACPI-причина {}",
+        if p.on_ac { "от сети" } else { "от батареи" },
+        p.current_mhz,
+        p.max_mhz,
+        yes_no(p.throttled),
+        yes_no(p.thermal_throttle),
+        p.policy_reason
+    );
     println!(
         "appearance: тема «{}», режим «{}», reduceMotion {}, sidebarCollapsed {}",
         s.appearance.theme,

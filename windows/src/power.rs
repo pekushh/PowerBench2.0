@@ -1,5 +1,6 @@
 //! Низкоуровневые утилиты Windows: права администратора, запрет сна,
-//! питание от сети, идентификатор CPU, частота таймера QPC, перекодирование
+//! питание от сети, снимок ограничений частоты и троттлинга, объём памяти и
+//! сборка ОС, идентификатор CPU, частота таймера QPC, перекодирование
 //! OEM-вывода в Unicode.
 
 #[cfg(windows)]
@@ -8,11 +9,19 @@ use windows_sys::Win32::Globalization::MultiByteToWideChar;
 use windows_sys::Win32::System::Performance::QueryPerformanceFrequency;
 #[cfg(windows)]
 use windows_sys::Win32::System::Power::{
-    ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, EXECUTION_STATE, GetSystemPowerStatus,
-    SYSTEM_POWER_STATUS, SetThreadExecutionState,
+    CallNtPowerInformation, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
+    EXECUTION_STATE, GetSystemPowerStatus, PROCESSOR_POWER_INFORMATION, ProcessorInformation,
+    SYSTEM_POWER_INFORMATION, SYSTEM_POWER_STATUS, SetThreadExecutionState, SystemPowerInformation,
 };
 #[cfg(windows)]
+use windows_sys::Win32::System::Registry::{
+    HKEY, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+#[cfg(windows)]
 use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
+
 /// Версия диагностики (часть CompatibilitySignature).
 pub const DIAGNOSTICS_VERSION: &str = "0.1.0";
 
@@ -224,8 +233,253 @@ pub fn ac_power_online() -> Result<bool, PowerError> {
     }
 }
 
-/// Починить строку, испорченную однобайтовым декодером.
+/// Признак того, что процессор ушёл в пассивное охлаждение (троттлинг):
+/// ACPI сообщает `CoolingMode = Passive` (1), когда вентилятор не справляется и
+/// система снижает частоты вместо того, чтобы охлаждать.
+const COOLING_MODE_PASSIVE: u16 = 1;
+
+/// Снимок ограничений питания и частоты на момент замера.
 ///
+/// Читается через `CallNtPowerInformation` — штатный интерфейс Power Manager.
+/// Это не «температура в градусах» (её без драйвера не достать), а то, что
+/// действительно важно для достоверности замера:
+///
+/// * `max_mhz` / `current_mhz` — частота, которую система разрешает и которую
+///   выдаёт процессор. Схема питания с пониженным максимальным состоянием
+///   уменьшает `max_mhz`, а троттлинг уменьшает `current_mhz`;
+/// * `throttled` — `current_mhz` заметно ниже `max_mhz`, то есть система уже
+///   ограничивает частоту прямо сейчас;
+/// * `thermal_throttle` — пассивное охлаждение, то есть причина ограничения
+///   именно температура;
+/// * `policy_reason` — код ACPI-ограничения системы (0 — ограничений нет).
+///
+/// По «тепли»: нагрев смещает все последующие прогоны сессии, а ротация
+/// порядка его не компенсирует, поэтому такой признак пишется в каждый прогон
+/// и попадает в отчёт.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct PowerState {
+    /// Наибольшая разрешённая частота по всем ядрам, МГц.
+    pub max_mhz: u32,
+    /// Наименьшая выданная частота по всем ядрам, МГц.
+    pub current_mhz: u32,
+    /// Система ограничивает частоту прямо сейчас.
+    pub throttled: bool,
+    /// Причина ограничения — температура (пассивное охлаждение).
+    pub thermal_throttle: bool,
+    /// Код ACPI-ограничения системы; 0 — ограничений нет.
+    pub policy_reason: u32,
+    /// Питание от сети на момент замера.
+    pub on_ac: bool,
+    /// Данные получить не удалось (вызов вернул ошибку).
+    pub unavailable: bool,
+}
+
+/// Допуск, в пределах которого разница `max_mhz`/`current_mhz` считается
+/// шумом: Windows округляет частоту до ступеней, и «на пару МГц ниже» ещё не
+/// троттлинг.
+const MHZ_TOLERANCE: u32 = 50;
+
+/// Снимок состояния питания. На не-Windows платформах недоступен.
+pub fn power_state() -> PowerState {
+    #[cfg(windows)]
+    {
+        let (max_mhz, current_mhz) = processor_clocks();
+        let (policy_reason, cooling) = system_power_info();
+        let throttled = max_mhz > 0
+            && current_mhz > 0
+            && current_mhz + MHZ_TOLERANCE < max_mhz;
+        PowerState {
+            max_mhz,
+            current_mhz,
+            throttled,
+            thermal_throttle: cooling == COOLING_MODE_PASSIVE,
+            policy_reason,
+            on_ac: ac_power_online().unwrap_or(false),
+            unavailable: max_mhz == 0 && policy_reason == 0,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        PowerState {
+            unavailable: true,
+            ..PowerState::default()
+        }
+    }
+}
+
+/// `(наибольший MaxMhz, наименьший CurrentMhz)` по всем логическим ядрам.
+#[cfg(windows)]
+fn processor_clocks() -> (u32, u32) {
+    // Буфер рассчитан на 256 процессоров — с запасом больше любой реальной
+    // машины. Лишние записи API не заполняет, они остаются нулевыми.
+    const MAX_PROCESSORS: usize = 256;
+    let mut buf: [PROCESSOR_POWER_INFORMATION; MAX_PROCESSORS] =
+        unsafe { std::mem::zeroed() };
+    let bytes = std::mem::size_of::<PROCESSOR_POWER_INFORMATION>() * MAX_PROCESSORS;
+    let status = unsafe {
+        CallNtPowerInformation(
+            ProcessorInformation,
+            std::ptr::null(),
+            0,
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            bytes as u32,
+        )
+    };
+    // STATUS_SUCCESS == 0; NTSTATUS типа u32 в windows-sys.
+    if status != 0 {
+        return (0, 0);
+    }
+    let mut max_mhz = 0u32;
+    let mut min_current = u32::MAX;
+    let mut seen = false;
+    for p in buf.iter() {
+        // Нулевая запись — хвост буфера, реального ядра с 0 МГц не бывает.
+        if p.MaxMhz == 0 && p.CurrentMhz == 0 {
+            continue;
+        }
+        seen = true;
+        max_mhz = max_mhz.max(p.MaxMhz);
+        min_current = min_current.min(p.CurrentMhz);
+    }
+    if !seen {
+        (0, 0)
+    } else {
+        (max_mhz, min_current)
+    }
+}
+
+/// `(код ACPI-ограничения, режим охлаждения)`.
+#[cfg(windows)]
+fn system_power_info() -> (u32, u16) {
+    let mut info: SYSTEM_POWER_INFORMATION = unsafe { std::mem::zeroed() };
+    let status = unsafe {
+        CallNtPowerInformation(
+            SystemPowerInformation,
+            std::ptr::null(),
+            0,
+            &mut info as *mut SYSTEM_POWER_INFORMATION as *mut std::ffi::c_void,
+            std::mem::size_of::<SYSTEM_POWER_INFORMATION>() as u32,
+        )
+    };
+    if status != 0 {
+        return (0, 0);
+    }
+    (info.MaxIdlenessAllowed, info.CoolingMode as u16)
+}
+
+/// Объём физической памяти, ГБ (округление до сотых).
+pub fn memory_gib() -> f64 {
+    #[cfg(windows)]
+    {
+        let mut mem: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        // Без dwLength вызов возвращает FALSE: структура обязана сообщить свой
+        // размер (так же работает MEMORYSTATUS, но не все знают).
+        mem.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        let ok = unsafe { GlobalMemoryStatusEx(&mut mem) };
+        if ok != 0 {
+            return mem.ullTotalPhys as f64 / (1024.0 * 1024.0 * 1024.0);
+        }
+    }
+    0.0
+}
+
+/// Сборка и ревизия ОС (`22631.4169` и т. п.).
+///
+/// Читается из реестра, а не через `GetVersionEx`: последняя начиная с
+/// Windows 8.1 сообщает версию, подменённую приложением, если у манифеста нет
+/// `supportedOS` (то есть почти всегда «6.2»). Настоящий номер обновления
+/// хранится в `CurrentBuild`, а ревизия — в `UBR`; без него две сборки,
+/// отличающиеся сотнями патчей, выглядели бы одинаково, а именно такие
+/// обновления меняют поведение планировщика и планировщика питания.
+pub fn os_build() -> String {
+    #[cfg(windows)]
+    {
+        let major = registry_string("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", "CurrentBuild");
+        if major.is_empty() {
+            return String::new();
+        }
+        // UBR хранится как DWORD, а не как строка, — иначе ревизия терялась бы.
+        let ubr = registry_dword("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", "UBR");
+        if ubr == 0 {
+            major
+        } else {
+            format!("{major}.{ubr}")
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        String::new()
+    }
+}
+
+/// Имя процессора глазами человека («AMD Ryzen 7 5800X3D»).
+///
+/// `cpu_identifier` даёт семейство/модель/степпинг — этого достаточно для
+/// сравнения сессий между собой, но в отчёте нечитаемо. Брендовое имя лежит в
+/// реестре, и читать его оттуда надёжнее, чем разбирать CPUID.
+pub fn cpu_brand() -> String {
+    #[cfg(windows)]
+    {
+        let brand = registry_string(
+            "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+            "ProcessorNameString",
+        );
+        let brand = brand.trim().to_string();
+        if !brand.is_empty() {
+            return brand;
+        }
+    }
+    String::new()
+}
+
+/// Значение строкового параметра реестра (`HKEY_LOCAL_MACHINE`), пусто при ошибке.
+#[cfg(windows)]
+fn registry_string(subkey: &str, value: &str) -> String {
+    let subkey: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    let value: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut buf = [0u16; 64];
+    let mut len: u32 = (buf.len() * 2) as u32;
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE as HKEY,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 || len == 0 {
+        return String::new();
+    }
+    // Длина в байтах, без завершающего нуля.
+    let units = ((len as usize).saturating_sub(2)) / 2;
+    String::from_utf16_lossy(&buf[..units.min(buf.len())])
+}
+
+/// Значение DWORD из реестра, 0 при ошибке или другом типе.
+#[cfg(windows)]
+fn registry_dword(subkey: &str, value: &str) -> u32 {
+    let subkey: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    let value: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut out: u32 = 0;
+    let mut len: u32 = std::mem::size_of::<u32>() as u32;
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE as HKEY,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            &mut out as *mut u32 as *mut std::ffi::c_void,
+            &mut len,
+        )
+    };
+    if rc == 0 { out } else { 0 }
+}
+
+/// Починить строку, испорченную однобайтовым декодером.
 /// Старый код читал UTF-8 вывод `powercfg` как CP866. Ошибка обратима: если
 /// обратная перекодировка в OEM даёт валидный UTF-8 с кириллицей, значит
 /// перед нами именно такая порча. Нужно для истории, записанной до исправления.

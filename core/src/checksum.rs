@@ -1,6 +1,6 @@
 //! Цепочка контрольных сумм (побитовое детерминированное смешивание).
 
-use crate::config::{HASH_OFFSET, HASH_PRIME, SEED};
+use crate::config::{FINALIZE_TICK_CONSTANT, FINALIZE_TICK_ROTATE, HASH_OFFSET, HASH_PRIME, SEED};
 
 /// `Mix(hash, value) = (hash XOR value).wrapping_mul(HashPrime)`.
 #[inline]
@@ -20,8 +20,8 @@ pub const fn start_run_checksum() -> u64 {
 pub fn finalize_tick(checksum: u64, tick_index: u64) -> u64 {
     let mut c = checksum;
     c = mix(c, tick_index);
-    c = c.rotate_left(17).wrapping_mul(HASH_PRIME);
-    c = mix(c, tick_index ^ 0x9E37_79B9_7F4A_7C15);
+    c = c.rotate_left(FINALIZE_TICK_ROTATE).wrapping_mul(HASH_PRIME);
+    c = mix(c, tick_index ^ FINALIZE_TICK_CONSTANT);
     c
 }
 

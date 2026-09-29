@@ -13,7 +13,10 @@ use crate::checksum::{finalize_tick, mix, start_run_checksum};
 use crate::config::{
     DT_SECONDS, ENTITY_CAPACITY, MAXIMUM_JOBS, RESPONSE_SUPERCYCLE, SEED, VERSION, config_hash,
 };
-use crate::config::{Phase, Profile, ProfileParams, profile_params, response_profile};
+use crate::config::{
+    Phase, Profile, ProfileParams, VELOCITY_DAMPING, VELOCITY_STEP, profile_params,
+    response_profile,
+};
 use crate::pool::{JobDescriptor, Pool};
 use crate::prng::wrap_position;
 use crate::sample::{SampleBuffer, capacity_for_ticks};
@@ -203,10 +206,25 @@ impl Engine {
     /// Reset ядра перед прогоном/фазой: буферы к состоянию из Seed, индексы
     /// тиков профилей обнуляются, слоты и runChecksum восстанавливаются,
     /// пул переводится в idle, отмена снимается.
-    pub fn reset(&mut self) {
-        unsafe { &mut *self.entities.get() }.reset();
+    ///
+    /// Порядок обязателен: **сначала** пул останавливается, **потом** пишутся
+    /// буферы. Если грейс отмены истёк, опоздавший воркер ещё исполняет
+    /// `run_job` и пишет в буферы сущностей; сбросить их в этот момент — гонка
+    /// памяти, а снятие флага отмены до остановки пула заставит воркер
+    /// досчитать все задачи поверх только что записанных значений. Следующая
+    /// фаза стартовала бы с недетерминированного состояния, и контрольная сумма
+    /// расходилась бы между прогонами.
+    ///
+    /// Возвращает `false`, если пул не затих: состояние после такого сброса
+    /// недостоверно, и мерить дальше нельзя. Молча продолжать нельзя — вызывающий
+    /// обязан либо остановиться, либо знать, что данные негодны.
+    pub fn reset(&mut self) -> bool {
+        let quiet = self.pool.reset_to_idle();
+        // Отмена снимается только после тишины пула: иначе воркер успеет
+        // доработать прерванный батч поверх новых буферов.
         self.pool.clear_cancel();
-        self.pool.reset_to_idle();
+        unsafe { &mut *self.entities.get() }.reset();
+        quiet
     }
 
     /// Запустить фазу (вызывающий выполняет reset перед каждой фазой).
@@ -413,11 +431,11 @@ fn main_stage(entities: &RawShared<EntityBuffers>, params: &ProfileParams) -> u6
 
         // Ветвистые переходы состояния (branch-heavy).
         let dir = if f & 1 != 0 { 1.0f64 } else { -1.0f64 };
-        let vx_new = p.vx[e] * 0.999 + dir * 0.000_5;
+        let vx_new = p.vx[e] * VELOCITY_DAMPING + dir * VELOCITY_STEP;
         let vy_new = match (f >> 1) & 3 {
-            0 => p.vy[e] * 0.999,
-            1 => p.vy[e] * 0.999 - 0.000_5,
-            2 => p.vy[e] * 0.999 + 0.000_5,
+            0 => p.vy[e] * VELOCITY_DAMPING,
+            1 => p.vy[e] * VELOCITY_DAMPING - VELOCITY_STEP,
+            2 => p.vy[e] * VELOCITY_DAMPING + VELOCITY_STEP,
             _ => {
                 if f & 4 != 0 {
                     p.vy[e] * 1.000_5
@@ -427,7 +445,7 @@ fn main_stage(entities: &RawShared<EntityBuffers>, params: &ProfileParams) -> u6
             }
         };
         let vz_new = {
-            let base = p.vz[e] * 0.999;
+            let base = p.vz[e] * VELOCITY_DAMPING;
             if f & 8 != 0 {
                 base + 0.000_5
             } else {
@@ -494,14 +512,8 @@ mod descriptor_tests {
     /// делителей объёмов работы: разбиение обязано быть точным, иначе часть
     /// работы просто потеряется (это же проверяет `build_descriptors`).
     fn all_profiles() -> Vec<ProfileParams> {
-        [
-            Profile::Light,
-            Profile::Heavy,
-            Profile::ResponseBase,
-            Profile::ResponseMedium,
-            Profile::ResponseMajor,
-        ]
-        .into_iter()
+        crate::config::ALL_PROFILES
+            .into_iter()
         .flat_map(|p| {
             let base = profile_params(p);
             // Все делители числа воркеров по умолчанию, плюс сам делитель:

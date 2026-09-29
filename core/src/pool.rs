@@ -16,12 +16,10 @@ use std::time::{Duration, Instant};
 
 use crate::buffers::{EntityBuffers, RawShared};
 use crate::checksum::mix;
-use crate::config::MAXIMUM_JOBS;
+use crate::config::{ANIMATION_STEP, MAXIMUM_JOBS, VISIBILITY_MIX_CONSTANT};
 use crate::prng::unit_bits;
 
 /// Константа смешивания проб видимости (из спецификации).
-const VISIBILITY_MIX_CONSTANT: u64 = 0x9E37_79B9;
-
 /// Период опроса при ожидании пробуждения.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
@@ -154,7 +152,7 @@ unsafe fn run_job(desc: JobDescriptor, entities: &RawShared<EntityBuffers>) -> u
     for t in 0..acount {
         let k = astart + t;
         let a = p.anim[k];
-        let na = a + 0.000_1;
+        let na = a + ANIMATION_STEP;
         p.anim[k] = if na > 1.0 { na - 1.0 } else { na };
         c = mix(c, p.anim[k].to_bits());
     }
@@ -203,16 +201,21 @@ fn process_jobs(
 
     // Локальная копия слотов перед единичной записью в общий массив.
     let mut my_slots: [u64; MAXIMUM_JOBS] = [0; MAXIMUM_JOBS];
+    let mut done = 0usize;
     for k in 0..n {
         if cancel.load(Ordering::Relaxed) {
             break; // кооперативный выход из текущего батча
         }
         my_slots[k] = unsafe { run_job(my_descs[k], entities) };
+        done += 1;
     }
 
-    if n > 0 {
+    if done > 0 {
         let mut guard = lock_pool(shared);
-        for k in 0..n {
+        // Публикуем только реально посчитанные слоты. При кооперативном выходе
+        // хвост остался бы нулевым, и нулевое значение попало бы в контрольную
+        // сумму как результат работы, которой не было.
+        for k in 0..done {
             guard.job_slots[my_indices[k]] = my_slots[k];
         }
     }
@@ -374,18 +377,22 @@ impl Pool {
         self.cancel.store(false, Ordering::Release);
     }
 
+    /// quiesce выполняется первым, и его результат возвращается наружу: раньше
     /// Пул в idle перед фазой: батча нет, счётчик завершившихся воркеров нулевой.
+    /// он отбрасывался, и о незакрытом пуле узнавали только по следующим
     ///
+    /// симптомам — расхождением контрольных сумм между прогонами.
     /// Сначала дожидается «тишины» пула: если грейс отмены истёк, воркеры могут
     /// ещё писать в буферы сущностей. Сбрасывать буферы в этот момент — гонка
     /// памяти и рассинхрон контрольных сумм, поэтому сначала quiesce.
-    pub fn reset_to_idle(&self) {
-        self.quiesce();
+    pub fn reset_to_idle(&self) -> bool {
+        let quiet = self.quiesce();
         let mut guard = lock_pool(&self.shared);
         guard.active_jobs = 0;
         guard.active_workers = 1;
         guard.workers_done = 0;
         guard.faulted = false;
+        quiet
     }
 
     /// Дождаться, пока все воркеры завершат текущий батч.

@@ -86,7 +86,7 @@ impl<T> RawShared<T> {
 /// Нормализация значения PRNG в [0, 1]: `((v >> 11) & 0xFFFF) / 65535.0`.
 #[inline]
 fn normalized(v: u64) -> f64 {
-    ((v >> 11) & 0xFFFF) as f64 / 65_535.0
+    ((v >> 11) & 0xFFFF) as f64 / crate::config::PRNG_NORMALIZE
 }
 
 impl EntityBuffers {

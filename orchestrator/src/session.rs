@@ -663,7 +663,12 @@ fn run_measured_phase(
     observer: Option<Arc<dyn TelemetryObserver>>,
     baseline: Option<&crate::history::MachineBaseline>,
 ) -> Result<(RunReport, Vec<f64>), PhaseFailure> {
-    engine.reset();
+    if !engine.reset() {
+        // Пул не затих: в буферы мог писать опоздавший воркер, и любые числа
+        // отсюда недостоверны. Молчать об этом нельзя — иначе поломка всплывёт
+        // позже как «контрольная сумма различается между повторами».
+        return Err(PhaseFailure::LoadDidNotStop);
+    }
     engine.prepare_sample_buffer(phase, seconds.max(1));
     let cancel = engine.canceller();
     let scoreboard = engine.scoreboard_arc();
@@ -1156,7 +1161,10 @@ fn run_session_loop(
             }
 
             // --- Разогрев профилем «Отклик» (результаты отбрасываются) ---
-            engine.reset();
+            if !engine.reset() {
+                clear_testing_marker();
+                return Err(SessionError::LoadDidNotStop);
+            }
             engine.prepare_sample_buffer(Phase::Response, plan.warmup_seconds.max(1));
             let warmup_cancel = engine.canceller();
             let warmup_scoreboard = engine.scoreboard_arc();
@@ -1178,6 +1186,14 @@ fn run_session_loop(
                         .recv_timeout(Duration::from_secs(WATCHDOG_CANCEL_GRACE_SECS))
                         .ok();
                     let _ = warmup_handle.join();
+                    // Пул мог остаться горящим: `wait_batch` выходит по грейсу
+                    // отмены, не дождавшись отчётов. Гасим его здесь же — иначе
+                    // следующая схема начнёт смену плана поверх работающих
+                    // воркеров, и замер пойдёт с недетерминированного состояния.
+                    if !engine.quiesce_pool() {
+                        clear_testing_marker();
+                        return Err(SessionError::LoadDidNotStop);
+                    }
                     if user_wants_stop(user_cancel)
                         || verdict == Some(WatchdogVerdict::UserCancelled)
                     {
@@ -1340,7 +1356,7 @@ fn run_session_loop(
                         );
                         spike_count_total += windows.len();
                         all_spike_windows.extend(windows.clone());
-                        times_by_phase.push((idx as u8, times));
+                        times_by_phase.push((phase.index(), times));
                         // Стабилизационная пауза после каждой фазы.
                         std::thread::sleep(Duration::from_secs(STABILIZATION_SECS));
                         if spike_count_total > 0 {
@@ -1440,13 +1456,16 @@ fn run_session_loop(
 
             let light_avg = times_by_phase
                 .iter()
-                .find(|(i, _)| *i == 0)
+                .find(|(i, _)| *i == Phase::Light.index())
                 .and_then(|(_, t)| run_stats(t))
                 .map(|s| s.average_throughput)
                 .unwrap_or(0.0);
+            // Индекс берём у самой фазы, а не литералом: после появления фазы
+            // «Частичная» литерал 1 перестал быть «Тяжёлой», и метрика
+            // удержания темпа молча считалась по чужой фазе.
             let heavy_avg = times_by_phase
                 .iter()
-                .find(|(i, _)| *i == 1)
+                .find(|(i, _)| *i == Phase::Heavy.index())
                 .and_then(|(_, t)| run_stats(t))
                 .map(|s| s.average_throughput)
                 .unwrap_or(0.0);

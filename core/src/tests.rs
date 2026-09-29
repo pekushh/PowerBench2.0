@@ -276,6 +276,24 @@ fn late_worker_report_does_not_corrupt_next_batch() {
     assert_eq!(a.first_tick_checksum, b.first_tick_checksum);
 }
 
+/// Порядок фаз в `PHASE_ORDER` обязан совпадать с их индексами.
+///
+/// От этого инварианта зависят все позиционные массивы: `first_tick_checksums`,
+/// `run_checksums`, `StoredRun::phases` и `PhaseStats::phase_index`. При добавлении
+/// фазы без проверки индексы разъезжаются, и метрики молча считаются по чужой
+/// фазе: так однажды burst retention считался по «Частичной» вместо «Тяжёлой».
+#[test]
+fn phase_order_matches_phase_indices() {
+    for (position, phase) in crate::config::PHASE_ORDER.iter().enumerate() {
+        assert_eq!(
+            position,
+            phase.index() as usize,
+            "фаза на позиции {position} имеет индекс {} — массивы разъедутся",
+            phase.index()
+        );
+    }
+}
+
 /// Ошибка `SampleCapacityReached`, а не тихое обрезание.
 #[test]
 fn sample_capacity_reached_is_an_error() {

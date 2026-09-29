@@ -52,8 +52,22 @@ pub enum Profile {
     ResponseMajor,
 }
 
+/// Все профили нагрузки в порядке индексов.
+///
+/// Единственный список на workspace: пока профили перечислялись вручную в
+/// тестах, профиль «Частичная» в них не попал — а именно на нём был баг с
+/// раздачей задач, который проверки инвариантов должны были поймать.
+pub const ALL_PROFILES: [Profile; 6] = [
+    Profile::Light,
+    Profile::Partial,
+    Profile::Heavy,
+    Profile::ResponseBase,
+    Profile::ResponseMedium,
+    Profile::ResponseMajor,
+];
+
 impl Profile {
-    /// Индекс профиля как usize (для таблиц эталонных сумм).
+    /// Порядковый номер профиля (совпадает с позицией в [`ALL_PROFILES`]).
     pub const fn index(self) -> usize {
         match self {
             Profile::Light => 0,
@@ -204,22 +218,65 @@ pub const fn response_profile(tick_index_in_phase: u64) -> Profile {
     }
 }
 
-/// Payload хэша конфигурации (UTF-8, без разделителей тысяч, инвариантная
-/// культура): `Version|Seed_HEX16|EntityCapacity|Supercycle|` затем шесть
-/// профилей (Light, Partial, Heavy, ResponseBase, ResponseMedium,
-/// ResponseMajor), каждый — `MainEntityUpdates,VisibilityProbes,AnimationItems,WorkerJobs`.
+/// Затухание скорости сущностей за тик и шаг разгона.
+pub const VELOCITY_DAMPING: f64 = 0.999;
+pub const VELOCITY_STEP: f64 = 0.000_5;
+/// Шаг анимации за тик (то же значение, что и в пуле).
+pub const ANIMATION_STEP: f64 = 0.000_1;
+/// Знаменатель нормализации PRNG в [0, 1].
+pub const PRNG_NORMALIZE: f64 = 65535.0;
+/// Множитель XorShift64.
+pub const PRNG_MULTIPLIER: u64 = 0x2545F4914F6CDD1D;
+/// Константа смешивания в задачах видимости.
+pub const VISIBILITY_MIX_CONSTANT: u64 = 0x9E37_79B9;
+/// Константа `finalize_tick` и сдвиг в нём.
+pub const FINALIZE_TICK_CONSTANT: u64 = 0x9E37_79B9_7F4A_7C15;
+pub const FINALIZE_TICK_ROTATE: u32 = 17;
+
+/// Payload для хэша конфигурации (UTF-8, порядок фиксирован): версия, seed,
+/// ёмкость, суперцикл, параметры всех профилей и **все константы, влияющие на
+/// контрольные суммы**.
 ///
-/// Профиль `Partial` добавлен вместе с фазой частичной нагрузки, поэтому
-/// `config_hash` изменился: сессии до и после этого честно считаются
-/// несопоставимыми, а не сравниваются как будто мерили то же самое.
-pub const CONFIG_PAYLOAD: &str = "GamingCpuV1|C52A202600000001|131072|256|8192,32768,8192,16|24576,98304,24576,32|32768,131072,32768,64|16384,65536,16384,32|24576,98304,24576,48|32768,131072,32768,64";
+/// Раньше это был строковый литерал, и в него попадали не все константы:
+/// `DT_SECONDS`, множители хэша, константы `finalize_tick`, множитель PRNG,
+/// нормализация и коэффициенты затухания в него не входили. Правка любой из них
+/// не меняла `config_hash`, и несопоставимые прогоны получали сообщение
+/// «контрольная сумма различается между повторами» вместо «изменилась
+/// конфигурация нагрузки». Теперь payload собирается из самих констант, и
+/// разъехаться с ними он не может.
+pub fn config_payload() -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(320);
+    let _ = write!(s, "GamingCpuV1|{SEED:016X}|{ENTITY_CAPACITY}|{RESPONSE_SUPERCYCLE}");
+    for p in ALL_PROFILES {
+        let params = profile_params(p);
+        let _ = write!(
+            s,
+            "|{},{},{},{}",
+            params.main_entity_updates,
+            params.visibility_probes,
+            params.animation_items,
+            params.worker_jobs
+        );
+    }
+    let _ = write!(s, "|mix:{HASH_OFFSET}:{HASH_PRIME}");
+    let _ = write!(s, "|vis:{VISIBILITY_MIX_CONSTANT}");
+    let _ = write!(s, "|fin:{FINALIZE_TICK_CONSTANT}:{FINALIZE_TICK_ROTATE}");
+    let _ = write!(s, "|prng:{PRNG_MULTIPLIER}:{PRNG_NORMALIZE:.1}");
+    let _ = write!(s, "|dt:{DT_SECONDS:.12}");
+    let _ = write!(
+        s,
+        "|vel:{VELOCITY_DAMPING:.6}:{VELOCITY_STEP:.6}:{ANIMATION_STEP:.6}"
+    );
+    s
+}
 
 /// SHA-256 от payload конфигурации, hex-строка ВЕРХНИМ регистром.
 /// Вычисляется один раз и кэшируется.
 pub fn config_hash() -> &'static str {
     static HASH: OnceLock<String> = OnceLock::new();
     HASH.get_or_init(|| {
-        let digest = Sha256::digest(CONFIG_PAYLOAD.as_bytes());
+        let digest = Sha256::digest(config_payload().as_bytes());
         let mut hex = String::with_capacity(64);
         for b in digest {
             hex.push_str(&format!("{:02X}", b));
@@ -256,13 +313,7 @@ mod tests {
     #[test]
     fn profile_work_splits_evenly_between_jobs() {
         let _g = crate::tests::lock();
-        for p in [
-            Profile::Light,
-            Profile::Heavy,
-            Profile::ResponseBase,
-            Profile::ResponseMedium,
-            Profile::ResponseMajor,
-        ] {
+        for p in ALL_PROFILES {
             let params = profile_params(p);
             assert!(params.worker_jobs > 0);
             assert_eq!(params.visibility_probes % params.worker_jobs, 0);
@@ -273,12 +324,71 @@ mod tests {
     #[test]
     fn config_hash_is_uppercase_hex_of_sha256() {
         let _g = crate::tests::lock();
-        let digest = Sha256::digest(CONFIG_PAYLOAD.as_bytes());
-        let mut expected = String::new();
+        let digest = Sha256::digest(config_payload().as_bytes());
+        let mut expected = String::with_capacity(64);
         for b in digest {
             expected.push_str(&format!("{:02X}", b));
         }
         assert_eq!(config_hash(), &expected);
         assert_eq!(config_hash().len(), 64);
+    }
+
+    /// Payload обязан содержать каждую константу, влияющую на контрольные суммы.
+    ///
+    /// Строковый литерал payload раньше их не содержал, и правка константы не
+    /// меняла `config_hash`: несопоставимые прогоны получали диагноз «контрольная
+    /// сумма различается между повторами» вместо «изменилась конфигурация
+    /// нагрузки». Тест ловит и удаление сегмента, и подмену его значения.
+    #[test]
+    fn config_payload_covers_checksum_constants() {
+        let _g = crate::tests::lock();
+        let payload = config_payload();
+        for (name, value) in [
+            ("mix offset", HASH_OFFSET.to_string()),
+            ("mix prime", HASH_PRIME.to_string()),
+            ("visibility", VISIBILITY_MIX_CONSTANT.to_string()),
+            ("finalize constant", FINALIZE_TICK_CONSTANT.to_string()),
+            ("finalize rotate", FINALIZE_TICK_ROTATE.to_string()),
+            ("prng multiplier", PRNG_MULTIPLIER.to_string()),
+            ("prng normalize", format!("{PRNG_NORMALIZE:.1}")),
+            ("velocity damping", format!("{VELOCITY_DAMPING:.6}")),
+            ("velocity step", format!("{VELOCITY_STEP:.6}")),
+            ("animation step", format!("{ANIMATION_STEP:.6}")),
+            ("dt", format!("{DT_SECONDS:.12}")),
+            ("seed", format!("{SEED:016X}")),
+            ("entity capacity", ENTITY_CAPACITY.to_string()),
+            ("supercycle", RESPONSE_SUPERCYCLE.to_string()),
+        ] {
+            assert!(
+                payload.contains(&value),
+                "payload не содержит {name} = {value}: {payload}"
+            );
+        }
+        // Профиль «Частичная» тоже обязан попасть в payload: без него прогоны
+        // разных фаз смешивались бы при неизменном config_hash.
+        assert!(
+            payload.contains(&format!("{},{}", {
+                let p = profile_params(Profile::Partial);
+                p.main_entity_updates
+            }, {
+                let p = profile_params(Profile::Partial);
+                p.worker_jobs
+            })),
+            "payload не содержит параметров профиля «Частичная»"
+        );
+    }
+
+    /// Хэш обязан быть функцией payload: иначе две сборки с разными константами
+    /// выдали бы один и тот же хэш конфигурации.
+    #[test]
+    fn config_hash_tracks_payload() {
+        let _g = crate::tests::lock();
+        let first = config_hash().to_string();
+        assert_eq!(first, config_hash());
+        let mut altered = config_payload();
+        altered.push('x');
+        let a = Sha256::digest(altered.as_bytes());
+        let b = Sha256::digest(config_payload().as_bytes());
+        assert_ne!(a[..], b[..], "хэш не зависит от payload");
     }
 }

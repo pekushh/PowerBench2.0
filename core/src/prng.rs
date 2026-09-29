@@ -6,7 +6,7 @@ pub struct XorShift64 {
     state: u64,
 }
 
-const MULTIPLIER: u64 = 0x2545F4914F6CDD1D;
+use crate::config::PRNG_MULTIPLIER as MULTIPLIER;
 
 impl XorShift64 {
     /// Создать генератор от заданного seed. Нулевое состояние залипает
@@ -43,7 +43,6 @@ pub const fn unit_bits(v: u64) -> u64 {
 pub fn unit_signed(v: u64) -> f64 {
     unit_bits(v) as f64 * (1.0 / 4_503_599_627_370_496.0) - 1.0
 }
-
 /// `WrapPosition(p)`: вернуть p в [-1, 1), циклически.
 #[inline]
 pub fn wrap_position(p: f64) -> f64 {

@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
-use powerbench_core::alloc_count::{COUNT, ENABLED};
+use powerbench_core::alloc_count::COUNT;
 use powerbench_core::config::{self, Phase, Profile, RESPONSE_SUPERCYCLE, response_profile};
 use powerbench_core::engine::{Engine, RunError, RunTarget};
 
@@ -435,19 +435,24 @@ fn run_validator() -> Report {
     );
 
     // 8. Ноль аллокаций в главном цикле тиков.
+    //
+    // Счётчик измеряет только то, что прошло через `CountingAllocator`, а он
+    // стоит под `#[cfg(test)]` в core: в релизной сборке CLI `COUNT` всегда ноль,
+    // и проверка проходила бы, ничего не проверяя. Поэтому здесь она честно
+    // сообщает «не измеряется», а настоящая проверка живёт в тестах крейта
+    // (`zero_allocations_in_tick_loop`), где аллокатор установлен.
     engine.reset();
     let warm = engine.run_phase(Phase::Heavy, RunTarget::Ticks(SHORT_TICKS));
-    COUNT.store(0, Ordering::Relaxed);
-    ENABLED.store(true, Ordering::Relaxed);
     let measured = engine.run_phase(Phase::Heavy, RunTarget::Ticks(32));
-    let allocations = COUNT.load(Ordering::Relaxed);
-    ENABLED.store(false, Ordering::Relaxed);
-    let zero_ok = warm.is_ok() && measured.is_ok() && allocations == 0;
     check(
         &mut checks,
         "zero-allocations",
-        zero_ok,
-        format!("аллокаций в окне измеряемого прогона: {allocations}"),
+        warm.is_ok() && measured.is_ok(),
+        format!(
+            "аллокации в релизной сборке не измеряются (счётчик только в тестах \
+             крейта): {}",
+            COUNT.load(Ordering::Relaxed)
+        ),
     );
 
     Report {

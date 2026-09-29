@@ -347,6 +347,17 @@ export const commands = {
   /** Оценка длительности сессии, посчитанная бэкендом. */
   /** Сбросить журнал на диск (вызывается перед выходом и в тестах). */
   logFlush: () => invoke<void>("log_flush"),
+  /** Имя файла отчёта по умолчанию, чтобы диалог сохранения был осмысленным. */
+  diagnosticsFileName: () => invoke<string>("diagnostics_file_name"),
+  /**
+   * Сохранить отчёт для поддержки: журнал, окружение, идентичность замера,
+   * состояние контрольной точки, карантина, настроек и последней сессии.
+   */
+  saveDiagnostics: (path: string, redact: boolean) =>
+    invoke<{ path: string; lines: number; findings: number; suggested_name: string }>(
+      "save_diagnostics",
+      { path, redact },
+    ),
   estimateSession: (
     durationSeconds: number,
     warmupSeconds: number,

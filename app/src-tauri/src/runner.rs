@@ -33,6 +33,8 @@ use powerbench_windows::power::SleepGuard;
 pub struct RunnerHandle {
     pub cancel: Arc<AtomicBool>,
     pub join: Option<JoinHandle<()>>,
+    /// Что измеряется прямо сейчас; `None`, когда сессии нет.
+    pub status: Arc<Mutex<Option<String>>>,
 }
 
 /// Сколько ждём завершения сессии при закрытии окна, мс.
@@ -98,6 +100,10 @@ impl Default for ObsCtx {
 struct AppObserver {
     app: AppHandle,
     ctx: Mutex<ObsCtx>,
+    /// Общая с владельцем сессии строка «что сейчас измеряется». Нужна
+    /// отчёту для поддержки: он снимается посреди замера, и без этой
+    /// строки неизвестно, на какой фазе всё остановилось.
+    shared_status: Option<Arc<Mutex<Option<String>>>>,
 }
 
 /// Телеметрия одного тика (~10 Гц во время измеряемой фазы).
@@ -203,6 +209,25 @@ impl TelemetryObserver for AppObserver {
         seconds: u64,
     ) {
         let now = Instant::now();
+        // Первая фаза прогона — момент, когда ещё нечего видеть в журнале,
+        // кроме безымянного «фаза <Лёгкая>: 12 с». Таких строк за сессию
+        // десятки, и без схемы с раундом непонятно, чей это был замер.
+        // Одна строка «прогон N/M, раунд R, схема …» делает журнал пригодным
+        // для разбора без обращения к файлу результата.
+        let is_first_phase = {
+            let ctx = self.lock_ctx();
+            ctx.phase.is_empty() || ctx.scheme_id != scheme_id || ctx.round != round
+        };
+        if is_first_phase {
+            persist_log(
+                &self.app,
+                "info",
+                &format!(
+                    "прогон {run_index}/{run_total}, раунд {round}: схема «{scheme_name}» \
+                     [{scheme_id}], первая фаза «{label}» ({seconds} с)"
+                ),
+            );
+        }
         let mut ctx = self.lock_ctx();
         ctx.run_index = run_index;
         ctx.run_total = run_total;
@@ -214,6 +239,14 @@ impl TelemetryObserver for AppObserver {
         ctx.phase_started = now;
         ctx.last_ticks = 0;
         ctx.last_time = now;
+        if let Some(shared) = &self.shared_status
+            && let Ok(mut g) = shared.lock()
+        {
+            *g = Some(format!(
+                "прогон {run_index}/{run_total}, раунд {round}, схема «{scheme_name}», \
+                 фаза «{label}»"
+            ));
+        }
     }
 
     fn tick(&self, snap: &ProgressSnapshot, phase_label: &str, phase_started: &Instant) {
@@ -338,7 +371,17 @@ fn persist_log(app: &AppHandle, level: &str, text: &str) {
 }
 
 /// Тело фонового потока сессии.
-fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
+/// Потокобезопасное описание текущей сессии для отчёта и журнала.
+///
+/// Отчёт для поддержки снимают посреди замера чаще, чем после него: если
+/// приложение «зависло», снять отчёт — единственный способ узнать, на чём
+/// именно оно остановилось. Поэтому строка обновляется на каждой фазе.
+fn run_test(
+    app: AppHandle,
+    plan: SessionConfig,
+    cancel: Arc<AtomicBool>,
+    status: Arc<Mutex<Option<String>>>,
+) {
     let mut engine = match prepare_engine(plan.worker_count) {
         Ok(e) => e,
         Err(e) => {
@@ -370,9 +413,35 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
         }
     };
     let _ = guard;
+    // Параметры замера и идентичность движка пишем в журнал ДО старта сессии.
+    // Именно этой строкой потом объясняется «контрольная сумма различается
+    // между повторами»: если хеш конфигурации или число воркеров отличаются
+    // от прошлой сессии, расхождение ожидаемо, а не дефект.
+    persist_log(
+        &app,
+        "info",
+        &format!(
+            "старт замера: план {}, схем {}, раундов {}, длительность прогона {} с, \
+             разогрев {} с, охлаждение {} с, порог фона {} %; \
+             нагрузка {}, конфигурация {}, seed {:016X}, воркеров {}, ядер {}",
+            plan.plan_guid,
+            plan.scheme_ids.len(),
+            plan.repetitions,
+            plan.duration_seconds,
+            plan.warmup_seconds,
+            plan.cooling_seconds,
+            plan.background_threshold_percent,
+            engine.version(),
+            short_hash(engine.config_hash()),
+            engine.seed(),
+            engine.worker_count(),
+            engine.logical_cpus(),
+        ),
+    );
     let observer = Arc::new(AppObserver {
         app: app.clone(),
         ctx: Mutex::new(ObsCtx::default()),
+        shared_status: Some(Arc::clone(&status)),
     });
     let mut store = DiskCheckpointStore;
     let outcome = match run_session(
@@ -473,10 +542,7 @@ fn run_test(app: AppHandle, plan: SessionConfig, cancel: Arc<AtomicBool>) {
     // Сессия записана в историю — точка долетала своё, иначе следующий
     // новый запуск упрётся в «контрольная точка другого плана».
     if let Err(e) = powerbench_orchestrator::checkpoint::clear_checkpoint() {
-        error_of(
-            &app,
-            &format!("не удалось очистить контрольную точку: {e}"),
-        );
+        error_of(&app, &format!("не удалось очистить контрольную точку: {e}"));
     }
     let winner = json
         .recommendation
@@ -650,9 +716,11 @@ pub fn start(
         }
     }
     let cancel = Arc::new(AtomicBool::new(false));
+    let status = Arc::new(Mutex::new(None));
     let handle = RunnerHandle {
         cancel: Arc::clone(&cancel),
         join: None,
+        status: Arc::clone(&status),
     };
     {
         let mut guard = runner.lock().unwrap_or_else(|e| e.into_inner());
@@ -667,7 +735,7 @@ pub fn start(
         // Паника в сессии не должна вешать интерфейс в «running» навсегда
         // и оставлять чужую схему: гасим в ошибку и освобождаем раннер.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_test(app2, plan, cancel2);
+            run_test(app2, plan, cancel2, status);
         }));
         if let Err(payload) = outcome {
             let _ = app_err.emit(
@@ -726,6 +794,31 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
         s.to_string()
     } else {
         "неизвестная причина".to_string()
+    }
+}
+
+/// Короткое описание текущей сессии для отчёта и шапки.
+///
+/// `None` — сессии нет. Иначе строка обновляется на каждой фазе, поэтому
+/// отчёт, снятый посреди замера, показывает, на чём всё остановилось.
+pub fn session_description(runner: &Arc<Mutex<Option<RunnerHandle>>>) -> Option<String> {
+    let guard = runner.lock().unwrap_or_else(|e| e.into_inner());
+    let handle = guard.as_ref()?;
+    let status = handle
+        .status
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    Some(status.unwrap_or_else(|| "идёт (фаза неизвестна)".to_string()))
+}
+
+/// Короткая форма хеша конфигурации: полный в отчёте бесполезен, а по
+/// префиксу видно, совпадает ли он с прошлой сессией.
+fn short_hash(hash: &str) -> String {
+    if hash.len() > 12 {
+        format!("{}…", &hash[..12])
+    } else {
+        hash.to_string()
     }
 }
 

@@ -378,11 +378,7 @@ fn discard_stale_checkpoint(app: &tauri::AppHandle, state: &AppState) {
     if !cp.original_restored {
         let outcome = recover_interrupted_session(&RealSchemeDriver);
         if let Some(cause) = outcome.error {
-            runner::emit_log(
-                app,
-                "warn",
-                &format!("при сбросе прошлой сессии: {cause}"),
-            );
+            runner::emit_log(app, "warn", &format!("при сбросе прошлой сессии: {cause}"));
         }
     }
     match clear_checkpoint() {
@@ -942,6 +938,72 @@ pub fn log_history(state: tauri::State<'_, AppState>) -> Vec<crate::logger::LogE
 #[tauri::command]
 pub fn log_flush(state: tauri::State<'_, AppState>) {
     state.log.flush();
+}
+
+/// Что получилось при сохранении отчёта для поддержки.
+#[derive(serde::Serialize)]
+pub struct DiagnosticsSaved {
+    /// Куда записан файл.
+    pub path: String,
+    /// Сколько строк в отчёте.
+    pub lines: usize,
+    /// Сколько подозрительных состояний нашлось при сборе.
+    pub findings: usize,
+    /// Начало имени файла для копирования в буфер обмена.
+    pub suggested_name: String,
+}
+
+/// Сохранить отчёт для поддержки.
+///
+/// Отчёт собирается по кнопке и целиком попадает в файл, который
+/// пользователь перешлёт: журнал, окружение, идентичность замера,
+/// состояние контрольной точки, карантина, настроек и последней сессии.
+/// Смысл в том, чтобы по одному файлу было видно и что произошло, и в каком
+/// окружении, — без доступа к машине пользователя.
+#[tauri::command]
+pub fn save_diagnostics(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    redact: bool,
+) -> Result<DiagnosticsSaved, String> {
+    let target = std::path::PathBuf::from(&path);
+    if target.as_os_str().is_empty() {
+        return Err("не выбран путь для отчёта".to_string());
+    }
+    let log = state.log.snapshot();
+    // Перед сборкой дописываем журнал на диск: отчёт читает состояние из
+    // памяти, но пользователь может приложить к обращению и сам `AppLog.json`.
+    state.log.flush();
+    let session = runner::session_description(&state.runner);
+    let snapshot = crate::diagnostics::Snapshot::new(
+        std::time::SystemTime::now(),
+        session,
+        log,
+        target.clone(),
+        redact,
+    );
+    let built = crate::diagnostics::save(&snapshot)?;
+    let (saved, lines, findings) = (built.path, built.lines, built.findings);
+    state.log.append(
+        "info",
+        &format!(
+            "отчёт для поддержки сохранён: {} ({lines} строк, проблем: {findings})",
+            saved.display()
+        ),
+    );
+    Ok(DiagnosticsSaved {
+        path: saved.display().to_string(),
+        lines,
+        findings,
+        suggested_name: crate::diagnostics::default_file_name(),
+    })
+}
+
+/// Имя файла отчёта по умолчанию: команда нужна, чтобы диалог сохранения
+/// открывался сразу с осмысленным именем, а не `report.txt`.
+#[tauri::command]
+pub fn diagnostics_file_name() -> String {
+    crate::diagnostics::default_file_name()
 }
 
 /// Готовность системы к запуску теста.

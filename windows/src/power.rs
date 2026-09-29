@@ -285,9 +285,7 @@ pub fn power_state() -> PowerState {
     {
         let (max_mhz, current_mhz) = processor_clocks();
         let (policy_reason, cooling) = system_power_info();
-        let throttled = max_mhz > 0
-            && current_mhz > 0
-            && current_mhz + MHZ_TOLERANCE < max_mhz;
+        let throttled = max_mhz > 0 && current_mhz > 0 && current_mhz + MHZ_TOLERANCE < max_mhz;
         PowerState {
             max_mhz,
             current_mhz,
@@ -313,8 +311,7 @@ fn processor_clocks() -> (u32, u32) {
     // Буфер рассчитан на 256 процессоров — с запасом больше любой реальной
     // машины. Лишние записи API не заполняет, они остаются нулевыми.
     const MAX_PROCESSORS: usize = 256;
-    let mut buf: [PROCESSOR_POWER_INFORMATION; MAX_PROCESSORS] =
-        unsafe { std::mem::zeroed() };
+    let mut buf: [PROCESSOR_POWER_INFORMATION; MAX_PROCESSORS] = unsafe { std::mem::zeroed() };
     let bytes = std::mem::size_of::<PROCESSOR_POWER_INFORMATION>() * MAX_PROCESSORS;
     let status = unsafe {
         CallNtPowerInformation(
@@ -394,7 +391,10 @@ pub fn memory_gib() -> f64 {
 pub fn os_build() -> String {
     #[cfg(windows)]
     {
-        let major = registry_string("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", "CurrentBuild");
+        let major = registry_string(
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+            "CurrentBuild",
+        );
         if major.is_empty() {
             return String::new();
         }
@@ -577,6 +577,117 @@ fn encode_oem(text: &str) -> Vec<u8> {
     }
 }
 
+/// Смещение местного времени относительно UTC в секундах на момент `epoch_secs`.
+///
+/// Зачем это нужно приложению. Интерфейс показывает время в местной зоне
+/// (это делает JavaScript), а отчёт для поддержки должен называть метки
+/// записей в том же времени — иначе «ошибка в 20:38» из журнала и «20:38» из
+/// обращения пользователя разойдутся на разницу часов, и время ошибки
+/// определить будет невозможно.
+///
+/// Смещение берётся у Windows, а не вычисляется вручную: правила перехода на
+/// летнее время меняются политикой региона, и самодельный разбор `TIME_ZONE_INFORMATION`
+/// рано или поздно ошибётся на переходе. Смещение вычисляется один раз для
+/// текущего момента, поэтому для записей журнала из другого полугодия (когда
+/// действовало другое правило) возможна ошибка в час — для разбора ошибок это
+/// несущественно, о чём и сказано в документации функции.
+#[cfg(windows)]
+pub fn local_offset_secs(epoch_secs: u64) -> i64 {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::Time::TzSpecificLocalTimeToSystemTime;
+
+    let secs = epoch_secs as i64;
+    let (days, sod) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (y, m, d) = civil_from_days(days);
+    let as_systemtime = |secs_of_day: i64| SYSTEMTIME {
+        wYear: y as u16,
+        wMonth: m as u16,
+        wDayOfWeek: 0,
+        wDay: d as u16,
+        wHour: (secs_of_day / 3600) as u16,
+        wMinute: ((secs_of_day % 3600) / 60) as u16,
+        wSecond: (secs_of_day % 60) as u16,
+        wMilliseconds: 0,
+    };
+    // Считаем текущий момент «местным» и просим Windows перевести его в
+    // универсальное. Если сказать «это 18:56 по местному», Windows вернёт
+    // 15:56 UTC, то есть `универсальное = местное − смещение`, откуда
+    // `смещение = местное − универсальное`. Знак легко перепутать, поэтому
+    // он зафиксирован тестом `local_offset_matches_the_system_clock`.
+    let local = as_systemtime(sod);
+    let mut universal = SYSTEMTIME {
+        wYear: 0,
+        wMonth: 0,
+        wDayOfWeek: 0,
+        wDay: 0,
+        wHour: 0,
+        wMinute: 0,
+        wSecond: 0,
+        wMilliseconds: 0,
+    };
+    let ok = unsafe { TzSpecificLocalTimeToSystemTime(std::ptr::null(), &local, &mut universal) };
+    if ok == 0 {
+        return 0;
+    }
+    let universal_days = days_from_civil(
+        universal.wYear as i64,
+        universal.wMonth as i64,
+        universal.wDay as i64,
+    );
+    let universal_sod = (universal.wHour as i64) * 3600
+        + (universal.wMinute as i64) * 60
+        + universal.wSecond as i64;
+    secs - (universal_days * 86_400 + universal_sod)
+}
+
+/// Дни от Unix-эпохи до календарной даты (обратная к `civil_from_days`).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Дата из дней от Unix-эпохи.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Текущее местное время в виде `ДД.ММ.ГГГГ ЧЧ:ММ:СС` (сдвиг зоны учтён).
+pub fn local_time_string(epoch_secs: u64) -> String {
+    let local = epoch_secs as i64 + local_offset_secs(epoch_secs);
+    let days = local.div_euclid(86_400);
+    let sod = local.rem_euclid(86_400);
+    let (y, mo, d) = civil_from_days(days);
+    format!(
+        "{d:02}.{mo:02}.{y} {:02}:{:02}:{:02}",
+        sod / 3600,
+        (sod % 3600) / 60,
+        sod % 60
+    )
+}
+
+/// Смещение местной зоны текстом: «UTC+03:00». Для отчёта: без него
+/// сравнивать метки записей с метками в интерфейсе приходится на глаз.
+pub fn local_offset_label(epoch_secs: u64) -> String {
+    let off = local_offset_secs(epoch_secs);
+    let sign = if off < 0 { '-' } else { '+' };
+    let a = off.abs();
+    format!("UTC{sign}{:02}:{:02}", a / 3600, (a % 3600) / 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,5 +744,122 @@ mod tests {
     #[test]
     fn diagnostics_version_is_fixed() {
         assert_eq!(diagnostics_version(), "0.1.0");
+    }
+
+    /// Смещение зоны обязано быть целым числом минут и правдоподобным по
+    /// величине: это единственная защита от молчаливого мусора, если FFI
+    /// вернёт не то (например, если структура SYSTEMTIME соберётся неверно).
+    #[test]
+    fn local_offset_is_plausible() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let off = local_offset_secs(now);
+        assert!(
+            (-14 * 3600..=14 * 3600).contains(&off),
+            "смещение {off} с не похоже на часовой пояс"
+        );
+        assert_eq!(off % 60, 0, "смещение {off} с не кратно минуте");
+    }
+
+    /// Дата в местном времени и календарная арифметика обязаны быть
+    /// согласованы: иначе отчёт напишет «31.02» или «29.02» не того года, и
+    /// это будет выглядеть как «приложение сошло с ума».
+    /// Смещение обязано совпадать с тем, что показывает сама система: иначе
+    /// отчёт напишет время на несколько часов раньше или позже интерфейса,
+    /// и это будет выглядеть как «в отчёте ерунда».
+    #[test]
+    fn local_offset_matches_the_system_clock() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let off = local_offset_secs(now);
+        let local = now as i64 + off;
+        // Сравниваем с системными часами через ту же WinAPI: независимый
+        // источник времени (DateTimeOffset в PowerShell) в тест не пустить,
+        // но сам факт «локальное = UTC + смещение» проверяется кругом.
+        let (y, mo, d) = civil_from_days(local.div_euclid(86_400));
+        let sod = local.rem_euclid(86_400);
+        let text = local_time_string(now);
+        assert_eq!(
+            text,
+            format!(
+                "{d:02}.{mo:02}.{y} {:02}:{:02}:{:02}",
+                sod / 3600,
+                (sod % 3600) / 60,
+                sod % 60
+            ),
+            "местное время не сходится с самим собой: {text}"
+        );
+        // Метка зоны обязана соответствовать знаку смещения.
+        let label = local_offset_label(now);
+        assert_eq!(
+            label.starts_with("UTC-"),
+            off < 0,
+            "метка {label} не соответствует смещению {off} с"
+        );
+    }
+
+    #[test]
+    fn local_time_string_is_a_valid_calendar_date() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let text = local_time_string(now);
+        assert!(
+            text.len() == 19,
+            "неожиданный формат местного времени: {text}"
+        );
+        let (date, time) = text.split_once(' ').expect("нет пробела в дате");
+        let d: Vec<&str> = date.split('.').collect();
+        let t: Vec<&str> = time.split(':').collect();
+        assert_eq!(d.len(), 3, "дата должна быть ДД.ММ.ГГГГ: {text}");
+        assert_eq!(t.len(), 3, "время должно быть ЧЧ:ММ:СС: {text}");
+        let (day, month, year) = (
+            d[0].parse::<u32>().unwrap(),
+            d[1].parse::<u32>().unwrap(),
+            d[2].parse::<i32>().unwrap(),
+        );
+        assert!((1..=31).contains(&day), "неверный день: {text}");
+        assert!((1..=12).contains(&month), "неверный месяц: {text}");
+        assert!(year >= 2020, "неверный год: {text}");
+        assert!(t[0].parse::<u32>().unwrap() <= 23, "неверный час: {text}");
+        assert!(
+            t[1].parse::<u32>().unwrap() <= 59,
+            "неверная минута: {text}"
+        );
+        assert!(
+            t[2].parse::<u32>().unwrap() <= 60,
+            "неверные секунды: {text}"
+        );
+    }
+
+    /// `days_from_civil` и `civil_from_days` обязаны быть обратными: всё
+    /// местное время считается через эту пару.
+    #[test]
+    fn civil_date_conversions_round_trip() {
+        for days in [-25_000i64, 0, 1, 19_723, 20_725, 40_000] {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), days, "не круг для {days}");
+        }
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(20_725), (2026, 9, 29));
+    }
+
+    #[test]
+    fn local_offset_label_is_readable() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let label = local_offset_label(now);
+        assert!(
+            label.starts_with("UTC+") || label.starts_with("UTC-"),
+            "{label}"
+        );
+        assert_eq!(label.len(), 9, "ожидался вид UTC+03:00, получено {label}");
     }
 }

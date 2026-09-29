@@ -2,18 +2,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bridge;
+mod diagnostics;
 mod logger;
 mod runner;
 
 use crate::bridge::{
     AppState, ac_power_online, appsettings_path, checkpoint_discard, checkpoint_status,
-    estimate_session, get_settings, history_delete, history_export_to, history_list,
-    history_open, history_open_folder, history_report, identity_info, is_admin, list_schemes,
-    log_flush, log_history, open_file, open_folder, phase_plan, quarantine_clear,
-    quarantine_list,
-    results_dir,
-    scheme_action, session_report, set_settings, start_test, stop_test, storage_stats,
-    system_ready, test_presets, test_running,
+    diagnostics_file_name, estimate_session, get_settings, history_delete, history_export_to,
+    history_list, history_open, history_open_folder, history_report, identity_info, is_admin,
+    list_schemes, log_flush, log_history, open_file, open_folder, phase_plan, quarantine_clear,
+    quarantine_list, results_dir, save_diagnostics, scheme_action, session_report, set_settings,
+    start_test, stop_test, storage_stats, system_ready, test_presets, test_running,
 };
 use tauri::{
     Manager,
@@ -145,7 +144,9 @@ fn main() {
             log_history,
             system_ready,
             results_dir,
-            appsettings_path
+            appsettings_path,
+            save_diagnostics,
+            diagnostics_file_name,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

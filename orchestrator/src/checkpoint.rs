@@ -224,7 +224,16 @@ pub fn checkpoint_path() -> PathBuf {
 /// `resume` молча начинал сессию с нуля, теряя честно отработанные раунды
 /// без единого слова пользователю.
 pub fn load_checkpoint() -> Result<Option<Checkpoint>, String> {
-    crate::storage::read_json_checked(&checkpoint_path())
+    load_checkpoint_from(&checkpoint_path())
+}
+
+/// То же, но для произвольного пути.
+///
+/// Отдельная функция нужна отчёту для поддержки: он обязан показать, что
+/// контрольная точка не читается, и проверяется это на временном каталоге —
+/// настоящий каталог данных пользователя тестами трогать нельзя.
+pub fn load_checkpoint_from(path: &std::path::Path) -> Result<Option<Checkpoint>, String> {
+    crate::storage::read_json_checked(path)
 }
 
 /// Сохранить контрольную точку: атомарная запись (временный файл + перемещение).

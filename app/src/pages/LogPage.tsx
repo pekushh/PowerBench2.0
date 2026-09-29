@@ -1,9 +1,11 @@
 // Страница «Логи»: фильтруемый журнал запуска, ошибок и событий сессий.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
 import { commands, onLog, type LoggerEntry } from "../api";
-import { Badge, FadeScroll, Panel, Seg } from "../components/ui";
+import { Badge, Button, FadeScroll, Panel, Seg } from "../components/ui";
 import { SearchIcon } from "../components/icons";
+import { pushToast } from "../store";
 
 type Level = "all" | "info" | "success" | "warn" | "error";
 
@@ -63,6 +65,10 @@ export default function LogPage() {
   const [live, setLive] = useState<LogRow[]>([]);
   const [query, setQuery] = useState("");
   const [level, setLevel] = useState<Level>("all");
+  const [saving, setSaving] = useState(false);
+  // По умолчанию скрываем: отчёт заведомо уходит вовне (в чат, в issues), а
+  // логин и путь `C:\Users\…` для разбора ошибки ничего не дают.
+  const [redact, setRedact] = useState(true);
   const nextKey = useRef(0);
 
   useEffect(() => {
@@ -123,6 +129,35 @@ export default function LogPage() {
   const visible = shown.length > RENDER_CAP ? shown.slice(-RENDER_CAP) : shown;
   const hidden = shown.length - visible.length;
 
+  // Сохранение отчёта для поддержки. Диалог спрашивает только путь: сам
+  // отчёт собирает бэкенд, и он берёт данные из всех источников разом —
+  // журнал, окружение, контрольную точку, карантин, настройки и последнюю
+  // сессию. Собирать это на стороне интерфейса означало бы половину работы
+  // делать вслепую и половину данных вообще не увидеть.
+  const saveReport = async () => {
+    if (saving) return;
+    try {
+      const suggested = await commands.diagnosticsFileName();
+      const path = await save({
+        title: "Сохранить отчёт для поддержки",
+        defaultPath: suggested,
+        filters: [{ name: "Текстовый отчёт (.txt)", extensions: ["txt"] }],
+      });
+      if (!path) return;
+      setSaving(true);
+      const res = await commands.saveDiagnostics(path as string, redact);
+      pushToast(
+        "okk",
+        `Отчёт сохранён: ${res.lines} строк, замечаний: ${res.findings}. ` +
+          "Приложите этот файл к обращению.",
+      );
+    } catch (e) {
+      pushToast("err", String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="page fill">
       <div className="page-head">
@@ -151,6 +186,29 @@ export default function LogPage() {
           <Badge kind="plain">{counts.info} инфо</Badge>
           <Badge kind="warn">{counts.warn} вним.</Badge>
           <Badge kind="danger">{counts.error} ошиб.</Badge>
+        </div>
+      </div>
+      <div className="wizard-toolbar">
+        <Button
+          variant="primary"
+          onClick={saveReport}
+          disabled={saving}
+          title="Сохранить один файл: журнал, окружение, состояние данных и последнюю сессию"
+        >
+          {saving ? "Готовлю отчёт…" : "Сохранить отчёт для поддержки"}
+        </Button>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={redact}
+            onChange={(e) => setRedact(e.target.checked)}
+          />
+          <span>Скрыть имя пользователя и путь к профилю</span>
+        </label>
+        <div className="hint">
+          В отчёте: журнал, окружение, идентичность замера, состояние
+          контрольной точки, карантина и настроек, последняя сессия и список
+          найденных проблем. Собирайте его сразу после ошибки.
         </div>
       </div>
       <Panel

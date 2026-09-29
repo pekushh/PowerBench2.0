@@ -43,6 +43,8 @@ use crate::quarantine::{
 
 /// Период опроса сторожевого таймера.
 pub const WATCHDOG_POLL_MS: u64 = 250;
+/// Сколько секунд сторож ждёт признака старта фазы, прежде чем сдаться.
+pub const WATCHDOG_START_GRACE_SECS: u64 = 30;
 /// Длительность без прогресса, после которой прогон бракуется (спецификация).
 pub const WATCHDOG_NO_PROGRESS_SECS: u64 = 30;
 /// Грейс ожидания остановки нагрузки после отмены (спецификация).
@@ -318,7 +320,9 @@ impl SchemeDriver for RealSchemeDriver {
 
 /// Хранилище контрольной точки.
 pub trait CheckpointStore {
-    fn load(&self) -> Option<Checkpoint>;
+    /// Загрузить контрольную точку. Err — файл есть, но прочитать его
+    /// нельзя: это не то же самое, что «чекпоинта нет» (см. [DiskCheckpointStore]).
+    fn load(&self) -> Result<Option<Checkpoint>, String>;
     fn save(&mut self, checkpoint: &Checkpoint) -> Result<(), String>;
 }
 
@@ -326,8 +330,11 @@ pub trait CheckpointStore {
 pub struct DiskCheckpointStore;
 
 impl CheckpointStore for DiskCheckpointStore {
-    fn load(&self) -> Option<Checkpoint> {
-        crate::checkpoint::load_checkpoint()
+    fn load(&self) -> Result<Option<Checkpoint>, String> {
+        // Битый чекпоинт раньше молча превращался в «чекпоинта нет», и первая
+        // же запись затирала его: все выполненные прогоны исчезали без
+        // единого сообщения. Теперь это ошибка, а не пустота.
+        crate::storage::read_json_checked(&crate::checkpoint::checkpoint_path())
     }
 
     fn save(&mut self, checkpoint: &Checkpoint) -> Result<(), String> {
@@ -551,6 +558,7 @@ fn spawn_watchdog(
     cancel: Arc<AtomicBool>,
     user_cancel: Arc<AtomicBool>,
     collapse: CollapseDetector,
+    phase_finished: Arc<AtomicBool>,
 ) -> (JoinHandle<()>, Receiver<WatchdogVerdict>) {
     let (tx, rx) = mpsc::channel();
     let handle: JoinHandle<()> = std::thread::spawn(move || {
@@ -558,6 +566,12 @@ fn spawn_watchdog(
         let mut last_progress = Instant::now();
         let mut collapse = collapse;
         // Фаза 1: ждём старта фазы. Если пользователь отменил раньше — выходим.
+        //
+        // Выход есть и по сигналу «фаза завершилась»: если фаза закончилась,
+        // не успев начаться (например, воркер упал на первом тике), `running`
+        // так и не станет `true`, и без этого сигнала сторож крутился бы вечно,
+        // а `join()` на стороне сессии hangs бы насмерть.
+        let wait_start = Instant::now();
         loop {
             if user_cancel.load(Ordering::Relaxed) {
                 let _ = tx.send(WatchdogVerdict::UserCancelled);
@@ -569,6 +583,13 @@ fn spawn_watchdog(
             }
             if cancel.load(Ordering::Relaxed) {
                 // Фаза отменена до старта (например, гонка отмены).
+                return;
+            }
+            if phase_finished.load(Ordering::Acquire) {
+                return;
+            }
+            if wait_start.elapsed().as_secs() >= WATCHDOG_START_GRACE_SECS {
+                // Страховка на случай, если сигнал о завершении потерялся.
                 return;
             }
             std::thread::sleep(Duration::from_millis(WATCHDOG_POLL_MS));
@@ -641,13 +662,19 @@ fn user_wants_stop(user_cancel: &AtomicBool) -> bool {
 /// Возвращает `true`, если сон был прерван до истечения.
 fn interruptible_sleep(user_cancel: &AtomicBool, seconds: u64) -> bool {
     let deadline = Instant::now() + Duration::from_secs(seconds);
-    while Instant::now() < deadline {
+    loop {
         if user_cancel.load(Ordering::Relaxed) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(100).min(deadline - Instant::now()));
+        // `saturating_sub` вместо вычитания: между проверкой и вычитанием поток
+        // может быть вытеснен, и `deadline - now()` на отрицательном остатке
+        // паниковал бы прямо в потоке сессии.
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return user_cancel.load(Ordering::Relaxed);
+        }
+        std::thread::sleep(Duration::from_millis(100).min(left));
     }
-    user_cancel.load(Ordering::Relaxed)
 }
 
 /// Выполнить одну измеряемую фазу с watchdog и монитором, собрать времена
@@ -675,6 +702,9 @@ fn run_measured_phase(
     // Монитор процесса в фоне.
     let monitor_run = Arc::new(AtomicBool::new(true));
     let monitor_handle = spawn_monitor(Arc::clone(monitor_map), Arc::clone(&monitor_run));
+    // Сигнал «фаза завершилась»: без него сторож ждал бы старта вечно, если
+    // фаза закончилась, не успев начаться.
+    let phase_finished = Arc::new(AtomicBool::new(false));
     // Сторожевой таймер: отменяет при бездействии или пользовательском Ctrl+C.
     // Детектор провала получает ориентир из истории машины: без него фаза не
     // обрывается, потому что неизвестно, что для этой машины считать нормой.
@@ -683,18 +713,27 @@ fn run_measured_phase(
         cancel,
         Arc::clone(&user_cancel),
         CollapseDetector::with_reference(baseline.as_ref().and_then(|b| b.p1_of(label))),
+        Arc::clone(&phase_finished),
     );
     // Тел­еметрия ~10 Гц для интерфейса: читает снапшот ядра и зовёт наблюдателя.
     let telemetry_handle = observer.as_ref().map(|obs| {
         let obs = Arc::clone(obs);
         let scoreboard = Arc::clone(&scoreboard);
         let label = label.to_string();
+        let phase_finished = Arc::clone(&phase_finished);
         let phase_started = Instant::now();
         std::thread::spawn(move || {
             loop {
                 let snap = scoreboard.snapshot();
                 if !snap.running {
-                    return;
+                    // Поток поднимается ДО `run_phase`, и на первом опросе
+                    // `running` ещё false — это гонка, а не конец фазы. Раньше
+                    // телеметрия молчала всю фазу, если опрос проигрывал.
+                    if phase_finished.load(Ordering::Acquire) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(WATCHDOG_POLL_MS));
+                    continue;
                 }
                 obs.tick(&snap, &label, &phase_started);
                 std::thread::sleep(Duration::from_millis(100));
@@ -705,6 +744,9 @@ fn run_measured_phase(
         phase,
         RunTarget::Duration(Duration::from_secs(seconds.max(1))),
     );
+    // Сигнализируем всем наблюдателям, что фаза закончилась: без этого поток
+    // телеметрии и сторож ждали бы следующего старта вечно.
+    phase_finished.store(true, Ordering::Release);
     monitor_run.store(false, Ordering::Relaxed);
     let _ = monitor_handle.join();
     // Классификация отмены: вердикт запрашиваем только при отмене. Раньше
@@ -916,7 +958,8 @@ pub fn run_session(
     };
 
     // Контрольная точка: либо текущий план, либо ошибка несовпадения.
-    let mut checkpoint = match store.load() {
+    let loaded = store.load().map_err(SessionError::Config)?;
+    let mut checkpoint = match loaded {
         Some(existing) => {
             if existing.plan.plan_guid != plan.plan_guid {
                 return Err(SessionError::CheckpointPlanMismatch {
@@ -991,10 +1034,28 @@ pub fn run_session(
         baseline.as_ref(),
     );
 
-    // Гарантия ОС: исходная схема восстанавливается при любом завершении —
+    // Гарантия ОС, которая не зависит от пути выхода.
+    //
+    // Маркер и исходная схема снимались только в ветках, которые явно до этого
+    // доходили. Ошибка сохранения (`?`), ошибка движка или паника в потоке
+    // сессии оставляли маркер на диске, и следующий запуск честно, но неверно
+    // отправлял нормальную схему в карантин с причиной «процесс убили».
+    // Теперь оба восстановления висят на Drop и срабатывают всегда.
+    let _os_guard = OsRestoreGuard {
+        original: checkpoint.original_scheme_guid.clone(),
+        driver,
+        restored: Arc::new(AtomicBool::new(checkpoint.original_restored)),
+    };
+    let _marker_guard = TestingMarkerGuard;
+
     // и при успехе, и при ошибке/отмене.
     let restore_result =
         restore_original(driver, &mut checkpoint, &mut events, &mut *store, &observer);
+    // Помечаем, что штатное восстановление выполнено: guard на Drop иначе
+    // переключил бы схему повторно при выходе из функции.
+    if restore_result.is_ok() {
+        _os_guard.restored.store(true, Ordering::Release);
+    }
 
     let cancelled = match loop_result {
         Err(e) => {
@@ -1007,11 +1068,13 @@ pub fn run_session(
 
     // --- Агрегация и рекомендация ---
     let expected_runs = plan.repetitions as usize;
-    let (aggregates, rejection_reasons, recommendation) =
+    let (aggregates, mut rejection_reasons, mut recommendation) =
         build_aggregation(&checkpoint, &signature, expected_runs);
 
-    // Пост-сессия: карантин нестабильных и деградировавших схем.
-    quarantine_post_session(
+    // Пост-сессия: карантин нестабильных и деградировавших схем. Идёт ДО
+    // агрегации по списку: иначе схема могла уйти в карантин и тут же быть
+    // рекомендована как победитель, а следующая сессия её уже не тестировала.
+    let post = quarantine_post_session(
         &checkpoint,
         &plan.plan_guid,
         &name_map,
@@ -1019,6 +1082,23 @@ pub fn run_session(
         &mut events,
         baseline.as_ref(),
     );
+    for (id, reason) in post {
+        // Потребитель (отчёт и интерфейс) помечает схему бракованной именно по
+        // этой карте, поэтому пост-карантин обязан попасть в неё.
+        rejection_reasons.insert(id.clone(), reason.clone());
+        // Схема в карантине не может оставаться рекомендацией: вердикт по ней
+        // бессмыслен, а следующая сессия её всё равно пропустит.
+        if let Some(rec) = recommendation.as_mut().filter(|rec| {
+            rec.recommended_scheme
+                .as_deref()
+                .is_some_and(|r| r.eq_ignore_ascii_case(&id))
+        }) {
+            rec.recommended_scheme = None;
+            rec.runner_up_scheme = None;
+            rec.reason = format!("схема-победитель отправлена в карантин: {reason}");
+            rec.level = powerbench_recommend::EvidenceLevel::None;
+        }
+    }
 
     note(&observer, &mut events, SessionEvent::Finished);
     Ok(SessionOutcome {
@@ -1168,6 +1248,7 @@ fn run_session_loop(
             engine.prepare_sample_buffer(Phase::Response, plan.warmup_seconds.max(1));
             let warmup_cancel = engine.canceller();
             let warmup_scoreboard = engine.scoreboard_arc();
+            let warmup_finished = Arc::new(AtomicBool::new(false));
             let (warmup_handle, warmup_rx) = spawn_watchdog(
                 warmup_scoreboard,
                 warmup_cancel,
@@ -1175,11 +1256,15 @@ fn run_session_loop(
                 // Разогрев — не измерение: обрывать его по темпу нельзя, иначе
                 // плохая схема «успела бы» не начать замер вовсе.
                 CollapseDetector::default(),
+                Arc::clone(&warmup_finished),
             );
             let warmup_result = engine.run_phase(
                 Phase::Response,
                 RunTarget::Duration(Duration::from_secs(plan.warmup_seconds.max(1))),
             );
+            // Сторож разогрева обязан узнать, что фаза закончилась: иначе он
+            // остаётся жить и опрашивает счётчик вхолостую до конца процесса.
+            warmup_finished.store(true, Ordering::Release);
             match warmup_result {
                 Err(RunError::Cancelled) => {
                     let verdict = warmup_rx
@@ -1273,6 +1358,13 @@ fn run_session_loop(
                     break 'outer;
                 }
                 let label = phase_label(phase);
+                // Момент старта ИМЕННО ЭТОЙ фазы: `phase_started` выше отсчитывает
+                // весь прогон и годится только для `duration_ms`. По шкале фаз
+                // строится привязка окон скачков к секундам, и для второй и
+                // последующих фаз общая шкала растягивала окна в разы и
+                // привязывала их к секундам, где скачков не было, из-за чего
+                // `correlate` подставлял не тот процесс.
+                let phase_started_at = Instant::now();
                 note(
                     observer,
                     events,
@@ -1345,7 +1437,7 @@ fn run_session_loop(
                         // `secs`: фаза включает запуск нагрузки и разгон, из-за
                         // чего окна скачков систематически смещались на
                         // несколько секунд и не совпадали с выборками процессов.
-                        let actual = phase_started.elapsed().as_secs_f64().max(0.001);
+                        let actual = phase_started_at.elapsed().as_secs_f64().max(0.001);
                         let sec_per_index = actual / times.len().max(1) as f64;
                         let windows = spike_windows_for(
                             &times,
@@ -1560,6 +1652,49 @@ fn run_session_loop(
 
 /// Восстановление исходной схемы (может быть вызвано в любой точке выхода).
 #[allow(clippy::too_many_arguments)]
+/// Снимает тестовый маркер при любом выходе из сессии — включая ошибку
+/// сохранения и панику в потоке.
+///
+/// Раньше маркер снимался только в ветках, которые до этого доходили явно.
+/// Ошибка записи чекпоинта (например, кончилось место на диске) возвращалась
+/// раньше, и маркер оставался: следующий запуск видел «тест был прерван» и
+/// отправлял нормальную схему в постоянный карантин с ложной причиной.
+struct TestingMarkerGuard;
+
+impl Drop for TestingMarkerGuard {
+    fn drop(&mut self) {
+        clear_testing_marker();
+    }
+}
+
+/// Возвращает исходную схему питания, если сессия вышла нештатно (паника).
+///
+/// Штатное восстановление делает [`restore_original`], и оно же взводит флаг
+/// `restored` — тогда guard ничего не делает. Без guard паника в потоке сессии
+/// оставляла активной тестовую схему до перезапуска приложения.
+struct OsRestoreGuard<'a> {
+    original: Option<String>,
+    driver: &'a dyn SchemeDriver,
+    restored: Arc<AtomicBool>,
+}
+
+impl Drop for OsRestoreGuard<'_> {
+    fn drop(&mut self) {
+        if self.restored.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(original) = self.original.clone() else {
+            return;
+        };
+        if let Err(e) = self.driver.set_active(&original) {
+            // Паника при разворачивании паники = аварийный останов процесса,
+            // поэтому ограничиваемся сообщением: восстановить схему не удалось,
+            // и пользователю нужно сказать об этом прямо.
+            eprintln!("PowerBench: не удалось вернуть исходную схему питания: {e}");
+        }
+    }
+}
+
 fn restore_original(
     driver: &dyn SchemeDriver,
     checkpoint: &mut Checkpoint,
@@ -1591,6 +1726,18 @@ fn restore_original(
                 label: "после теста".to_string(),
             },
         );
+    } else {
+        // Исходную схему так и не запомнили (powercfg не отдал активную).
+        // Помечать «восстановлено» нельзя: следующий запуск и восстановление
+        // после сбоя увидят «всё в порядке» и ничего не починят.
+        note(
+            observer,
+            events,
+            SessionEvent::Warn(
+                "исходная схема питания неизвестна — восстанавливать нечего".to_string(),
+            ),
+        );
+        return Ok(());
     }
     checkpoint.original_restored = true;
     store.save(checkpoint).map_err(SessionError::Persist)?;
@@ -1612,6 +1759,11 @@ fn is_last_planned_run(plan: &SessionConfig, round: u32, scheme_id: &str) -> boo
 /// в журнал, сессия продолжается). При повторной браковке той же схемы
 /// журнал не засоряется (quarantine_add идемпотентен).
 #[allow(clippy::too_many_arguments)]
+/// Записать схему в карантин; вернуть пару (id, причина), если запись состоялась.
+///
+/// Возврат нужен пост-сессионным правилам: они должны отразить браковку в
+/// агрегатах и рекомендации, иначе схема окажется одновременно в карантине и
+/// в списке рекомендованных.
 fn quarantine_scheme(
     scheme_id: &str,
     name_map: &BTreeMap<String, String>,
@@ -1620,27 +1772,33 @@ fn quarantine_scheme(
     plan_guid: &str,
     observer: &Option<Arc<dyn TelemetryObserver>>,
     events: &mut Vec<SessionEvent>,
-) {
+) -> Option<(String, String)> {
     let name = name_map
         .get(&scheme_id.to_ascii_lowercase())
         .map(String::as_str);
     match quarantine_add(scheme_id, name, kind, reason, plan_guid) {
-        Ok(true) => note(
-            observer,
-            events,
-            SessionEvent::Warn(format!(
-                "Схема «{scheme_id}» отправлена в карантин ({}): {reason}",
-                kind.label()
-            )),
-        ),
-        Ok(false) => {}
-        Err(e) => note(
-            observer,
-            events,
-            SessionEvent::Warn(format!(
-                "не удалось записать карантин схемы «{scheme_id}»: {e}"
-            )),
-        ),
+        Ok(true) => {
+            note(
+                observer,
+                events,
+                SessionEvent::Warn(format!(
+                    "Схема «{scheme_id}» отправлена в карантин ({}): {reason}",
+                    kind.label()
+                )),
+            );
+            Some((scheme_id.to_string(), reason.to_string()))
+        }
+        Ok(false) => None,
+        Err(e) => {
+            note(
+                observer,
+                events,
+                SessionEvent::Warn(format!(
+                    "не удалось записать карантин схемы «{scheme_id}»: {e}"
+                )),
+            );
+            None
+        }
     }
 }
 
@@ -1673,6 +1831,7 @@ fn median_of(values: &[f64]) -> f64 {
 /// сто тиков — много для ноутбука и мало для станции, то есть на медленной
 /// машине она браковала бы здоровые схемы, а на быстрой — пропускала бы
 /// поломку.
+#[allow(clippy::too_many_arguments)]
 fn quarantine_absolute_floor(
     checkpoint: &Checkpoint,
     medians: &BTreeMap<String, Vec<f64>>,
@@ -1681,6 +1840,7 @@ fn quarantine_absolute_floor(
     observer: &Option<Arc<dyn TelemetryObserver>>,
     events: &mut Vec<SessionEvent>,
     baseline: Option<&crate::history::MachineBaseline>,
+    written: &mut Vec<(String, String)>,
 ) {
     let canon = |lower: &str| {
         checkpoint
@@ -1699,7 +1859,7 @@ fn quarantine_absolute_floor(
         let Some(best) = reference else {
             continue;
         };
-        quarantine_scheme(
+        if let Some(entry) = quarantine_scheme(
             &canon(lower),
             name_map,
             QuarantineKind::Degraded,
@@ -1711,25 +1871,39 @@ fn quarantine_absolute_floor(
             plan_guid,
             observer,
             events,
-        );
+        ) {
+            written.push(entry);
+        }
     }
 }
 
-/// Лучший P1 каждой фазы среди всех схем сессии.
-fn best_p1_per_phase(checkpoint: &Checkpoint) -> BTreeMap<u8, f64> {
-    let mut best: BTreeMap<u8, f64> = BTreeMap::new();
+/// Типичный P1 каждой фазы среди всех схем сессии.
+///
+/// Берётся медиана по прогонам, а не максимум: один аномально удачный
+/// отрезок у любой схемы поднимал планку, после чего здоровая схема
+/// «проваливала такты» и попадала в постоянный карантин. Медиана к одному
+/// выбросу устойчива, а при двух и более прогонах отражает устойчивый уровень.
+fn typical_p1_per_phase(checkpoint: &Checkpoint) -> BTreeMap<u8, f64> {
+    let mut per_phase: BTreeMap<u8, Vec<f64>> = BTreeMap::new();
     for r in &checkpoint.runs {
         for ph in &r.phases {
             let p1 = ph.stats.p1_throughput;
             if p1.is_finite() && p1 > 0.0 {
-                let slot = best.entry(ph.phase_index).or_insert(p1);
-                if p1 > *slot {
-                    *slot = p1;
-                }
+                per_phase.entry(ph.phase_index).or_default().push(p1);
             }
         }
     }
-    best
+    per_phase
+        .into_iter()
+        .filter_map(|(idx, values)| {
+            let m = median_of(&values);
+            if m.is_finite() && m > 0.0 {
+                Some((idx, m))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Причина провала фазы по худшему окну, если она есть.
@@ -1739,7 +1913,7 @@ fn best_p1_per_phase(checkpoint: &Checkpoint) -> BTreeMap<u8, f64> {
 fn phase_collapse_reason(
     checkpoint: &Checkpoint,
     scheme_id: &str,
-    best_p1_by_phase: &BTreeMap<u8, f64>,
+    typical_p1_by_phase: &BTreeMap<u8, f64>,
 ) -> Option<String> {
     // Самая глубокая фаза побеждает: сначала ищем худший относительный провал.
     let mut worst: Option<(f64, String)> = None;
@@ -1749,7 +1923,7 @@ fn phase_collapse_reason(
         }
         for ph in &r.phases {
             let own = ph.stats.p1_throughput;
-            let Some(&leader) = best_p1_by_phase.get(&ph.phase_index) else {
+            let Some(&leader) = typical_p1_by_phase.get(&ph.phase_index) else {
                 continue;
             };
             if !phase_floor_collapse(own, leader) {
@@ -1801,7 +1975,8 @@ fn quarantine_post_session(
     observer: &Option<Arc<dyn TelemetryObserver>>,
     events: &mut Vec<SessionEvent>,
     baseline: Option<&crate::history::MachineBaseline>,
-) {
+) -> Vec<(String, String)> {
+    let mut written: Vec<(String, String)> = Vec::new();
     let mut medians: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for r in &checkpoint.runs {
         // Нестабильность оцениваем по МЕДИАНЕ прогона, а не по среднему:
@@ -1826,8 +2001,9 @@ fn quarantine_post_session(
             observer,
             events,
             baseline,
+            &mut written,
         );
-        return;
+        return written;
     }
     let best_median = medians
         .values()
@@ -1844,9 +2020,9 @@ fn quarantine_post_session(
     };
     let mut keys: Vec<String> = medians.keys().cloned().collect();
     keys.sort();
-    // Лучший P1 по каждой фазе: опора для правила провала фазы. Считаем до
+    // Типичный P1 по каждой фазе: опора для правила провала фазы. Считаем до
     // цикла, потому что лидер по медиане не обязательно лидер по худшему окну.
-    let best_p1_by_phase = best_p1_per_phase(checkpoint);
+    let typical_p1_by_phase = typical_p1_per_phase(checkpoint);
     for lower in keys {
         let id = canon(&lower);
         let run_medians = &medians[&lower];
@@ -1855,7 +2031,7 @@ fn quarantine_post_session(
         if let Some(spread) =
             unstable_spread(run_medians, MIN_RUNS_FOR_JUDGMENT, UNSTABLE_MAD_LIMIT)
         {
-            quarantine_scheme(
+        if let Some(entry) = quarantine_scheme(
                 &id,
                 name_map,
                 QuarantineKind::Unstable,
@@ -1867,14 +2043,16 @@ fn quarantine_post_session(
                 plan_guid,
                 observer,
                 events,
-            );
+            ) {
+                written.push(entry);
+            }
             continue;
         }
         // Провал фазы по худшему окну: живая медиана, но P1 в разы ниже, чем у
         // лидера той же фазы. Ловится с одного прогона, потому что сравнение
         // одновременное, и медленная машина сокращается из обеих сторон.
-        if let Some(reason) = phase_collapse_reason(checkpoint, &id, &best_p1_by_phase) {
-            quarantine_scheme(
+        if let Some(reason) = phase_collapse_reason(checkpoint, &id, &typical_p1_by_phase) {
+        if let Some(entry) = quarantine_scheme(
                 &id,
                 name_map,
                 QuarantineKind::Degraded,
@@ -1882,14 +2060,16 @@ fn quarantine_post_session(
                 plan_guid,
                 observer,
                 events,
-            );
+            ) {
+                written.push(entry);
+            }
             continue;
         }
         // Катастрофическая деградация проверяется уже по одному прогону: в
         // режиме «Быстро» раунд ровно один, и без этого правила заведомо
         // сломанная схема проходила замер наравне с рабочей.
         if catastrophic_share(own_median, best_median) {
-            quarantine_scheme(
+        if let Some(entry) = quarantine_scheme(
                 &id,
                 name_map,
                 QuarantineKind::Degraded,
@@ -1900,14 +2080,16 @@ fn quarantine_post_session(
                 plan_guid,
                 observer,
                 events,
-            );
+            ) {
+                written.push(entry);
+            }
             continue;
         }
         // MSRV 1.85: схлопывание через let-цепочки требует Rust 1.88+.
         #[allow(clippy::collapsible_if)]
         if run_medians.len() >= DEGRADED_MIN_RUNS {
             if degraded_share(own_median, best_median, DEGRADED_SHARE_LIMIT) {
-                quarantine_scheme(
+        if let Some(entry) = quarantine_scheme(
                     &id,
                     name_map,
                     QuarantineKind::Degraded,
@@ -1918,10 +2100,13 @@ fn quarantine_post_session(
                     plan_guid,
                     observer,
                     events,
-                );
+            ) {
+                written.push(entry);
+            }
             }
         }
     }
+    written
 }
 
 fn matched_stats(times: &[f64]) -> RunStats {

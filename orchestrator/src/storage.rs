@@ -158,6 +158,32 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_str(&text).ok()
 }
 
+/// Прочитать JSON, различая «файла нет» и «файл есть, но прочитать нельзя».
+///
+/// `read_json` возвращает `None` в обоих случаях, и вызывающий трактовал
+/// битый чекпоинт как отсутствующий: сессия начиналась с нуля, а первая же
+/// запись затирала файл. Для чекпоинта это означало тихую потерю всех
+/// выполненных прогонов.
+pub fn read_json_checked<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("не удалось прочитать {}: {e}", path.display())),
+    };
+    if text.trim().is_empty() {
+        // Пустой файл после сбоя записи — это не «нет чекпоинта», но и не
+        // повод для паники: трактуем как отсутствие.
+        return Ok(None);
+    }
+    match serde_json::from_str(&text) {
+        Ok(v) => Ok(Some(v)),
+        Err(e) => Err(format!(
+            "повреждён {} ({e}); файл сохранён как есть, ничего не перезаписано",
+            path.display()
+        )),
+    }
+}
+
 /// Удалить файл; отсутствие файла — не ошибка.
 pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
     match std::fs::remove_file(path) {
@@ -171,6 +197,40 @@ pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    /// Битый JSON — это ошибка, а не «файла нет».
+    ///
+    /// `read_json` возвращает `None` в обоих случаях, и чекпоинт с битым
+    /// содержимым молча считался отсутствующим: сессия начиналась с нуля, а
+    /// первая запись затирала все выполненные прогоны.
+    #[test]
+    fn corrupt_json_is_an_error_not_absence() {
+        let dir = std::env::temp_dir().join("powerbench-read-checked-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.json");
+
+        // Файла нет — это «нет данных», а не ошибка.
+        let missing: Result<Option<i32>, String> = read_json_checked(&path);
+        assert!(matches!(missing, Ok(None)), "отсутствующий файл не ошибка");
+
+        // Файл есть, но битый: раньше это молча трактовалось как отсутствие.
+        std::fs::write(&path, b"{ not json").unwrap();
+        match read_json_checked::<i32>(&path) {
+            Err(msg) => assert!(msg.contains("повреждён"), "нет диагноза: {msg}"),
+            Ok(v) => panic!("битый файл не должен читаться как Ok({v:?})"),
+        }
+
+        // Пустой файл после сбоя записи — отсутствие, а не паника.
+        std::fs::write(&path, b"   ").unwrap();
+        let empty: Result<Option<i32>, String> = read_json_checked(&path);
+        assert!(matches!(empty, Ok(None)), "пустой файл не ошибка");
+
+        // Корректный файл читается как раньше.
+        std::fs::write(&path, b"7").unwrap();
+        assert_eq!(read_json_checked::<i32>(&path).unwrap(), Some(7));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     fn tmp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("powerbench-atomicio-{name}"));

@@ -147,10 +147,13 @@ pub fn estimate_run_seconds(
         + PAUSE_AFTER_SCHEME_SECS as f64
         + STABILIZATION_SECS as f64 * PHASES_PER_RUN as f64
         + BACKGROUND_CHECK_SECS;
-    // Охлаждение идёт после каждого прогона, кроме последнего в плане.
-    let per_round = per_run * scheme_count as f64
-        + cooling_seconds as f64 * (scheme_count as f64 - 1.0);
-    per_round * repetitions as f64
+    // Охлаждение идёт после каждого прогона, кроме последнего в плане, то есть
+    // `cooling * (всего прогонов − 1)`. Формула вида «на раунд минус одна схема»
+    // занижала оценку на `cooling` для каждого раунда: при 2 схемах и 5 раундах
+    // обещание отличалось от реальности на четыре охлаждения.
+    let total_runs = scheme_count as f64 * repetitions as f64;
+    let cooling_total = cooling_seconds as f64 * (total_runs - 1.0).max(0.0);
+    per_run * total_runs + cooling_total
 }
 
 /// Человекочитаемая оценка времени: «около 2 ч 15 мин», «около 40 с».
@@ -370,13 +373,21 @@ mod tests {
         let per_run = 30.0 + 6.0 + PAUSE_AFTER_SCHEME_SECS as f64
             + STABILIZATION_SECS as f64 * PHASES_PER_RUN as f64
             + BACKGROUND_CHECK_SECS;
-        let expected = (per_run * 2.0 + 5.0) * 3.0;
+        // Охлаждение идёт после каждого прогона, кроме последнего в плане:
+        // при 2 схемах и 3 раундах это 6 прогонов и 5 охлаждений, а не «по
+        // одному охлаждению на раунд». Прежняя формула обещала на 10 с меньше.
+        let total_runs = 2.0 * 3.0;
+        let expected = per_run * total_runs + 5.0 * (total_runs - 1.0);
         let s = estimate_run_seconds(30, 6, 5, 3, 2);
         assert!((s - expected).abs() < 1.0, "оценка {s} != {expected}");
         assert!(estimate_run_seconds(30, 6, 5, 3, 3) > s);
         assert!(estimate_run_seconds(30, 6, 5, 4, 2) > s);
         assert_eq!(estimate_run_seconds(30, 6, 5, 3, 0), 0.0);
         assert_eq!(estimate_run_seconds(30, 6, 5, 0, 2), 0.0);
+        // Одной схемы и одного раунда хватает для ненулевой оценки, и
+        // охлаждения в ней нет вовсе.
+        let one = estimate_run_seconds(30, 6, 5, 1, 1);
+        assert!((one - per_run).abs() < 1.0, "оценка {one} != {per_run}");
     }
 
     /// Оценка читаема: без тильд и «~~», с понятными единицами.

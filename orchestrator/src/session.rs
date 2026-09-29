@@ -37,7 +37,7 @@ use crate::quarantine::{
     ABSOLUTE_TICKS_FLOOR, CATASTROPHIC_SHARE_LIMIT, DEGRADED_MIN_RUNS, DEGRADED_SHARE_LIMIT,
     MIN_RUNS_FOR_JUDGMENT, QuarantineKind, TestingMarker, UNSTABLE_MAD_LIMIT,
     below_absolute_floor, catastrophic_share, clear_testing_marker, degraded_share, load_quarantine,
-    preflight_filter, quarantine_add, unstable_spread, write_testing_marker,
+    phase_floor_collapse, preflight_filter, quarantine_add, unstable_spread, write_testing_marker,
 };
 
 /// Период опроса сторожевого таймера.
@@ -1646,6 +1646,63 @@ fn quarantine_absolute_floor(
     }
 }
 
+/// Лучший P1 каждой фазы среди всех схем сессии.
+fn best_p1_per_phase(checkpoint: &Checkpoint) -> BTreeMap<u8, f64> {
+    let mut best: BTreeMap<u8, f64> = BTreeMap::new();
+    for r in &checkpoint.runs {
+        for ph in &r.phases {
+            let p1 = ph.stats.p1_throughput;
+            if p1.is_finite() && p1 > 0.0 {
+                let slot = best.entry(ph.phase_index).or_insert(p1);
+                if p1 > *slot {
+                    *slot = p1;
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Причина провала фазы по худшему окну, если она есть.
+///
+/// Схема, чей P1 в какой-либо фазе провалился ниже пола, тогда как лидер в этой
+/// же фазе держит норму. Возвращаем `None`, если такого провала нет.
+fn phase_collapse_reason(
+    checkpoint: &Checkpoint,
+    scheme_id: &str,
+    best_p1_by_phase: &BTreeMap<u8, f64>,
+) -> Option<String> {
+    // Самая глубокая фаза побеждает: сначала ищем худший относительный провал.
+    let mut worst: Option<(f64, String)> = None;
+    for r in &checkpoint.runs {
+        if !r.scheme_id.eq_ignore_ascii_case(scheme_id) {
+            continue;
+        }
+        for ph in &r.phases {
+            let own = ph.stats.p1_throughput;
+            let Some(&leader) = best_p1_by_phase.get(&ph.phase_index) else {
+                continue;
+            };
+            if !phase_floor_collapse(own, leader) {
+                continue;
+            }
+            let label = Phase::from_index(ph.phase_index)
+                .map(|p| p.label())
+                .unwrap_or("неизвестная");
+            if worst.as_ref().is_none_or(|(share, _)| own / leader < *share) {
+                worst = Some((
+                    own / leader,
+                    format!(
+                        "в фазе «{label}» худшее окно всего {own:.0} тик/с против \
+                         {leader:.0} у лучшей схемы — схема проваливает такты"
+                    ),
+                ));
+            }
+        }
+    }
+    worst.map(|(_, reason)| reason)
+}
+
 fn quarantine_post_session(
     checkpoint: &Checkpoint,
     plan_guid: &str,
@@ -1689,6 +1746,9 @@ fn quarantine_post_session(
     };
     let mut keys: Vec<String> = medians.keys().cloned().collect();
     keys.sort();
+    // Лучший P1 по каждой фазе: опора для правила провала фазы. Считаем до
+    // цикла, потому что лидер по медиане не обязательно лидер по худшему окну.
+    let best_p1_by_phase = best_p1_per_phase(checkpoint);
     for lower in keys {
         let id = canon(&lower);
         let run_medians = &medians[&lower];
@@ -1706,6 +1766,21 @@ fn quarantine_post_session(
                      (порог {UNSTABLE_MAD_LIMIT:.0}%)",
                     run_medians.len()
                 ),
+                plan_guid,
+                observer,
+                events,
+            );
+            continue;
+        }
+        // Провал фазы по худшему окну: живая медиана, но P1 в разы ниже, чем у
+        // лидера той же фазы. Ловится с одного прогона, потому что сравнение
+        // одновременное, и медленная машина сокращается из обеих сторон.
+        if let Some(reason) = phase_collapse_reason(checkpoint, &id, &best_p1_by_phase) {
+            quarantine_scheme(
+                &id,
+                name_map,
+                QuarantineKind::Degraded,
+                &reason,
                 plan_guid,
                 observer,
                 events,

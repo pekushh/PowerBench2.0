@@ -198,13 +198,9 @@ fn with_freeze_note(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checkpoint::{checkpoint_path, save_checkpoint};
+    use crate::checkpoint::{DATA_DIR_LOCK, checkpoint_path, save_checkpoint};
     use crate::config::SessionConfig;
     use powerbench_windows::powercfg::PowerScheme;
-
-    /// Склеивает recovery-тесты в одну цепочку: они работают с общим
-    /// (глобальным) файлом контрольной точки.
-    static RECOVERY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn clear_checkpoint() {
         let _ = std::fs::remove_file(checkpoint_path());
@@ -284,7 +280,7 @@ mod tests {
     }
 
     fn with_clean_checkpoint<T>(f: impl FnOnce() -> T) -> T {
-        let _guard = RECOVERY_LOCK
+        let _guard = DATA_DIR_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_checkpoint();

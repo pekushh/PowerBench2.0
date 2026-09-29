@@ -1006,8 +1006,11 @@ export default function BenchmarkPage() {
                     <div className="hint">
                       {selected.size}{" "}
                       {plural(selected.size, "схема", "схемы", "схем")} × {reps}{" "}
-                      {plural(reps, "раунд", "раунда", "раундов")}. Фазы: Лёгкая / Тяжёлая /
-                      Отклик. По окончании исходная схема питания восстанавливается автоматически.
+                      {plural(reps, "раунд", "раунда", "раундов")}. Фазы:{" "}
+                      {phasePlan.length
+                        ? phasePlan.map((p) => p.name).join(" / ")
+                        : "—"}{" "}
+                      По окончании исходная схема питания восстанавливается автоматически.
                     </div>
                   </div>
                   <Button

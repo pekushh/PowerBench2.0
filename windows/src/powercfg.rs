@@ -125,6 +125,12 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 ///
 /// Вызов ограничен по времени: зависший `powercfg.exe` иначе держал бы поток
 /// сессии (а вместе с ним — переключение схем питания) неограниченно долго.
+///
+/// Вывод читается двумя отдельными потоками **до** ожидания завершения.
+/// Иначе получается классическая взаимоблокировка: буфер анонимного канала
+/// ограничен (4 КБ), `powercfg /list` с несколькими схемами в него не влезает,
+/// процесс блокируется на записи и уже никогда не выходит — потолок ожидания
+/// срабатывал всегда, и проверка готовности сообщала «powercfg недоступен».
 fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError> {
     let mut cmd = Command::new(powercfg_path());
     cmd.args(args)
@@ -137,6 +143,25 @@ fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError>
         PowerCfgError::new(operation, format!("не удалось запустить powercfg: {e}"))
     })?;
 
+    // Читатели забирают содержимое каналов, пока процесс жив, иначе он встанет
+    // на переполненном буфере.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = stdout_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(p, &mut buf);
+        }
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = stderr_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(p, &mut buf);
+        }
+        buf
+    });
+
     // Ждём с потолком; по истечении — снимаем процесс и возвращаем ошибку.
     let deadline = Instant::now() + Duration::from_secs(POWERCFG_TIMEOUT_SECS);
     let status = loop {
@@ -146,6 +171,7 @@ fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError>
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Читатели увидят закрытый конец канала и завершатся сами.
                     return Err(PowerCfgError::new(
                         operation,
                         format!(
@@ -164,12 +190,13 @@ fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError>
             }
         }
     };
-    let output = child
-        .wait_with_output()
-        .map_err(|e| PowerCfgError::new(operation, format!("не удалось прочитать вывод: {e}")))?;
-    let stdout = decode_oem(&output.stdout);
+    let stdout = stdout_reader
+        .join()
+        .unwrap_or_else(|_| Vec::new());
+    let stderr = stderr_reader.join().unwrap_or_else(|_| Vec::new());
+    let stdout = decode_oem(&stdout);
     if !status.success() {
-        let stderr = decode_oem(&output.stderr);
+        let stderr = decode_oem(&stderr);
         let detail = if stderr.trim().is_empty() {
             stdout
         } else {
@@ -256,6 +283,26 @@ pub fn restore_defaults() -> Result<(), PowerCfgError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Регрессия: `powercfg /list` на этой машине выдаёт ~9 КБ, а буфер
+    /// анонимного канала — 4 КБ. Если вывод не читается параллельно с
+    /// ожиданием, процесс встаёт на записи и всегда срывается по потолку
+    /// ожидания. Тест ловит именно эту взаимоблокировку на живом `powercfg`.
+    #[test]
+    fn list_schemes_survives_output_larger_than_pipe_buffer() {
+        let schemes = match list_schemes() {
+            Ok(s) => s,
+            Err(e) => panic!("powercfg недоступен: {}", e.message),
+        };
+        assert!(
+            !schemes.is_empty(),
+            "powercfg вернул пустой список — разбор вывода сломан"
+        );
+        assert!(
+            schemes.iter().any(|s| s.guid.len() == 36),
+            "ни одна строка не разобралась как GUID"
+        );
+    }
 
     #[test]
     fn parse_scheme_line_extracts_guid_name_and_active() {

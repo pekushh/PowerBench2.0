@@ -103,8 +103,29 @@ pub const UNSTABLE_MAD_LIMIT: f64 = 25.0;
 pub const DEGRADED_SHARE_LIMIT: f64 = 0.20;
 /// Деградация проверяется начиная с этих прогонов (меньше — рано).
 pub const DEGRADED_MIN_RUNS: usize = 2;
+/// Катастрофическая деградация: доля от лучшей медианы, ниже которой схема
+/// бракуется уже по одному прогону, без ожидания повторов.
+///
+/// Порог в 5 % — это «схема почти не работает»: двадцатикратное отставание не
+/// бывает шумом измерения, в отличие от 20 % из [`DEGRADED_SHARE_LIMIT`].
+pub const CATASTROPHIC_SHARE_LIMIT: f64 = 0.05;
 /// Сравнение с лидером имеет смысл только при заметном перевесе.
 pub const MIN_MARGIN_PERCENT: f64 = 1.0;
+/// Абсолютный пол: ниже этого числа тиков в секунду замер не является измерением
+/// производительности.
+///
+/// 100 тик/с — это сотня миллионов циклов в секунду, то есть заведомо
+/// работающая машина даже на самом жёстком плане питания. Значение нужно ровно
+/// для сессий с одной схемой, где сравнивать не с чем: без него заведомо
+/// сломанная схема проходила как годная.
+pub const ABSOLUTE_TICKS_FLOOR: f64 = 100.0;
+/// Проверка абсолютного пола: тиков слишком мало, чтобы это была рабочая машина.
+///
+/// Отдельная функция, а не сравнение в месте вызова, чтобы правило было видно в
+/// одном месте и его можно было проверить отдельно от оркестратора.
+pub fn below_absolute_floor(median: f64) -> bool {
+    median.is_finite() && median > 0.0 && median < ABSOLUTE_TICKS_FLOOR
+}
 
 pub fn quarantine_path() -> PathBuf {
     data_dir().join(QUARANTINE_FILE_NAME)
@@ -297,6 +318,23 @@ pub fn degraded_share(median: f64, best_median: f64, share_limit: f64) -> bool {
     share < share_limit && margin_percent >= MIN_MARGIN_PERCENT
 }
 
+/// Правило катастрофической деградации: схема даёт ничтожную долю тиков
+/// лидера той же сессии.
+///
+/// Отдельное от [`degraded_share`] правило, потому что у него **другое число
+/// пронов**. Обычная деградация требует [`DEGRADED_MIN_RUNS`] прогонов: разница
+/// в 20 % на одном прогоне — это шум. Но когда схема выдаёт 0,3 % тиков лидера
+/// (10 тик/с против 3000), никакой шум это не объясняет, и ждать второго прогона
+/// незачем: пользователь запускает «Быстро» (один раунд) именно затем, чтобы
+/// быстро отсеять заведомо плохую схему. Без этого правила режим скрининга
+/// браковал бы ровно то, ради чего запущен.
+pub fn catastrophic_share(median: f64, best_median: f64) -> bool {
+    if !(median.is_finite() && best_median.is_finite() && best_median > 0.0 && median >= 0.0) {
+        return false;
+    }
+    median / best_median < CATASTROPHIC_SHARE_LIMIT
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +419,32 @@ mod tests {
         // Вырожденные значения.
         assert!(!degraded_share(f64::NAN, 1000.0, DEGRADED_SHARE_LIMIT));
         assert!(!degraded_share(50.0, 0.0, DEGRADED_SHARE_LIMIT));
+    }
+
+    #[test]
+    fn catastrophic_share_catches_a_broken_scheme_in_one_run() {
+        // Реальный случай пользователя: 10 тик/с против 3000 у рабочей схемы.
+        assert!(catastrophic_share(10.0, 3000.0));
+        assert!(catastrophic_share(9.0, 2000.0));
+        // Умеренное отставание — не катастрофа, его ловит degraded_share после
+        // двух прогонов.
+        assert!(!catastrophic_share(1500.0, 3000.0));
+        assert!(!catastrophic_share(500.0, 3000.0));
+        // Вырожденные значения не должны ничего браковать.
+        assert!(!catastrophic_share(f64::NAN, 3000.0));
+        assert!(!catastrophic_share(10.0, 0.0));
+        // Нулевая медиана — не «неизвестно», а самый сильный признак поломки.
+        assert!(catastrophic_share(0.0, 3000.0));
+    }
+
+    #[test]
+    fn absolute_floor_separates_broken_machine_from_slow_one() {
+        // 10 тик/с — это не измерение, а поломка.
+        assert!(below_absolute_floor(10.0));
+        // Медленно, но машина работает — браковать нельзя.
+        assert!(!below_absolute_floor(800.0));
+        // Ноль и мусор не проходят через валидацию раньше, чем сюда дойдёт.
+        assert!(!below_absolute_floor(0.0));
+        assert!(!below_absolute_floor(f64::NAN));
     }
 }

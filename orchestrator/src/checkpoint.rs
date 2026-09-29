@@ -166,11 +166,11 @@ pub struct StoredRun {
     pub duration_ms: u64,
     pub ticks: u64,
     pub supercycles: u64,
-    /// Первые тики измеряемых фаз (Лёгкая/Тяжёлая/Отклик) — подпись детерминизма.
+    /// Первые тики измеряемых фаз (Лёгкая/Частичная/Тяжёлая/Отклик) — подпись детерминизма.
     pub first_tick_checksums: [u64; crate::config::PHASES_PER_RUN as usize],
     /// Итоговые контрольные суммы измеряемых фаз.
     pub run_checksums: [u64; crate::config::PHASES_PER_RUN as usize],
-    /// Статистики измеряемых фаз в порядке «Лёгкая/Тяжёлая/Отклик».
+    /// Статистики измеряемых фаз в порядке «Лёгкая/Частичная/Тяжёлая/Отклик».
     pub phases: Vec<PhaseStats>,
     /// Объединённая статистика прогона (consistency — по фазам).
     pub combined: RunStats,
@@ -203,6 +203,15 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
+/// Общий замок тестов, которые трогают настоящий каталог данных.
+///
+/// `data_dir()` смотрит в `%LOCALAPPDATA%`, то есть тесты писали в папку
+/// реального пользователя. Модули `checkpoint` и `recovery` использовали каждый
+/// свой замок, поэтому при параллельном запуске один тест затирал чужую
+/// контрольную точку: `already_restored_is_left_as_is` падал без видимой
+/// причины, а у пользователя пропадала незавершённая сессия.
+#[cfg(test)]
+pub(crate) static DATA_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Путь контрольной точки.
 pub fn checkpoint_path() -> PathBuf {
     data_dir().join(CHECKPOINT_FILE_NAME)
@@ -388,6 +397,11 @@ mod tests {
     #[test]
     fn clear_checkpoint_is_idempotent() {
         // Регресс: без очистки новый план падал бы с CheckpointPlanMismatch.
+        // Пишем в настоящий каталог данных: без общего с recovery замка
+        // тесты затирают чужую контрольную точку при параллельном запуске.
+        let _guard = DATA_DIR_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = clear_checkpoint();
         let cp = Checkpoint::new(plan());
         save_checkpoint(&cp).unwrap();

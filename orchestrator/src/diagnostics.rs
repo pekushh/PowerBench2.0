@@ -155,4 +155,21 @@ mod tests {
         let r = system_ready(&Healthy, 2);
         assert!(r.ok, "ожидали готовность: {:?}", r.issues);
     }
+
+    /// Реальный `powercfg` на этой машине, а не мок.
+    ///
+    /// Моки проверяют логику сводки, но не ловят взаимоблокировку на канале:
+    /// `powercfg /list` выдаёт около 9 КБ при ёмкости канала 4 КБ, и без
+    /// параллельного чтения процесс вставал намертво. Именно это пользователь и
+    /// видел как «powercfg недоступен: powercfg не ответил за 10 с».
+    #[test]
+    fn real_powercfg_is_reachable_for_the_readiness_check() {
+        match powerbench_windows::powercfg::list_schemes() {
+            Ok(list) => assert!(
+                !list.is_empty(),
+                "powercfg вернул пустой список схем"
+            ),
+            Err(e) => panic!("проверка готовности не смогла опросить powercfg: {}", e.message),
+        }
+    }
 }

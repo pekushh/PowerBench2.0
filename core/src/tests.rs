@@ -327,6 +327,60 @@ fn self_check_passes_and_fixes_reference_checksums() {
     assert_eq!(response_ref, response.first_tick_checksum);
 }
 
+/// Регрессия: в фазе «Частичная» половина пула простаивает, и раздача задач
+/// должна идти по числу АКТИВНЫХ воркеров.
+///
+/// Раньше шаг раздачи был равен числу воркеров пула, поэтому задачи с индексами
+/// выше `active_workers` не выполнялись вообще, а их слоты сохраняли значения
+/// прошлой фазы. Симптом был не в измерениях, а в агрегации: по 5 раундов
+/// контрольная сумма фазы «Частичная» отличалась каждый раз, и все схемы
+/// отбрасывались с «контрольная сумма различается между повторами». Одно
+/// сравнение «Частичная → Тяжёлая → Ч��стичная» это ловит.
+#[test]
+fn partial_phase_checksum_does_not_depend_on_previous_phase() {
+    let _g = lock();
+    let mut engine = Engine::new(Some(4));
+    engine.self_check().expect("самопроверка ядра не прошла");
+
+    engine.reset();
+    let first = engine
+        .run_phase(Phase::Partial, RunTarget::Ticks(32))
+        .unwrap();
+    // Между прогонами — фаза с полной нагрузкой, которая переписывает все слоты.
+    engine.reset();
+    engine
+        .run_phase(Phase::Heavy, RunTarget::Ticks(32))
+        .unwrap();
+    engine.reset();
+    let second = engine
+        .run_phase(Phase::Partial, RunTarget::Ticks(32))
+        .unwrap();
+
+    assert_eq!(
+        first.first_tick_checksum, second.first_tick_checksum,
+        "фаза «Частичная» зависит от предыдущей фазы — задачи теряются"
+    );
+    assert_eq!(first.run_checksum, second.run_checksum);
+}
+
+/// Все измеряемые фазы обязаны иметь эталон первого тика.
+///
+/// Эталон — это и есть проверка детерминизма на старте сессии: у фазы без него
+/// поломка проявится не сразу, а отбросом всей сессии спустя минуты замера.
+#[test]
+fn every_measured_phase_has_a_first_tick_reference() {
+    let _g = lock();
+    let mut engine = Engine::new(Some(4));
+    engine.self_check().expect("самопроверка ядра не прошла");
+    for phase in crate::config::PHASE_ORDER {
+        assert!(
+            engine.first_tick_reference(phase.first_profile()).is_some(),
+            "у фазы {:?} нет эталона первого тика: детерминизм не проверяется",
+            phase
+        );
+    }
+}
+
 /// Самопроверка непротиворечива между отдельными движками и запусками.
 #[test]
 fn self_check_is_deterministic_across_engines() {
@@ -335,7 +389,12 @@ fn self_check_is_deterministic_across_engines() {
     let mut e2 = Engine::new(Some(2));
     e1.self_check().unwrap();
     e2.self_check().unwrap();
-    for p in [Profile::Light, Profile::Heavy, Profile::ResponseBase] {
+    for p in [
+        Profile::Light,
+        Profile::Partial,
+        Profile::Heavy,
+        Profile::ResponseBase,
+    ] {
         assert_eq!(e1.first_tick_reference(p), e2.first_tick_reference(p));
     }
 }

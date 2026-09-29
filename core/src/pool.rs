@@ -184,13 +184,20 @@ fn process_jobs(
         }
         debug_assert_eq!(guard.epoch, epoch, "воркер обработал не тот батч");
         let active = guard.active_jobs;
+        // Шаг раздачи — по ЧИСЛУ АКТИВНЫХ воркеров, а не по числу воркеров пула.
+        // Иначе в фазе частичной нагрузки задачи с индексами ≥ active_workers
+        // не достались бы никому: их слоты сохраняли бы значения прошлой фазы,
+        // и контрольная сумма тика менялась бы от прогона к прогону. Агрегация
+        // по раундам после этого отбрасывала все схемы целиком.
+        let step = guard.active_workers;
+        debug_assert!(step >= 1);
         let mut j = worker_index;
         while j < active {
             debug_assert!(n < MAXIMUM_JOBS);
             my_indices[n] = j;
             my_descs[n] = guard.descriptors[j];
             n += 1;
-            j += worker_count;
+            j += step;
         }
     }
 

@@ -89,6 +89,13 @@ impl Scoreboard {
     }
 }
 
+/// Число профилей нагрузки: столько эталонов нужно хранить движку.
+///
+/// Считается от последнего профиля, а не константой в коде: при добавлении
+/// профиля массив должен вырасти сам, иначе эталон для новой фазы негде будет
+/// положить, и её детерминизм молча перестанет проверяться.
+const REFERENCE_SLOTS: usize = Profile::ResponseMajor.index() + 1;
+
 /// Движок ядра нагрузки.
 #[derive(Debug)]
 pub struct Engine {
@@ -96,7 +103,7 @@ pub struct Engine {
     pool: Pool,
     sample_buffer: Option<SampleBuffer>,
     /// Эталонные контрольные суммы первого тика (индексируются Profile::index).
-    first_tick_references: [u64; 5],
+    first_tick_references: [u64; REFERENCE_SLOTS],
     scoreboard: Arc<Scoreboard>,
     logical_cpus: usize,
     worker_count: usize,
@@ -122,7 +129,7 @@ impl Engine {
             entities,
             pool,
             sample_buffer: None,
-            first_tick_references: [0u64; 5],
+            first_tick_references: [0u64; REFERENCE_SLOTS],
             scoreboard: Arc::new(Scoreboard {
                 running: AtomicBool::new(false),
                 ticks_done: AtomicU64::new(0),
@@ -329,8 +336,12 @@ impl Engine {
     /// двойной reset + короткий прогон для Light/Heavy/Response с равенством
     /// контрольных сумм; запоминаются эталонные суммы первого тика.
     pub fn self_check(&mut self) -> Result<(), RunError> {
-        let mut references = [0u64; 5];
-        for phase in [Phase::Light, Phase::Heavy] {
+        let mut references = [0u64; REFERENCE_SLOTS];
+        // Все измеряемые фазы, а не «сложные» три: у фазы, для которой эталон не
+        // заведён, детерминизм не проверяется нигде — и поломка в ней обнаружится
+        // не на старте, а спустя минуты замера, когда агрегация отбросит все схемы
+        // с «контрольная сумма различается между повторами».
+        for phase in [Phase::Light, Phase::Partial, Phase::Heavy] {
             self.reset();
             let first = self.run_phase(phase, RunTarget::Ticks(SELF_CHECK_TICKS))?;
             self.reset();

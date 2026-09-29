@@ -1753,6 +1753,28 @@ fn phase_collapse_reason(
     worst.map(|(_, reason)| reason)
 }
 
+/// Какая именно фаза дала разные контрольные суммы между прогонами.
+///
+/// Сообщение агрегатора называет симптом, а не причину: без фазы приходилось
+/// перебирать все четыре вручную. Возвращает пустую строку, если все суммы
+/// совпали (тогда причина другая и подсказка только сбила бы).
+fn checksum_phase_hint(runs: &[&StoredRun]) -> String {
+    let first = match runs.first() {
+        Some(r) => *r,
+        None => return String::new(),
+    };
+    for idx in 0..first.first_tick_checksums.len() {
+        let head = first.first_tick_checksums[idx];
+        if runs.iter().skip(1).any(|r| r.first_tick_checksums[idx] != head) {
+            let label = Phase::from_index(idx as u8)
+                .map(|p| p.label())
+                .unwrap_or("неизвестная");
+            return format!(" (расходится фаза «{label}»)");
+        }
+    }
+    String::new()
+}
+
 fn quarantine_post_session(
     checkpoint: &Checkpoint,
     plan_guid: &str,
@@ -2021,7 +2043,12 @@ fn build_aggregation(
             Err(e) => {
                 rejection_reasons.insert(
                     scheme_id.clone(),
-                    format!("не удалось агрегировать прогоны: {e}"),
+                    // Называем фазу: «контрольная сумма различается» без фазы
+                    // бесполезно — приходится гадать, где искать.
+                    format!(
+                        "не удалось агрегировать прогоны: {e}{}",
+                        checksum_phase_hint(&runs)
+                    ),
                 );
                 continue;
             }

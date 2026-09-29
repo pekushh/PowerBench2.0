@@ -3,7 +3,7 @@
 //! зависимостей — все стили и SVG встроены.
 
 use crate::history::{date_time_stamp, session_started_at_ns};
-use crate::result::{IdentityJson, SessionJson};
+use crate::result::{IdentityJson, PhaseSummaryJson, SessionJson};
 
 /// Описание машины одной строкой для подвала отчёта.
 ///
@@ -170,6 +170,8 @@ border:1px solid var(--line);border-left:4px solid var(--ok);border-radius:14px;
 .verdict .who{font-size:20px;font-weight:700;letter-spacing:-.3px}
 .foot{color:var(--mute);font-size:12px;text-align:center;padding:20px 20px 24px;border-top:1px solid var(--line)}
 .foot .prov{display:block;margin-top:4px;font-size:11px;opacity:.75}
+.warn-list{list-style:none;padding:0;margin-top:6px}
+.warn-list li{margin:2px 0;color:#e0b060}
 @media (max-width:640px){body{padding:20px 10px 44px}.pad{padding:20px 16px 6px}h1{font-size:23px}
 .stats{grid-template-columns:1fr 1fr}.pbar{grid-template-columns:1fr auto}table{display:block;overflow-x:auto}
 .sumcards{flex-direction:column}.chips{margin-left:0}}
@@ -1051,7 +1053,7 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
         schemes = scheme_block(&format!(
             "<table class=\"sub\"><thead><tr><th>Схема</th><th class=\"num\">Прогоны</th>\
              <th class=\"num\">Медиана, тик/с</th><th class=\"num\">CV</th>\
-             <th class=\"num\">Стабильность</th><th class=\"num\">Худш. секунда</th>\
+             <th class=\"num\">стабильность</th><th class=\"num\">худш. окно, тик/с</th>\
              <th class=\"num\">Фон</th><th class=\"num\">Среднее</th><th>Статус</th></tr></thead>\
              <tbody>{sch_rows}</tbody></table>",
             sch_rows = sch_rows
@@ -1204,17 +1206,19 @@ fn phase_table_section(s: &SessionJson) -> String {
     if rows.is_empty() {
         return String::new();
     }
-    let head: String = s
+    // Шапка строится по ФАЗАМ, а не по парам (схема, фаза): иначе при двух
+    // схемах в шапке оказывалось восемь столбцов вместо четырёх, и браузер
+    // растягивал таблицу, а данные уезжали в первые четыре заголовка. Раньше
+    // это не было заметно на тестах с одной схемой.
+    let first_phases: &[PhaseSummaryJson] = s
         .schemes
         .iter()
-        .filter(|x| !x.phases.is_empty())
-        .flat_map(|x| x.phases.iter())
-        .map(|p| {
-            format!(
-                "<th class=\"num\" colspan=\"4\">{}</th>",
-                esc(&p.name)
-            )
-        })
+        .find(|x| !x.phases.is_empty())
+        .map(|x| x.phases.as_slice())
+        .unwrap_or(&[]);
+    let head: String = first_phases
+        .iter()
+        .map(|p| format!("<th class=\"num\" colspan=\"4\">{}</th>", esc(&p.name)))
         .collect();
     format!(
         "<h2>Метрики по фазам</h2>\
@@ -1311,7 +1315,10 @@ fn conditions_section(s: &SessionJson) -> String {
             }
         }
     }
-    if bg_p95 > 0.0 || !power.is_empty() {
+    // Условия должны печататься и при троттлинге: раньше блок выводился только
+    // при фоне или снимке питания, и троттлинг в фазе оставался в отчёте
+    // незамеченным, хотя в интерфейсе и в консоли он был виден.
+    if bg_p95 > 0.0 || !power.is_empty() || !throttled.is_empty() {
         out.push_str("<h2>Условия замера</h2>");
         out.push_str("<div class=\"note\"><b>Состояние системы во время замера:</b>");
         if bg_p95 > 0.0 {
@@ -1324,9 +1331,19 @@ fn conditions_section(s: &SessionJson) -> String {
             out.push_str(&format!("; {}", power.join("; ")));
         }
         if !throttled.is_empty() {
-            out.push_str(&format!("; троттлинг частоты: {}", throttled.join(", ")));
+            out.push_str(&format!("; троттлинг: {}", throttled.join(", ")));
         }
         out.push_str(".</div>");
+    }
+    // Предупреждения сессии: без них отчёт молчал о событиях, которые
+    // приложение и консоль показывали, и пользователь получал два разных
+    // рассказа об одном замере.
+    if !s.warnings.is_empty() {
+        out.push_str("<h2>Предупреждения замера</h2><ul class=\"warn-list\">");
+        for w in &s.warnings {
+            out.push_str(&format!("<li>{}</li>", esc(w)));
+        }
+        out.push_str("</ul>");
     }
     if out.is_empty() {
         String::new()
@@ -1410,8 +1427,8 @@ fn score_section(s: &SessionJson) -> String {
         .unwrap_or_default();
     format!(
         "<h2>Балл по вашим весам</h2>\
-         <div class=\"note\">Веса: производительность {wp:.0}% · стабильность {ws:.0}% · \
-         худшая секунда {ww:.0}% (нормируются совместно; 100 = лучшая среди допущенных)</div>\
+         производительность {wp:.0}% · стабильность {ws:.0}% · худшее окно (P1) \
+         {ww:.0}% (агрегировано по фазам; 100 = лучшее окно схемы)</div>\
          {bars}{close_note}{early_note}",
         wp = n[0] * 100.0,
         ws = n[1] * 100.0,
@@ -1529,6 +1546,11 @@ fn periods(sessions: &[&SessionJson]) -> (String, String) {
         .filter_map(|s| session_started_at_ns(s))
         .max()
         .unwrap_or(0);
+    // Сессия без прогонов не имеет времени старта: `date_time_stamp(0)` дал бы
+    // 1970 год, и в сводке это выглядело бы как реальная дата.
+    if min == 0 || max == 0 {
+        return ("-".to_string(), "-".to_string());
+    }
     (
         date_slice(&date_time_stamp(min), 6, 8),
         date_slice(&date_time_stamp(max), 6, 8),
@@ -1944,27 +1966,106 @@ mod tests {
 
     /// Дрейф по опорной схеме: разброс считается по раундам, вердикт при
     /// превышении порога понижается, а при одном замере оценки не выдумывается.
+    /// Дрейф: накопленное изменение по тренду, а не размах.
+    ///
+    /// Размах растёт с числом раундов даже на стабильной машине (ожидаемо
+    /// около 2.33σ при пяти раундах), поэтому решение принимается по тренду.
+    /// Монотонное падение на 8 % за три раунда — дрейф, а «плавание» вверх-вниз
+    /// с тем же размахом — нет.
     #[test]
     fn reference_drift_marks_unstable_and_needs_two_rounds() {
         use crate::result::ReferenceSummary;
-        let r = ReferenceSummary::build("g", Some("Эталон".into()), vec![100.0, 100.0, 103.0], 1.5)
-            .expect("двух замеров достаточно");
-        assert!(r.unstable, "разброс 3 % должен считаться нестабильностью");
-        assert!(r.note().contains("разброс"));
-        // Один замер дрейф не показывает: иначе это утверждение «машина стабильна».
+        let r = ReferenceSummary::build("g", Some("схема".into()), vec![100.0, 96.0, 92.0], 1.5)
+            .expect("два раунда минимум");
+        assert!(r.unstable, "монотонное падение на 8 % — это дрейф");
+        assert!(r.note().contains("размах"));
+
+        // Размах большой, но тренда нет: машина гуляла, а не уплывала.
+        let wander = ReferenceSummary::build("g", Some("схема".into()), vec![92.0, 100.0, 92.0], 1.5)
+            .expect("два раунда минимум");
         assert!(
-            ReferenceSummary::build("g", Some("Эталон".into()), vec![100.0], 1.5).is_none()
+            !wander.unstable,
+            "плавание вверх-внир не должно понижать вердикт: {}",
+            wander.note()
+        );
+
+        // Один раунд сравнивать не с чем.
+        assert!(
+            ReferenceSummary::build("g", Some("схема".into()), vec![100.0], 1.5).is_none()
         );
     }
 
     /// Пофазная таблица обязана быть в отчёте: без неё вердикт по смешанному
     /// среднему скрывает случай «выиграл в одной фазе, проиграл в другой».
+    /// Предупреждения сессии обязаны попадать в отчёт.
+    ///
+    /// Их показывали приложение и консоль, а HTML-отчёт молчал: у одного
+    /// замера получалось два разных рассказа, и по отчёту нельзя было понять,
+    /// что машина была загружена или схема попала в карантин.
+    #[test]
+    fn report_lists_session_warnings() {
+        let mut s = sample_session("AAA", 500.0);
+        s.warnings = vec![
+            "фон на загруженной машине: до 90 % CPU (пиковое, 95-й перцентиль прогона)"
+                .to_string(),
+            "троттлинг частоты наблюдался: AAA (1 фаз)".to_string(),
+        ];
+        let html = build_session_report(&s);
+        assert!(
+            html.contains("Предупреждения замера"),
+            "в отчёте нет раздела предупреждений"
+        );
+        assert!(
+            html.contains("троттлинг частоты наблюдался"),
+            "предупреждение о троттлинге потерялось"
+        );
+        // Событие с экранируемыми символами не должно ломать разметку.
+        s.warnings = vec!["<script>alert(1)</script>".to_string()];
+        let html2 = build_session_report(&s);
+        assert!(
+            !html2.contains("<script>alert(1)</script>"),
+            "предупреждение не экранировано"
+        );
+    }
+
+    /// Условия замера печатаются и при одном троттлинге.
+    ///
+    /// Блок условий выводился только при фоне или снимке питания, и троттлинг
+    /// в отдельной фазе оставался в отчёте незамеченным.
+    #[test]
+    fn report_shows_throttling_even_without_background_noise() {
+        let mut s = sample_session("AAA", 500.0);
+        let mut run = stored_run_with_background("aaa", "svc.exe", 3);
+        run.background_cpu_p50 = 0.0;
+        run.background_cpu_p95 = 0.0;
+        run.background_sample_seconds = 0;
+        run.phases = vec![crate::checkpoint::PhaseStats {
+            phase_index: 2,
+            stats: powerbench_metrics::run::run_stats(&[1.0; 4]).expect("эталон"),
+            power: Some(crate::checkpoint::PowerSnapshot {
+                max_mhz: 0,
+                current_mhz: 0,
+                throttled: true,
+                thermal_throttle: false,
+                policy_reason: 0,
+                on_ac: true,
+                unavailable: true,
+            }),
+        }];
+        s.schemes[0].per_run = vec![run];
+        let html = build_session_report(&s);
+        assert!(
+            html.contains("троттлинг"),
+            "троттлинг не попал в условия замера"
+        );
+    }
+
     #[test]
     fn report_has_phase_table() {
         let mut s = sample_session("AAA", 500.0);
         let mut run = stored_run_with_background("aaa", "svc.exe", 3);
         let stats: powerbench_metrics::run::RunStats =
-            powerbench_metrics::run::run_stats(&[1.0; 4]).unwrap();
+            powerbench_metrics::run::run_stats(&[1.0; 4]).expect("эталонная статистика");
         run.phases.push(crate::checkpoint::PhaseStats {
             phase_index: 0,
             stats,
@@ -1980,7 +2081,67 @@ mod tests {
         )
         .phases;
         let html = build_session_report(&s);
-        assert!(html.contains("Метрики по фазам"), "нет пофазной таблицы");
+        assert!(html.contains("Метрики по фазам"), "нет таблицы фаз");
+    }
+
+    /// Шапка пофазной таблицы строится по фазам, а не по парам (схема, фаза).
+    ///
+    /// На одной схеме ошибка не видна: шапка и тело совпадали по ширине. При
+    /// двух схемах шапка расползалась на восемь столбцов, браузер растягивал
+    /// таблицу, а числа уезжали в первые четыре заголовка — ровно то, ради чего
+    /// таблица и нужна («выиграл в одной фазе, проиграл в другой»).
+    #[test]
+    fn phase_table_header_width_matches_body() {
+        let mut s = sample_session("AAA", 500.0);
+        s.schemes = vec![
+            s.schemes[0].clone(),
+            crate::result::SchemeJson::from_aggregate(
+                "BBB".into(),
+                false,
+                None,
+                &empty_aggregate(400.0),
+                Vec::new(),
+            ),
+        ];
+        for i in 0u8..4 {
+            s.schemes[0].phases.push(crate::result::PhaseSummaryJson {
+                name: format!("Фаза {i}"),
+                median_throughput: 500.0 - 10.0 * f64::from(i),
+                p1_throughput: 100.0,
+                consistency_percent: 90.0,
+                throttled: false,
+            });
+            s.schemes[1].phases.push(crate::result::PhaseSummaryJson {
+                name: format!("Фаза {i}"),
+                median_throughput: 400.0 - 10.0 * f64::from(i),
+                p1_throughput: 90.0,
+                consistency_percent: 88.0,
+                throttled: false,
+            });
+        }
+        let html = build_session_report(&s);
+        // Считаем `colspan` внутри самого раздела фаз: таблица печатается в
+        // отчёте дважды (сводка и приложение), и общий подсчёт дал бы 8 даже
+        // при правильной шапке из четырёх групп.
+        let section = html
+            .split("Метрики по фазам")
+            .nth(1)
+            .expect("нет раздела фаз");
+        let head_row = section.split("</tr>").next().unwrap_or_default();
+        let headers = head_row.matches("colspan=\"4\"").count();
+        assert_eq!(
+            headers, 4,
+            "в шапке {headers} групп фаз вместо 4: на каждую схему фазы удвоились"
+        );
+        assert!(
+            head_row.contains("Фаза 0") && head_row.contains("Фаза 3"),
+            "шапка не содержит всех названий фаз"
+        );
+        // В шапке не должно быть повторов названий фаз от разных схем.
+        assert!(
+            !head_row.contains("Фаза 0\" class=\"num\" colspan=\"4\">Фаза 0"),
+            "в шапке продублированы названия фаз"
+        );
     }
 
     /// Отчёт обязан называть условия замера: без них «уверенный» вердикт

@@ -614,10 +614,6 @@ function SessionDetail({
         </div>
       ) : null}
 
-      {s.warnings.length > 0 ? (
-        <div className="rd-note warn">{s.warnings.join(" ")}</div>
-      ) : null}
-
       <div className="modal-scrollx">
         <table className="grid evid-table rd-table">
           <thead>

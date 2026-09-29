@@ -160,6 +160,12 @@ pub struct SchemeJson {
     pub median_burst_retention_percent: f64,
     pub median_jitter_p99_ms: f64,
     /// Медиана худших секунд прогонов (тик/с).
+    ///
+    /// `#[serde(default)]` обязателен: поле добавили позже соседнего
+    /// `median_background_purity` (который его получил), и без него записи
+    /// истории, сделанные до этого коммита, переставали читаться целиком —
+    /// они выпадали из базовой линии машины, экспорта и списка сессий.
+    #[serde(default)]
     pub median_worst_window_throughput: f64,
     /// Медиана чистоты фона (%) — None, если данные недоступны.
     #[serde(default)]
@@ -175,6 +181,10 @@ pub struct SchemeJson {
     pub phases: Vec<PhaseSummaryJson>,
     pub run_duration_ms: u64,
     pub started_at_min_ns: u64,
+    /// Прогоны по раундам. `#[serde(default)]` обязателен: поле появилось
+    /// позже `phases`, и без него записи истории, сделанные до этого,
+    /// переставали парситься целиком — вместе со всей сессией.
+    #[serde(default)]
     pub per_run: Vec<StoredRun>,
 }
 
@@ -259,7 +269,16 @@ fn phase_summaries(per_run: &[StoredRun]) -> Vec<PhaseSummaryJson> {
                 return 0.0;
             }
             v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            v[v.len() / 2]
+            // Медиана по чётному числу значений — среднее двух центральных, как
+            // в `metrics::median` и `history::median_of_values`. Раньше здесь
+            // брался верхний центральный, и на двух прогонах пофазная таблица
+            // показывала максимум там, где агрегат схемы показывал среднее.
+            let n = v.len();
+            if n % 2 == 1 {
+                v[n / 2]
+            } else {
+                (v[n / 2 - 1] + v[n / 2]) / 2.0
+            }
         };
         out.push(PhaseSummaryJson {
             name: phase_label_for(idx).to_string(),
@@ -328,6 +347,23 @@ pub const SCREENING_MAX_RUNS: usize = 1;
 /// число логических CPU при сравнении.
 pub const BACKGROUND_P95_NOTE_PERCENT: f64 = 20.0;
 
+/// Фон, при котором уверенность в вердикте понижается.
+///
+/// 100 % — это целое занятое ядро, 200 % — два. Выше двух ядер фоновой
+/// нагрузки разница между схемами питания уже неотличима от того, как
+/// распределялись ресурсы между посторонними процессами, поэтому «Подтверждено»
+/// и «Вероятно» здесь не выдаются.
+pub const BLOCKING_BACKGROUND_P95_PERCENT: f64 = 200.0;
+/// Во сколько раз ожидаемый размах прогонов должен превышать собственный CV,
+/// чтобы дрейф считался настоящим.
+///
+/// Для нормального распределения ожидаемый размах выборки из n значений
+/// примерно равен c_n * σ, где c_2 = 1.13, c_3 = 1.69, c_5 = 2.33.
+/// Берётся консервативное c_5: порог не должен опускаться ниже размаха,
+/// который статистически нормален для пяти раундов, — иначе детальный пресет
+/// понижал бы уровень из-за шума самой машины.
+pub const DRIFT_TREND_FROM_CV: f64 = 2.4;
+
 /// Оценка стабильности машины по опорной схеме.
 ///
 /// Сравнение «самой высокой из N схем» неявно опирается на то, что за все часы
@@ -360,6 +396,21 @@ impl ReferenceSummary {
     /// `None`, если опорных прогонов меньше двух: по одному замеру дрейф не
     /// оценить, а выдавать за оценку ноль означало бы утверждать стабильность,
     /// которой никто не измерял.
+    /// `span_limit_percent` — порог накопленного изменения.
+    ///
+    /// Решение принимается ПО ТРЕНДУ, а не по размаху. Размах растёт с числом
+    /// раундов даже на идеально стабильной машине: ожидаемый размах выборки из
+    /// n значений с разбросом σ равен примерно 1.13σ при n=2, 1.69σ при n=3 и
+    /// 2.33σ при n=5. С постоянным порогом по размаху детальный пресет
+    /// понижался до «Предварительно» чаще «Быстро», то есть шум машины
+    /// трактовался как дрейф, а настоящий дрейф, «плавание» туда-сюда, вообще
+    /// не отличался от него.
+    ///
+    /// Накопленное изменение по наклону прямой устойчивее: для шума его
+    /// ожидаемая величина — около 0.65σ при n=5 и 1.15σ при n=3. Порог
+    /// подстраивается под собственный разброс прогонов через
+    /// [`DRIFT_TREND_FROM_CV`], размах остаётся в отчёте как характеристика
+    /// разброса.
     pub fn build(
         scheme_id: &str,
         scheme_name: Option<String>,
@@ -382,6 +433,14 @@ impl ReferenceSummary {
         } else {
             0.0
         };
+        // Собственный разброс прогонов (CV) задаёт масштаб ожидаемого размаха.
+        let cv_percent = if mean > 0.0 {
+            let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+            (var.sqrt() / mean * 100.0).max(0.0)
+        } else {
+            0.0
+        };
+        let effective_limit = (span_limit_percent).max(DRIFT_TREND_FROM_CV * cv_percent);
         // Линейный тренд по индексам раундов: Σ(x−x̄)(y−ȳ) / Σ(x−x̄)².
         let x_mean = (n - 1.0) / 2.0;
         let mut num = 0.0;
@@ -397,22 +456,30 @@ impl ReferenceSummary {
         } else {
             0.0
         };
+        let total_change_percent = trend_percent_per_round * (n - 1.0);
         Some(Self {
             scheme_id: scheme_id.to_string(),
             scheme_name,
             per_round: vals,
             span_percent,
             trend_percent_per_round,
-            span_limit_percent,
-            unstable: span_percent > span_limit_percent,
+            span_limit_percent: effective_limit,
+            // Дрейф — накопленное изменение по тренду, а не размах: размах
+            // растёт с числом раундов и на стабильной машине, тренд — нет.
+            unstable: total_change_percent.abs() > effective_limit,
         })
     }
 
-    /// Пояснение одним предложением (для отчёта и подсказки в интерфейсе).
+    /// Человекочитаемая сводка (для человека и для отчёта).
+    ///
+    /// Показываются обе величины: размах характеризует разброс, а решение о
+    /// дрейфе принимается по накопленному изменению (тренду).
     pub fn note(&self) -> String {
+        let total = self.trend_percent_per_round * (self.per_round.len() as f64 - 1.0);
         format!(
-            "опорная схема: разброс {:.1} % по раундам (тренд {:+.1} %/раунд), порог {:.1} %",
-            self.span_percent, self.trend_percent_per_round, self.span_limit_percent
+            "опорная схема: размах {:.1} % за прогонов (тренд {:+.1} %/раунд, \
+             накопленное изменение {:+.1} %, порог {:.1} %)",
+            self.span_percent, self.trend_percent_per_round, total, self.span_limit_percent
         )
     }
 }
@@ -581,6 +648,36 @@ pub fn build_session_json(
             throttled.join(", ")
         ));
     }
+    // Условия среды, обесценивающие уверенность, должны понижать уровень, а
+    // не только дописываться в предупреждения. Иначе на загруженной и
+    // троттлящей машине вердикт «Подтверждено» выглядит так же, как на
+    // спокойной: пользователь не может отличить одно от другого.
+    if !throttled.is_empty()
+        && matches!(
+            level,
+            EvidenceLevel::Confirmed | EvidenceLevel::Probable
+        )
+    {
+        // Троттлинг — это ограничение самой железа: под ним разница между
+        // схемами может отражать не схему, а то, где сработало ограничение.
+        level = EvidenceLevel::Preliminary;
+    }
+    if bg_p95 >= BLOCKING_BACKGROUND_P95_PERCENT
+        && matches!(
+            level,
+            EvidenceLevel::Confirmed | EvidenceLevel::Probable
+        )
+    {
+        // Два занятых ядра фона — это уже не «фон», а соревнование за ресурс.
+        // Порог в 2 × BACKGROUND_BLOCKING_PERCENT: тот же смысл, что и у
+        // `BACKGROUND_BLOCKING_PERCENT`, но для пикового 95-го перцентиля.
+        level = EvidenceLevel::Preliminary;
+        warnings.push(format!(
+            "уверенность понижена: фон {:.0} % CPU (95-й перцентиль) — машина \
+             делила ресурс с посторонними процессами",
+            bg_p95
+        ));
+    }
     SessionJson {
         plan_guid: checkpoint.plan.plan_guid.clone(),
         original_scheme_guid: checkpoint.original_scheme_guid.clone(),
@@ -617,6 +714,112 @@ pub fn build_session_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Записи истории, сделанные до появления новых полей, должны читаться.
+    ///
+    /// Поле `median_worst_window_throughput` добавили без `#[serde(default)]` —
+    /// и весь файл переставал парситься, из-за чего сессия исчезала из списка,
+    /// экспорта и базовой линии машины. Проверяем именно это: JSON без
+    /// последних полей обязан десериализоваться.
+    #[test]
+    fn history_record_without_late_fields_still_parses() {
+        let json = r#"{
+            "workload_version": "GamingCpuV1",
+            "config_hash": "H",
+            "seed_hex": "C52A202600000001",
+            "worker_count": 4,
+            "logical_cpus": 6,
+            "timer_hz": 10000000,
+            "cpu_identifier": "cpu",
+            "diagnostics_version": "0.1.0"
+        }"#;
+        let id: IdentityJson = serde_json::from_str(json).expect("старый логин не читается");
+        assert_eq!(id.worker_count, 4);
+        assert!(id.os_build.is_empty());
+        assert_eq!(id.memory_gib, 0.0);
+
+        // Тот же контракт для схемы: отсутствующие поздние поля не должны
+        // ронять десериализацию всего отчёта.
+        let scheme = r#"{
+            "scheme_id": "s1",
+            "rejected": false,
+            "runs": 3,
+            "admitted": true,
+            "mean_average_throughput": 100.0,
+            "sample_std": 1.0,
+            "t_value": 0.0,
+            "margin": 0.0,
+            "ci_95": [99.0, 101.0],
+            "run_variation_percent": 1.0,
+            "cv_warning": false,
+            "median_throughput": 100.0,
+            "median_p1_throughput": 90.0,
+            "median_p01_throughput": 80.0,
+            "median_p95_execution_time_ms": 1.0,
+            "median_p99_execution_time_ms": 1.0,
+            "median_consistency_percent": 95.0,
+            "median_burst_retention_percent": 90.0,
+            "median_jitter_p99_ms": 0.5,
+            "run_duration_ms": 1000,
+            "started_at_min_ns": 0
+        }"#;
+        let sch: SchemeJson =
+            serde_json::from_str(scheme).expect("схема без новых полей не читается");
+        assert_eq!(sch.median_worst_window_throughput, 0.0);
+        assert!(sch.median_background_purity.is_none());
+        assert!(sch.phases.is_empty());
+    }
+
+    /// Пустая статистика прогона для фикстур.
+    fn run_stats_of(times: &[f64]) -> powerbench_metrics::run::RunStats {
+        powerbench_metrics::run::run_stats(times).unwrap_or_else(|| {
+            powerbench_metrics::run::run_stats(&[1.0]).expect("эталонная статистика")
+        })
+    }
+
+    /// Медиана по чётному числу значений — среднее двух центральных.
+    ///
+    /// Иначе на двух прогонах пофазная таблица показывала максимум, тогда как
+    /// агрегат по той же фазе — среднее, и таблица, ради которой всё и
+    /// затевалось, противоречила итоговому числу.
+    #[test]
+    fn phase_median_of_two_runs_is_the_average() {
+        let mk = |avg: f64| StoredRun {
+            key: "0:g".to_string(),
+            round: 0,
+            scheme_id: "g".into(),
+            scheme_name: None,
+            started_at_ns: 0,
+            duration_ms: 1,
+            ticks: 1,
+            supercycles: 0,
+            first_tick_checksums: [1; crate::config::PHASES_PER_RUN as usize],
+            run_checksums: [1; crate::config::PHASES_PER_RUN as usize],
+            phases: vec![PhaseStats {
+                phase_index: 0,
+                stats: powerbench_metrics::run::RunStats {
+                    average_throughput: avg,
+                    ..run_stats_of(&[])
+                },
+                power: None,
+            }],
+            combined: run_stats_of(&[]),
+            cross_phase_consistency: 0.0,
+            burst_retention_percent: 0.0,
+            background: Vec::new(),
+            spike_windows: 0,
+            power: None,
+            background_cpu_p50: 0.0,
+            background_cpu_p95: 0.0,
+            background_sample_seconds: 0,
+        };
+        let summaries = phase_summaries(&[mk(900.0), mk(1100.0)]);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(
+            summaries[0].median_throughput, 1000.0,
+            "медиана по двум прогонам должна быть средним двух значений"
+        );
+    }
 
     #[test]
     fn labels_map_to_russian() {

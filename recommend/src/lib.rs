@@ -259,16 +259,18 @@ pub fn recommend(items: &[SchemeAggregate], expected_runs: usize) -> Recommendat
     let sorted: Vec<&SchemeAggregate> = order.iter().map(|&i| admitted[i]).collect();
 
     if sorted.len() == 1 {
-        let winner = 0;
-        let (probs, mode) = bootstrap_pair(&sorted, winner, None, expected_runs);
+        // Единственная допущенная схема: вероятности не вычисляем. «P(лучший) =
+        // 100 %» при отсутствии конкурента — не результат, а тавтология, и в
+        // отчёте она читалась как «100 % вероятность, что выбран лучший».
         return Recommendation {
             level: EvidenceLevel::Preliminary,
-            recommended_scheme: Some(sorted[winner].scheme_id.clone()),
+            recommended_scheme: Some(sorted[0].scheme_id.clone()),
             runner_up_scheme: None,
-            reason: "кандидат один: данных для статистического сравнения недостаточно".to_string(),
-            three_probabilities: Some([probs.p_best, probs.p_margin_gt_0, probs.p_margin_gt_1pct]),
+            reason: "мало данных: единственная допущенная схема, сравнивать не с чем"
+                .to_string(),
+            three_probabilities: None,
             expected_margin_percent: None,
-            bootstrap_mode: Some(mode),
+            bootstrap_mode: None,
             tie_criterion: Some(TieCriterion::None),
         };
     }
@@ -294,6 +296,13 @@ pub fn recommend(items: &[SchemeAggregate], expected_runs: usize) -> Recommendat
             winner.aggregate.mean_average_throughput,
             sorted[runner_idx].aggregate.mean_average_throughput,
         );
+        // Ничью развели не по среднему, поэтому победитель может иметь худшую
+        // среднюю: «перевес» тогда отрицателен, и печатать его как «−0.5 %»
+        // бессмысленно — разницы по скорости нет вовсе, решение было о другом.
+        let margin = margin.filter(|m| *m > 0.0);
+        // И вероятности «перевес > 0» тут недоопределены: победитель выбран по
+        // стабильности, а не по скорости, поэтому их не публикуем.
+        let probs = [probs.p_best, 0.0, 0.0];
         let reason = match criterion {
             TieCriterion::P1 => {
                 "практическая ничья по среднему, разрешена по перевесу P1".to_string()
@@ -317,7 +326,7 @@ pub fn recommend(items: &[SchemeAggregate], expected_runs: usize) -> Recommendat
             recommended_scheme: Some(winner.scheme_id.clone()),
             runner_up_scheme: Some(sorted[runner_idx].scheme_id.clone()),
             reason,
-            three_probabilities: Some([probs.p_best, probs.p_margin_gt_0, probs.p_margin_gt_1pct]),
+            three_probabilities: Some(probs),
             expected_margin_percent: margin,
             bootstrap_mode: Some(mode),
             tie_criterion: Some(criterion),

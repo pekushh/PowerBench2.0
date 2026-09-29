@@ -27,16 +27,23 @@ impl Default for ScoreWeights {
 }
 
 impl ScoreWeights {
-    /// Вектор весов в порядке «производительность, стабильность, худшая секунда»,
-    /// нормализованный к сумме 1; при недопустимой сумме — дефолтные веса.
+    /// Доли весов <`производительность, стабильность, худшее окно>`, сумма 1.
+    ///
+    /// Отрицательные веса отбрасываются в ноль. Проверка в интерфейсе есть, но
+    /// `appsettings.json` можно отредактировать руками, а `AppSettings::load`
+    /// ничего не валидирует: с весом `-10` нормировка давала балл вне
+    /// документированного диапазона 0..=100 (вплоть до 105 и −10), и отчёт
+    /// печатал это как измеренную величину.
     pub fn normalized(&self) -> [f64; 3] {
-        let total = self.performance + self.stability + self.worst_second;
-        if total.is_finite() && total > 0.0 {
-            [
-                self.performance / total,
-                self.stability / total,
-                self.worst_second / total,
-            ]
+        let clean = |v: f64| if v.is_finite() && v > 0.0 { v } else { 0.0 };
+        let (p, s, w) = (
+            clean(self.performance),
+            clean(self.stability),
+            clean(self.worst_second),
+        );
+        let total = p + s + w;
+        if total > 0.0 {
+            [p / total, s / total, w / total]
         } else {
             let d = default_score_weights();
             let s = d[0] + d[1] + d[2];
@@ -125,7 +132,10 @@ pub fn score_schemes(schemes: &[SchemeJson], weights: &ScoreWeights) -> Vec<Sche
             let worst = best_worst.map_or(0.0, |b| {
                 usable_score(s.median_p1_throughput).map_or(0.0, |v| v / b * 100.0)
             });
-            let score = w_p * perf + w_s * stab + w_w * worst;
+            // Кламп в 0..=100: инвариант заявлен в документации, а при
+            // отредактированном вручную файле настроек нормировка весов могла
+            // его нарушить, и отчёт печатал 105 или −10 как измеренный балл.
+            let score = (w_p * perf + w_s * stab + w_w * worst).clamp(0.0, 100.0);
             SchemeScore {
                 scheme_id: s.scheme_id.clone(),
                 name: s.name.clone(),
@@ -279,6 +289,30 @@ mod tests {
         // И сами баллы вычисляются (не паникуют).
         let scores = score_schemes(&schemes, &weights);
         assert!(scores[0].score > 0.0 && scores[1].score > 0.0);
+    }
+
+    #[test]
+    fn negative_weights_cannot_produce_a_score_out_of_range() {
+        // `appsettings.json` можно отредактировать руками, а `AppSettings::load`
+        // не валидирует веса: с отрицательным весом нормировка давала балл вне
+        // документированного диапазона (105 и −10), и отчёт печатал это как
+        // измеренную величину.
+        let weights = ScoreWeights {
+            performance: -10.0,
+            stability: 60.0,
+            worst_second: 50.0,
+        };
+        let norm = weights.normalized();
+        assert!(norm.iter().all(|v| *v >= 0.0), "доли весов отрицательны");
+        assert!((norm.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+
+        let schemes = vec![scheme("a", false, 1000.0, 50.0, 40.0)];
+        let scores = score_schemes(&schemes, &weights);
+        assert!(
+            (0.0..=100.0).contains(&scores[0].score),
+            "балл вне диапазона: {}",
+            scores[0].score
+        );
     }
 
     #[test]

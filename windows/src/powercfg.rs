@@ -162,6 +162,15 @@ fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError>
         buf
     });
 
+    // Читатели заканчиваются, как только закрывается конец канала, а он
+    // закрывается вместе с процессом. Поэтому join после `kill`+`wait`
+    // не может висеть и делает уборку потоков детерминированной.
+    let join_readers = || {
+        let out = stdout_reader.join().unwrap_or_else(|_| Vec::new());
+        let err = stderr_reader.join().unwrap_or_else(|_| Vec::new());
+        (out, err)
+    };
+
     // Ждём с потолком; по истечении — снимаем процесс и возвращаем ошибку.
     let deadline = Instant::now() + Duration::from_secs(POWERCFG_TIMEOUT_SECS);
     let status = loop {
@@ -171,18 +180,21 @@ fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError>
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    // Читатели увидят закрытый конец канала и завершатся сами.
+                    // Раньше потоки оставались болтаться после возврата
+                    // ошибки: приложение жило месяцами, и каждый зависший
+                    // `powercfg` оставлял после себя пару висящих потоков.
+                    let _ = join_readers();
                     return Err(PowerCfgError::new(
                         operation,
-                        format!(
-                            "powercfg не ответил за {} с",
-                            POWERCFG_TIMEOUT_SECS
-                        ),
+                        format!("powercfg не ответил за {} с", POWERCFG_TIMEOUT_SECS),
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
             Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = join_readers();
                 return Err(PowerCfgError::new(
                     operation,
                     format!("не удалось дождаться завершения powercfg: {e}"),
@@ -190,10 +202,7 @@ fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError>
             }
         }
     };
-    let stdout = stdout_reader
-        .join()
-        .unwrap_or_else(|_| Vec::new());
-    let stderr = stderr_reader.join().unwrap_or_else(|_| Vec::new());
+    let (stdout, stderr) = join_readers();
     let stdout = decode_oem(&stdout);
     if !status.success() {
         let stderr = decode_oem(&stderr);
@@ -224,6 +233,30 @@ pub fn list_schemes() -> Result<Vec<PowerScheme>, PowerCfgError> {
 pub fn activate(guid: &str) -> Result<(), PowerCfgError> {
     run_powercfg("setactive", &["/setactive", guid])?;
     Ok(())
+}
+
+/// GUID активной схемы питания.
+///
+/// Нужен эталоном дрейфа: без него CLI не мог оценить дрейф машины вообще
+/// и выдавал другой вердикт, чем приложение на тех же данных.
+pub fn active_scheme() -> Result<String, PowerCfgError> {
+    let stdout = run_powercfg("getactive", &["/getactivescheme"])?;
+    parse_active_scheme(&stdout)
+}
+
+/// Вытащить GUID из ответа `powercfg /getactivescheme`.
+fn parse_active_scheme(stdout: &str) -> Result<String, PowerCfgError> {
+    // Вывод: `Power Scheme GUID: 381b4222-... (Balanced)`
+    let r = find_uuid(stdout)
+        .ok_or_else(|| PowerCfgError::new("getactive", "в выводе нет GUID активной схемы"))?;
+    let guid = stdout[r].trim().to_string();
+    if guid.is_empty() {
+        return Err(PowerCfgError::new(
+            "getactive",
+            "пустой GUID активной схемы",
+        ));
+    }
+    Ok(guid)
 }
 
 /// Продублировать схему; возвращает GUID новой схемы.
@@ -334,7 +367,10 @@ mod tests {
         let line = "GUID схемы питания: 381b4222-f694-41f0-9685-ff5bb260df2e  (Мой *профиль*)";
         let s = parse_scheme_line(line).unwrap();
         assert_eq!(s.name, "Мой *профиль*");
-        assert!(!s.active, "звёздочка в имени ошибочно принята за маркер активности");
+        assert!(
+            !s.active,
+            "звёздочка в имени ошибочно принята за маркер активности"
+        );
 
         // Настоящий маркер — после закрывающей скобки.
         let active = "381b4222-f694-41f0-9685-ff5bb260df2e  (Мой *профиль*) *";
@@ -395,5 +431,27 @@ mod tests {
             .or_else(|| uuids.first())
             .unwrap();
         assert_eq!(*chosen, "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
+    }
+
+    #[test]
+    fn active_scheme_guid_is_extracted_from_getactive_output() {
+        // Реальный вывод: подпись может быть русской, имя схемы - в скобках.
+        let out = "Power Scheme GUID: 03753f69-7473-464f-9f9b-f37dd2e465cc (Community-Plan-V3)\r\n";
+        assert_eq!(
+            parse_active_scheme(out).unwrap(),
+            "03753f69-7473-464f-9f9b-f37dd2e465cc"
+        );
+        let ru = "Схема электропитания GUID: 381b4222-f694-41f0-9685-ff5bb260df2e (Сбалансированная)\r\n";
+        assert_eq!(
+            parse_active_scheme(ru).unwrap(),
+            "381b4222-f694-41f0-9685-ff5bb260df2e"
+        );
+        // Без GUID это ошибка, а не пустая строка: пустой эталон молча ломает
+        // расчёт дрейфа машины.
+        let err = parse_active_scheme("Power Scheme GUID:\r\n").expect_err("нет GUID");
+        assert!(
+            err.message.contains("GUID"),
+            "сообщение должно называть GUID"
+        );
     }
 }

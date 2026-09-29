@@ -433,29 +433,50 @@ pub fn cpu_brand() -> String {
 }
 
 /// Значение строкового параметра реестра (`HKEY_LOCAL_MACHINE`), пусто при ошибке.
+///
+/// Буфер прежней версии был фиксированным 128 байт: длинные строки
+/// (`ProcessorNameString` на некоторых сборках, пути к прошивке) давали
+/// `ERROR_MORE_DATA`, функция молча возвращала пустое значение, и identity
+/// машины теряла данные без единого признака ошибки.
 #[cfg(windows)]
 fn registry_string(subkey: &str, value: &str) -> String {
+    const ERROR_MORE_DATA: u32 = 234;
     let subkey: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
     let value: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut buf = [0u16; 64];
-    let mut len: u32 = (buf.len() * 2) as u32;
-    let rc = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE as HKEY,
-            subkey.as_ptr(),
-            value.as_ptr(),
-            RRF_RT_REG_SZ,
-            std::ptr::null_mut(),
-            buf.as_mut_ptr() as *mut std::ffi::c_void,
-            &mut len,
-        )
-    };
-    if rc != 0 || len == 0 {
-        return String::new();
+    let mut units: usize = 64;
+    for _ in 0..4 {
+        let mut buf = vec![0u16; units];
+        let mut len: u32 = (buf.len() * 2) as u32;
+        let rc = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE as HKEY,
+                subkey.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                &mut len,
+            )
+        };
+        if rc == 0 {
+            // Без завершающего нуля обрезаем строку, а не выдаём хвост мусора.
+            let mut text = String::from_utf16_lossy(&buf[..(len as usize / 2).min(buf.len())]);
+            while text.ends_with('\0') {
+                text.pop();
+            }
+            return text;
+        }
+        if rc != ERROR_MORE_DATA {
+            return String::new();
+        }
+        // `len` при ERROR_MORE_DATA содержит нужный размер в байтах.
+        let needed = len as usize / 2 + 1;
+        if needed <= units {
+            return String::new();
+        }
+        units = needed;
     }
-    // Длина в байтах, без завершающего нуля.
-    let units = ((len as usize).saturating_sub(2)) / 2;
-    String::from_utf16_lossy(&buf[..units.min(buf.len())])
+    String::new()
 }
 
 /// Значение DWORD из реестра, 0 при ошибке или другом типе.
@@ -487,10 +508,7 @@ fn registry_dword(subkey: &str, value: &str) -> u32 {
 /// Возвращает `None`, если строка не похожа на испорченную.
 pub fn repair_mojibake(text: &str) -> Option<String> {
     // Признак порчи — символы псевдографики CP866, попавшие на место букв.
-    if !text
-        .chars()
-        .any(|c| ('\u{2550}'..='\u{259F}').contains(&c))
-    {
+    if !text.chars().any(|c| ('\u{2550}'..='\u{259F}').contains(&c)) {
         return None;
     }
     let bytes = encode_oem(text);

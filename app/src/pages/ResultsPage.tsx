@@ -18,7 +18,13 @@ const LEVEL_ORDER: Record<string, number> = {
   Probable: 1,
   StabilityTieBreak: 2,
   Preliminary: 3,
-  KeepCurrent: 4,
+  // Уровни ниже тоже нужно знать: без них `Screening`, `Equivalent` и `None`
+  // получали тот же код, что и нечитаемые строки, и уезжали в самый низ
+  // списка вместе с битыми файлами.
+  Screening: 4,
+  KeepCurrent: 5,
+  Equivalent: 6,
+  None: 7,
 };
 
 function levelKind(level: string): "ok" | "warn" | "plain" | "danger" {
@@ -92,7 +98,15 @@ export function fmtStamp(stamp: string): string {
     hour <= 23 &&
     minute <= 59;
   if (!valid) return stamp;
-  return `${d}.${mo}.${y} · ${h}:${mi}`;
+  // Метка приходит в UTC (так её считает `date_time_stamp`), а журнал на
+  // странице «Логи» печатает локальное время. Без перевода в локальную зону
+  // одна и та же сессия подписывалась двумя разными временами в двух
+  // разделах приложения.
+  const local = new Date(
+    Date.UTC(year, month - 1, day, hour, minute),
+  );
+  const pad = (v: number) => String(v).padStart(2, "0");
+  return `${pad(local.getDate())}.${pad(local.getMonth() + 1)}.${local.getFullYear()} · ${pad(local.getHours())}:${pad(local.getMinutes())}`;
 }
 
 export default function ResultsPage() {
@@ -130,7 +144,7 @@ export default function ResultsPage() {
       }
     });
     return () => {
-      unfor.then((f) => f());
+      unfor.then((f) => f()).catch(() => undefined);
     };
   }, [refresh]);
 
@@ -161,7 +175,16 @@ export default function ResultsPage() {
       // меньше, тем надёжнее измерение, и это единственное, что сравнимо
       // между сессиями.
       case "margin":
-        arr.sort((a, b) => numAsc(a.margin) - numAsc(b.margin));
+        arr.sort((a, b) => {
+          // Меньший перевес = надёжнее измерение, но только если он вообще
+          // измерен. При одном прогоне на схему доверительный интервал не
+          // строится, `margin` равен 0.0, и сортировка ставила такую сессию
+          // первой — как будто у неё идеальная точность. Такие уходят в конец.
+          const aHas = a.rounds_completed >= 2 && Number.isFinite(a.margin);
+          const bHas = b.rounds_completed >= 2 && Number.isFinite(b.margin);
+          if (aHas !== bHas) return aHas ? -1 : 1;
+          return numAsc(a.margin) - numAsc(b.margin);
+        });
         break;
       case "stability":
         arr.sort((a, b) => numDesc(b.stability) - numDesc(a.stability));

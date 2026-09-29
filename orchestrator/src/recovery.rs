@@ -81,18 +81,35 @@ pub fn recover_interrupted_session(driver: &dyn SchemeDriver) -> RecoveryOutcome
         None => None,
     };
 
-    let Some(mut checkpoint) = load_checkpoint() else {
-        // Чекпоинта нет, но маркер мог быть: сообщаем о карантине.
-        return match freeze_note {
-            Some(note) => RecoveryOutcome {
+    let loaded = load_checkpoint();
+    let mut checkpoint = match loaded {
+        Ok(Some(cp)) => cp,
+        // Битая контрольная точка — это проблема, а не «сессии не было»:
+        // молча продолжить с нуля значит потерять раунды и не сказать об этом.
+        Err(e) => {
+            return RecoveryOutcome {
                 interrupted_checkpoint: false,
                 needed_restore: false,
-                restored: true,
+                restored: false,
                 already_ok: false,
-                error: Some(note),
-            },
-            None => RecoveryOutcome::nothing(),
-        };
+                error: Some(format!(
+                    "контрольная точка не читается ({e}); сохраните файл и удалите его, чтобы начать заново"
+                )),
+            };
+        }
+        Ok(None) => {
+            // Контрольной точки нет, но схема могла остаться переключённой.
+            return match freeze_note {
+                Some(note) => RecoveryOutcome {
+                    interrupted_checkpoint: false,
+                    needed_restore: false,
+                    restored: true,
+                    already_ok: false,
+                    error: Some(note),
+                },
+                None => RecoveryOutcome::nothing(),
+            };
+        }
     };
 
     if checkpoint.original_restored {
@@ -181,10 +198,7 @@ pub fn recover_interrupted_session(driver: &dyn SchemeDriver) -> RecoveryOutcome
 
 /// Добавить сообщение о карантине по маркеру к итогу восстановления.
 /// Без маркера итог возвращается как есть (существующие тесты не меняются).
-fn with_freeze_note(
-    mut outcome: RecoveryOutcome,
-    freeze_note: Option<String>,
-) -> RecoveryOutcome {
+fn with_freeze_note(mut outcome: RecoveryOutcome, freeze_note: Option<String>) -> RecoveryOutcome {
     if let Some(note) = freeze_note {
         outcome.error = Some(match outcome.error.take() {
             Some(e) => format!("{e} {note}"),
@@ -268,7 +282,7 @@ mod tests {
             worker_count: None,
             scheme_ids: vec!["test-a".to_string()],
             plan_guid: "recovery-plan".to_string(),
-        reference_scheme_id: None,
+            reference_scheme_id: None,
         }
     }
 
@@ -328,7 +342,9 @@ mod tests {
             // Активная схема снова исходная.
             assert_eq!(driver.active(), "orig");
             // Чекпоинт помечен восстановленным.
-            let cp = load_checkpoint().unwrap();
+            let cp = load_checkpoint()
+                .expect("читается")
+                .expect("есть контрольная точка");
             assert!(cp.original_restored);
         });
     }
@@ -345,7 +361,9 @@ mod tests {
             assert!(!outcome.restored);
             assert!(outcome.error.is_some(), "ошибка должна сообщить причину");
             // Чекпоинт НЕ помечен — следующий запуск повторит попытку.
-            let cp = load_checkpoint().unwrap();
+            let cp = load_checkpoint()
+                .expect("читается")
+                .expect("есть контрольная точка");
             assert!(!cp.original_restored);
         });
     }

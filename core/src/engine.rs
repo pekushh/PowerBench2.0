@@ -24,6 +24,15 @@ use crate::sample::{SampleBuffer, capacity_for_ticks};
 /// Число тиков в коротких прогонах самопроверки ядра.
 const SELF_CHECK_TICKS: u64 = 32;
 
+/// Запас сверх длительности фазы, прежде чем батч признаётся зависшим.
+/// Тик должен уложиться в сотые доли секунды даже на самой слабой машине;
+/// минута запаса означает уже не зависание, а потерю процесса.
+const BATCH_TIMEOUT_MARGIN: Duration = Duration::from_secs(60);
+
+/// Потолок батча для прогонов по числу тиков (самопроверка): 32 тика за
+/// минуту — уже не замер, а зависание.
+const TICK_BATCH_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Цель прогона фазы.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunTarget {
@@ -297,9 +306,16 @@ impl Engine {
                 .dispatch(params.worker_jobs, active_workers, &descriptors);
 
             // 3. Синхронизация (bounded, кооперативная отмена).
-            self.pool.wait_batch().map_err(|e| match e {
+            // Потолок батча — сама фаза плюс запас на один зависший тик. Без
+            // него зависший воркер держал сессию намертво.
+            let batch_timeout = match target {
+                RunTarget::Duration(d) => d + BATCH_TIMEOUT_MARGIN,
+                RunTarget::Ticks(_) => TICK_BATCH_TIMEOUT,
+            };
+            self.pool.wait_batch(batch_timeout).map_err(|e| match e {
                 crate::pool::BatchError::Cancelled => RunError::Cancelled,
                 crate::pool::BatchError::WorkerFailed => RunError::WorkerFailed,
+                crate::pool::BatchError::TimedOut => RunError::WorkerFailed,
             })?;
 
             // 4. Финализация: объединение слотов по возрастанию номера задачи.

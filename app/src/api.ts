@@ -248,7 +248,6 @@ export interface TestRequestDto {
   resume: boolean;
   /** Активная схема — эталон для оценки дрейфа машины. */
   active_scheme_id: string | null;
-  export_raw_samples?: boolean;
 }
 
 export interface StorageStats {

@@ -25,29 +25,46 @@ use tauri::{
 #[allow(dead_code)]
 struct TrayState(std::sync::Mutex<Option<TrayIcon>>);
 
-/// Новый идентификатор плана (универсальный уникальный).
+/// Новый идентификатор плана (универсальный уникальный, формат UUIDv4).
 pub fn new_plan_guid() -> String {
+    let hi = rand_u64();
+    let lo = rand_u64();
+    // Версия 4 и вариант RFC 4122 задаются явно, иначе Windows может
+    // отвергнуть имя плана при `powercfg /duplicatescheme`.
     format!(
-        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-        rand_u64(),
-        rand_u64() as u16,
-        (rand_u64() as u16) & 0x0FFF | 0x4000,
-        ((rand_u64() as u16) & 0x3FFF) | 0x8000,
-        rand_u64() & 0xFFFF_FFFF_FFFF
+        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+        (hi >> 32) as u32,
+        (hi >> 16) as u16,
+        (hi & 0x0FFF) as u16,
+        // Вариант 10xx.
+        ((lo >> 48) as u16 & 0x3FFF) | 0x8000,
+        lo & 0xFFFF_FFFF_FFFF
     )
 }
 
+/// splitmix64 с состоянием в потоке: прежний вариант брал наносекунды часов
+/// заново на каждый вызов, поэтому два соседних вызова в одном тике получали
+/// одно и то же значение, а формат `{:08x}` для `u64` не обрезал старшие
+/// разряды — первая группа получалась 16 символов вместо 8.
 fn rand_u64() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    let mut s = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9E37_79B9_7F4A_7C15);
-    // xorshift64* — достаточно для идентификаторов плана.
-    s ^= s >> 12;
-    s ^= s << 25;
-    s ^= s >> 27;
-    s.wrapping_mul(0x2545_F491_4F6C_DD1D)
+
+    static STATE: AtomicU64 = AtomicU64::new(0);
+    let mut s = STATE.load(Ordering::Relaxed);
+    if s == 0 {
+        s = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15)
+            | 1;
+    }
+    s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    STATE.store(s, Ordering::Relaxed);
+    let mut z = s;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 fn main() {
@@ -145,4 +162,41 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("ошибка при запуске PowerBench");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_plan_guid;
+
+    /// `{:08x}` — минимальная, а не максимальная ширина, поэтому прежний
+    /// формат давал 44-символьные «идентификаторы схемы», которые
+    /// `powercfg` не принимает.
+    #[test]
+    fn plan_guid_is_36_chars_and_unique() {
+        let a = new_plan_guid();
+        let b = new_plan_guid();
+        assert_eq!(
+            a.len(),
+            36,
+            "ожидался UUIDv4 из 36 символов, получено «{a}»"
+        );
+        assert_eq!(
+            b.len(),
+            36,
+            "ожидался UUIDv4 из 36 символов, получено «{b}»"
+        );
+        assert_ne!(a, b, "два соседних вызова дали одинаковый идентификатор");
+        let groups: Vec<&str> = a.split('-').collect();
+        assert_eq!(
+            groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+        assert!(groups[2].starts_with('4'), "версия UUID должна быть 4");
+        assert!(
+            matches!(groups[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+            "вариант RFC 4122 должен быть 10xx, получено «{}»",
+            groups[3]
+        );
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+    }
 }

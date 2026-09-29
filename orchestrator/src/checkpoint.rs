@@ -217,9 +217,14 @@ pub fn checkpoint_path() -> PathBuf {
     data_dir().join(CHECKPOINT_FILE_NAME)
 }
 
-/// Загрузить контрольную точку, если существует и читается.
-pub fn load_checkpoint() -> Option<Checkpoint> {
-    crate::storage::read_json(&checkpoint_path())
+/// Загрузить контрольную точку.
+///
+/// Возвращает ошибку, если файл существует, но не читается: прежняя версия
+/// отдавала `None` и на «файла нет», и на «файл есть, но он битый», а вызов
+/// `resume` молча начинал сессию с нуля, теряя честно отработанные раунды
+/// без единого слова пользователю.
+pub fn load_checkpoint() -> Result<Option<Checkpoint>, String> {
+    crate::storage::read_json_checked(&checkpoint_path())
 }
 
 /// Сохранить контрольную точку: атомарная запись (временный файл + перемещение).
@@ -405,11 +410,46 @@ mod tests {
         let _ = clear_checkpoint();
         let cp = Checkpoint::new(plan());
         save_checkpoint(&cp).unwrap();
-        assert!(load_checkpoint().is_some());
+        assert!(load_checkpoint().expect("читается").is_some());
         clear_checkpoint().unwrap();
-        assert!(load_checkpoint().is_none());
+        assert!(load_checkpoint().expect("читается").is_none());
         // Повторный вызов на отсутствующем файле — не ошибка.
         clear_checkpoint().unwrap();
+    }
+
+    /// Битый JSON обязан быть ошибкой, а не «сессии не было»: раньше `resume`
+    /// на таком файле молча начинал заново и терял честно отработанные раунды.
+    #[test]
+    fn corrupt_checkpoint_is_an_error_not_absence() {
+        let _guard = DATA_DIR_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = clear_checkpoint();
+        std::fs::create_dir_all(data_dir()).unwrap();
+        std::fs::write(checkpoint_path(), b"{ not json at all").unwrap();
+        let err = load_checkpoint().expect_err("битый файл обязан сообщить об ошибке");
+        assert!(
+            err.contains("checkpoint") || err.contains("JSON") || err.contains("json"),
+            "сообщение должно называть файл и проблему, получено: {err}"
+        );
+        let _ = clear_checkpoint();
+    }
+
+    /// Пустой файл — ещё не сессия (обрыв записи в ноль байт), но и не ошибка
+    /// чтения: продолжать можно.
+    #[test]
+    fn empty_checkpoint_is_treated_as_absent() {
+        let _guard = DATA_DIR_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = clear_checkpoint();
+        std::fs::create_dir_all(data_dir()).unwrap();
+        std::fs::write(checkpoint_path(), b"").unwrap();
+        assert!(
+            load_checkpoint().expect("пустой файл не ошибка").is_none(),
+            "пустой файл не должен считаться сессией"
+        );
+        let _ = clear_checkpoint();
     }
 
     #[test]

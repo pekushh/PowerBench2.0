@@ -9,7 +9,7 @@
 //!   только в свой слот j;
 //! - остановка кооперативная и по времени ограниченная.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -105,6 +105,9 @@ struct PoolShared {
 pub enum BatchError {
     Cancelled,
     WorkerFailed,
+    /// Батч не уложился в отведённое время: воркер завис (или ушёл в
+    /// непрерываемый системный вызов) и `wait_batch` больше не ждёт вечно.
+    TimedOut,
 }
 
 /// Persistent-пул воркеров.
@@ -116,7 +119,19 @@ pub struct Pool {
     cancel: Arc<AtomicBool>,
     /// Флаг полной остановки пула.
     shutdown: Arc<AtomicBool>,
+    /// Сколько воркеров ещё не вышло из цикла. `shutdown` ждёт по этому
+    /// счётчику, а не по `join`, чтобы зависший поток не держал выключение.
+    live_workers: Arc<AtomicUsize>,
     worker_count: usize,
+}
+
+/// Снимает счётчик живых воркеров при любом выходе из цикла, включая панику.
+struct LiveWorkerGuard(Arc<AtomicUsize>);
+
+impl Drop for LiveWorkerGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Выполнить порцию работы задачи j и вернуть локальную контрольную сумму.
@@ -225,11 +240,13 @@ fn worker_loop(
     shared: Arc<PoolShared>,
     cancel: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    live_workers: Arc<AtomicUsize>,
     worker_index: usize,
     worker_count: usize,
     entities: Arc<RawShared<EntityBuffers>>,
 ) {
-    // Сентинел, отличный от первого эпоха, чтобы обработать первый батч.
+    let _live = LiveWorkerGuard(live_workers);
+    // Сентинел, отличный от любой эпохи: воркер ждёт первого настоящего батча.
     let mut last_epoch = u64::MAX;
 
     loop {
@@ -241,7 +258,12 @@ fn worker_loop(
                 if shutdown.load(Ordering::Acquire) {
                     return;
                 }
-                if guard.epoch != last_epoch {
+                // `busy` обязателен: без него воркер при старте считал бы
+                // эпоху 0 «новым батчем», отработал бы ноль задач и засчитал
+                // себе «done». Тогда `wait_batch` возвращал бы `Ok` до того,
+                // как `dispatch` вообще что-то раздал, — успех без единой
+                // выполненной работы.
+                if guard.busy && guard.epoch != last_epoch {
                     epoch = guard.epoch;
                     last_epoch = guard.epoch;
                     break;
@@ -312,6 +334,9 @@ impl Pool {
         });
         let cancel = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
+        // Счётчик растёт по мере успешного запуска, иначе при частичном
+        // старте он навсегда остался бы больше числа живых потоков.
+        let live_workers = Arc::new(AtomicUsize::new(0));
 
         let mut handles = Vec::with_capacity(worker_count);
         for w in 0..worker_count {
@@ -323,12 +348,26 @@ impl Pool {
             let shared = shared.clone();
             let cancel = cancel.clone();
             let shutdown = shutdown.clone();
+            let live_for_worker = live_workers.clone();
             let entities = entities.clone();
             let spawned = std::thread::Builder::new()
                 .name(format!("powerbench-worker-{w}"))
-                .spawn(move || worker_loop(shared, cancel, shutdown, w, worker_count, entities));
+                .spawn(move || {
+                    worker_loop(
+                        shared,
+                        cancel,
+                        shutdown,
+                        live_for_worker,
+                        w,
+                        worker_count,
+                        entities,
+                    )
+                });
             match spawned {
-                Ok(handle) => handles.push(handle),
+                Ok(handle) => {
+                    handles.push(handle);
+                    live_workers.fetch_add(1, Ordering::AcqRel);
+                }
                 Err(e) => {
                     // Частичный пул недопустим: будим и ждём уже созданные,
                     // иначе они остались бы жить вечно (дескрипторы `JoinHandle`
@@ -349,8 +388,14 @@ impl Pool {
             handles,
             cancel,
             shutdown,
+            live_workers,
             worker_count,
         }
+    }
+
+    /// Сколько воркеров ещё работает (для диагностики и тестов остановки).
+    pub fn live_workers(&self) -> usize {
+        self.live_workers.load(Ordering::Acquire)
     }
 
     pub fn worker_count(&self) -> usize {
@@ -423,7 +468,12 @@ impl Pool {
     ///
     /// `active_workers` — сколько воркеров берут задачи (1..=worker_count).
     /// Значение меньше полного даёт фазу частичной нагрузки.
-    pub fn dispatch(&self, active_jobs: usize, active_workers: usize, descriptors: &[JobDescriptor]) {
+    pub fn dispatch(
+        &self,
+        active_jobs: usize,
+        active_workers: usize,
+        descriptors: &[JobDescriptor],
+    ) {
         assert!((1..=MAXIMUM_JOBS).contains(&active_jobs));
         assert!((1..=self.worker_count).contains(&active_workers));
         // Короткий слайс молча оставил бы stale-дескрипторы прошлого батча.
@@ -455,7 +505,12 @@ impl Pool {
     /// При отмене воркеры прекращают работу над текущим батчем, но main
     /// дожидается их явного «done» в пределах грейс-периода, после чего
     /// возвращается `Err(Cancelled)` (пул при этом вновь готов к работе).
-    pub fn wait_batch(&self) -> Result<(), BatchError> {
+    ///
+    /// `timeout` — потолок на весь батч. Раньше его не было вовсе, и зависший
+    /// воркер держал приложение намертво, хотя документация обещала
+    /// ограниченное ожидание.
+    pub fn wait_batch(&self, timeout: Duration) -> Result<(), BatchError> {
+        let deadline = Instant::now() + timeout;
         let mut grace_start: Option<Instant> = None;
         loop {
             if self.cancel.load(Ordering::Acquire) && grace_start.is_none() {
@@ -476,6 +531,9 @@ impl Pool {
             if grace_start.is_some_and(|start| start.elapsed() > CANCEL_GRACE) {
                 return Err(BatchError::Cancelled);
             }
+            if Instant::now() >= deadline {
+                return Err(BatchError::TimedOut);
+            }
             let waited = self
                 .shared
                 .work_done
@@ -486,15 +544,33 @@ impl Pool {
     }
 
     /// Кооперативная, ограниченная по времени остановка пула.
+    ///
+    /// `join` ждал воркеры без потолка, поэтому зависший поток навсегда
+    /// блокировал и `Drop`, и закрытие приложения. Теперь сначала ждём
+    /// выхода всех воркеров (не дольше `QUIESCE_TIMEOUT`), и только
+    /// успевшие дожидаются `join`. Оставшиеся отсоединяются: у них своя
+    /// ссылка на `Arc<PoolShared>` и `Arc<RawShared<EntityBuffers>>`, так что
+    /// освобождение памяти безопасно, а зависание приложения — нет.
     pub fn shutdown(&mut self) {
         if self.shutdown.swap(true, Ordering::AcqRel) {
             return;
         }
         self.cancel.store(true, Ordering::Release);
         self.shared.work_ready.notify_all();
+
+        let deadline = Instant::now() + QUIESCE_TIMEOUT;
+        while self.live_workers.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+            std::thread::sleep(QUIESCE_POLL);
+        }
+        let all_exited = self.live_workers.load(Ordering::Acquire) == 0;
+
         let handles = std::mem::take(&mut self.handles);
         for h in handles {
-            let _ = h.join();
+            if all_exited {
+                let _ = h.join();
+            }
+            // Иначе поток не завершился — `JoinHandle` отпускаем, не блокируя
+            // выключение приложения.
         }
     }
 }
@@ -502,5 +578,79 @@ impl Pool {
 impl Drop for Pool {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffers::{EntityBuffers, RawShared};
+    use crate::config::SEED;
+
+    fn pool(workers: usize) -> Pool {
+        let entities = Arc::new(RawShared::new(EntityBuffers::from_seed(SEED)));
+        Pool::new(workers, entities)
+    }
+
+    /// Батч, который никто не раздавал, обязан уложиться в потолок ожидания:
+    /// раньше `wait_batch` ждал вечно и приложение висело намертво.
+    #[test]
+    fn wait_batch_times_out_instead_of_hanging_forever() {
+        let p = pool(2);
+        let started = Instant::now();
+        // База данных пула после создания: `workers_done == 0`, батча не было.
+        let err = p
+            .wait_batch(Duration::from_millis(50))
+            .expect_err("батча не было — ждать нечего");
+        assert_eq!(err, BatchError::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "ожидание должно упираться в потолок, а не в реальное время"
+        );
+    }
+
+    /// Обычный батч завершается успешно и укладывается в отведённое время.
+    #[test]
+    fn wait_batch_reports_completion() {
+        let p = pool(2);
+        p.clear_cancel();
+        let descriptors = [JobDescriptor::dummy(); 4];
+        p.dispatch(4, 2, &descriptors);
+        assert_eq!(
+            p.wait_batch(Duration::from_secs(10)),
+            Ok(()),
+            "воркеры обязаны отчитаться о батче"
+        );
+    }
+
+    /// Остановка пула освобождает все потоки: счётчик живых доходит до нуля.
+    #[test]
+    fn shutdown_releases_all_workers() {
+        let mut p = pool(3);
+        assert_eq!(p.live_workers(), 3);
+        p.shutdown();
+        assert_eq!(p.live_workers(), 0, "потоки остались жить после shutdown");
+        // Повторный вызов обязан быть безопасным (вызывается из `Drop`).
+        p.shutdown();
+    }
+
+    /// Пустой пул не считается «выполнившим батч»: воркеры не должны
+    /// отрабатывать эпоху, которую никто не раздавал. Раньше каждый воркер
+    /// при старте считал эпоху 0 своим батчем и засчитывал ноль задач как
+    /// выполненные, из-за чего ожидание могло вернуть успех без работы.
+    #[test]
+    fn no_batch_means_no_completion() {
+        let p = pool(3);
+        assert!(p.is_quiesced(), "свежий пул ничего не делает");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            p.is_quiesced(),
+            "без `dispatch` пул обязан оставаться тихим"
+        );
+        assert_eq!(
+            p.wait_batch(Duration::from_millis(20)),
+            Err(BatchError::TimedOut),
+            "неразданный батч не может считаться выполненным"
+        );
     }
 }

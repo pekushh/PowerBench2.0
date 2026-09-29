@@ -181,7 +181,10 @@ pub fn aggregate_runs(runs: &[RunSummary]) -> Result<AggregateResult, AggregateE
     } else {
         (averages.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (k - 1) as f64).sqrt()
     };
-    let t_value = t95(k - 1);
+    // При k = 1 степеней свободы нет: доверительного интервала не бывает,
+    // margin = 0, и t-множитель тоже не имеет смысла. Раньше туда попадало
+    // t95(0) = 12.0 — правдоподобное число, означающее ровно ничего.
+    let t_value = if k >= 2 { t95(k - 1) } else { 0.0 };
     let margin = if k == 1 {
         0.0
     } else {
@@ -285,6 +288,22 @@ mod tests {
     }
 
     /// Руками посчитанный набор: три прогона, средние 800/900/1000.
+    #[test]
+    fn single_run_has_no_t_multiplier() {
+        let s = sig("GamingCpuV1", "AAA");
+        let runs = [summary(500.0, 1000, 1, s.clone(), 7)];
+        let a = aggregate_runs(&runs).unwrap();
+        assert_eq!(a.runs, 1);
+        assert_eq!(a.margin, 0.0, "при одном прогоне интервала не бывает");
+        // t95(0) = 12.0 не имеет смысла при нуле степеней свободы.
+        assert_eq!(a.t_value, 0.0, "у одного прогона нет t-множителя");
+        assert_eq!(a.sample_std, 0.0);
+        assert_eq!(
+            a.run_variation_percent, 0.0,
+            "CV по одному прогону не определён"
+        );
+    }
+
     #[test]
     fn aggregate_math_with_hand_computed_values() {
         let s = sig("GamingCpuV1", "AAA");

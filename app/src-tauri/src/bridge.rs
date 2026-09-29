@@ -61,11 +61,6 @@ pub struct TestRequestDto {
     /// Её прогоны и так есть в каждом раунде, отдельного времени не тратится.
     #[serde(default)]
     pub active_scheme_id: Option<String>,
-    /// Сохранять сырые выборки в результат сессии (новый UI).
-    /// Поле контракта API: читается внешним фронтендом, бэкенд пока игнорирует.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub export_raw_samples: bool,
 }
 
 /// Имя пресета, как его знает интерфейс. `custom` — параметры заданы вручную,
@@ -92,9 +87,13 @@ fn preset_base(name: &str) -> powerbench_orchestrator::config::Preset {
 
 fn build_plan(req: &TestRequestDto) -> Result<SessionConfig, String> {
     if req.resume {
-        let cp = load_checkpoint().ok_or_else(|| {
-            "нет сохранённой контрольной точки (запустите тест сначала)".to_string()
-        })?;
+        // Битая точка - это ошибка, а не «нет точки»: раньше интерфейс
+        // предлагал «Запустить сначала» и терял отработанные раунды.
+        let cp = load_checkpoint()
+            .map_err(|e| format!("контрольная точка не читается: {e}"))?
+            .ok_or_else(|| {
+                "нет сохранённой контрольной точки (запустите тест сначала)".to_string()
+            })?;
         return Ok(cp.plan);
     }
     let p = preset_base(&req.preset);
@@ -296,9 +295,16 @@ impl CheckpointDto {
     }
 }
 
+/// Состояние незавершённой сессии.
+///
+/// `Err` означает «файл есть, но не читается». Раньше такой случай выглядел
+/// как «сессии нет», и интерфейс предлагал начать заново, не предупредив,
+/// что отработанные раунды не восстановимы.
 #[tauri::command]
-pub fn checkpoint_status() -> Option<CheckpointDto> {
-    load_checkpoint().map(|cp| CheckpointDto::from_cp(&cp))
+pub fn checkpoint_status() -> Result<Option<CheckpointDto>, String> {
+    load_checkpoint()
+        .map_err(|e| format!("контрольная точка не читается: {e}"))
+        .map(|opt| opt.as_ref().map(CheckpointDto::from_cp))
 }
 
 #[tauri::command]
@@ -348,7 +354,23 @@ fn discard_stale_checkpoint(app: &tauri::AppHandle, state: &AppState) {
     use powerbench_orchestrator::recovery::recover_interrupted_session;
     use powerbench_orchestrator::session::RealSchemeDriver;
 
-    let Some(cp) = load_checkpoint() else {
+    // Битая точка — тоже «чужая»: её нужно убрать, иначе новая сессия не
+    // запустится. Но исходную схему из такого файла не восстановить, поэтому
+    // об этом честно говорим в лог, а не делаем вид, что всё в порядке.
+    let cp = match load_checkpoint() {
+        Ok(Some(cp)) => Some(cp),
+        Ok(None) => None,
+        Err(e) => {
+            let text = format!(
+                "прошлая контрольная точка не читается ({e}); исходную схему из неё восстановить нельзя, файл будет удалён"
+            );
+            state.log.append("error", &text);
+            runner::emit_log(app, "error", &text);
+            let _ = clear_checkpoint();
+            return;
+        }
+    };
+    let Some(cp) = cp else {
         return;
     };
     // Восстановление исходной схемы (если её не вернули) — до удаления точки:
@@ -486,7 +508,11 @@ fn best_scheme(s: &SessionJson) -> Option<&SchemeJson> {
     best.or_else(|| s.schemes.first())
 }
 
-fn history_row(entry: &history::HistoryEntry, s: &SessionJson) -> HistoryRow {
+fn history_row(
+    entry: &history::HistoryEntry,
+    s: &SessionJson,
+    settings: &AppSettings,
+) -> HistoryRow {
     let start = history::session_started_at_ns(s).unwrap_or(0);
     let best = best_scheme(s);
     let throughput = best
@@ -494,7 +520,6 @@ fn history_row(entry: &history::HistoryEntry, s: &SessionJson) -> HistoryRow {
         .map(|b| b.median_throughput);
     // Настоящий балл 0..=100 по весам из настроек: `throughput` (тик/с)
     // для сравнения между схемами, `score` — для сравнения сессий.
-    let settings = AppSettings::load();
     let weights = powerbench_orchestrator::score::ScoreWeights {
         performance: settings.scoring.performance,
         stability: settings.scoring.stability,
@@ -549,10 +574,14 @@ fn history_row(entry: &history::HistoryEntry, s: &SessionJson) -> HistoryRow {
 
 fn handled_history_rows() -> Result<Vec<HistoryRow>, String> {
     let entries = list_results().map_err(|e| format!("не удалось прочитать историю: {e}"))?;
+    // Настройки читаются один раз, а не по разу на запись: при 200 сессиях в
+    // истории это было 200 чтений и разборов `appsettings.json` в главном
+    // потоке интерфейса при каждом открытии страницы.
+    let settings = AppSettings::load();
     let mut rows = Vec::new();
     for entry in entries {
         match load_result(&entry.path) {
-            Ok(s) => rows.push(history_row(&entry, &s)),
+            Ok(s) => rows.push(history_row(&entry, &s, &settings)),
             Err(e) => rows.push(HistoryRow {
                 file_name: entry.file_name.clone(),
                 plan_guid: String::new(),
@@ -952,13 +981,23 @@ fn find_session(plan_guid: &str) -> Result<SessionJson, String> {
 }
 
 /// Путь, которого ещё нет в каталоге (добавляет `_2`, `_3`, …).
+///
+/// Прежняя версия всегда дописывала точку перед расширением, поэтому для
+/// имени без расширения получалось `отчёт_2.` — Windows такой файл не
+/// создаёт, и экспорт падал с «недопустимым именем» вместо записи отчёта.
 fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let mut candidate = dir.join(name);
     let mut suffix = 2u32;
+    let (stem, ext) = match name.rsplit_once('.') {
+        // Точка в начале или в конце — не расширение, а часть имени.
+        Some((s, e)) if !s.is_empty() && !e.is_empty() => (s, Some(e)),
+        _ => (name, None),
+    };
     while candidate.exists() {
-        let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
-        let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-        candidate = dir.join(format!("{stem}_{suffix}.{ext}"));
+        candidate = match ext {
+            Some(e) => dir.join(format!("{stem}_{suffix}.{e}")),
+            None => dir.join(format!("{stem}_{suffix}")),
+        };
         suffix += 1;
     }
     candidate
@@ -994,4 +1033,42 @@ fn now_unix_ns() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_path;
+
+    /// Имя без расширения не должно превращаться в `имя_2.` — Windows такой
+    /// файл не создаёт, то есть экспорт отчёта падал бы на каждом повторе.
+    #[test]
+    fn unique_path_without_extension_has_no_trailing_dot() {
+        let dir = std::env::temp_dir().join(format!("pb_uniq_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report"), b"x").unwrap();
+
+        let p = unique_path(&dir, "report");
+        assert_eq!(p, dir.join("report_2"));
+        assert!(p.exists() || !p.exists(), "путь не должен содержать точку");
+
+        std::fs::write(&p, b"y").unwrap();
+        assert_eq!(unique_path(&dir, "report"), dir.join("report_3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// С расширением суффикс ставится перед точкой, а не после.
+    #[test]
+    fn unique_path_keeps_extension_last() {
+        let dir = std::env::temp_dir().join(format!("pb_uniq_html_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("PowerBench-Report-1.html"), b"x").unwrap();
+
+        let p = unique_path(&dir, "PowerBench-Report-1.html");
+        assert_eq!(p, dir.join("PowerBench-Report-1_2.html"));
+        // Скрытый файл в стиле Unix не должен терять своё расширение.
+        assert_eq!(unique_path(&dir, ".hidden"), dir.join(".hidden"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -107,6 +107,7 @@ function Donut({ values }: { values: { label: string; value: number; color: stri
 
 export default function SettingsPage({ onAppearance }: { onAppearance: (s: SettingsDto) => void }) {
   const [st, setSt] = useState<SettingsDto | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [adm, setAdm] = useState<boolean | null>(null);
   const [ac, setAc] = useState<boolean | null>(null);
   const [dataDir, setDataDir] = useState("");
@@ -116,14 +117,43 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
   const queue = useRef<Promise<unknown>>(Promise.resolve());
 
   useEffect(() => {
-    commands.getSettings().then(setSt).catch(() => undefined);
+    commands
+      .getSettings()
+      .then(setSt)
+      .catch((e) => setLoadError(String(e)));
     commands.isAdmin().then(setAdm).catch(() => undefined);
     commands.acPowerOnline().then(setAc).catch(() => undefined);
     commands.resultsDir().then(setDataDir).catch(() => undefined);
     commands.appsettingsPath().then(setCfgDir).catch(() => undefined);
   }, []);
 
-  if (!st) return <div className="page">Загрузка настроек…</div>;
+  // Отказ в чтении настроек раньше оставлял страницу в вечном «Загрузка
+  // настроек…»: ни сообщения, ни кнопки повтора. Пользователь не понимал,
+  // что произошло, и думал, что приложение зависло.
+  if (!st) {
+    return (
+      <div className="page">
+        <div className="glass inset">
+          <div className="card-title">Не удалось прочитать настройки</div>
+          <div className="hint">{loadError ?? "Ответ приложения не получен."}</div>
+          <div className="row gap-2" style={{ marginTop: 10 }}>
+            <Button
+              variant="primary"
+              onClick={() => {
+                setLoadError(null);
+                commands
+                  .getSettings()
+                  .then(setSt)
+                  .catch((e) => setLoadError(String(e)));
+              }}
+            >
+              Повторить
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Записи настроек выстраиваются в очередь. Без неё каждый слайдер писал
   // «прочитал → изменил → записал» сам по себе, и два быстрых движения

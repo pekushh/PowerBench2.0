@@ -424,8 +424,10 @@ pub fn build_session_report(s: &SessionJson) -> String {
             "rejected"
         } else if is_win {
             "lead"
-        } else {
+        } else if is_measured(sch) {
             "admitted"
+        } else {
+            "unmeasured"
         };
         let status = if sch.rejected {
             format!(
@@ -434,8 +436,13 @@ pub fn build_session_report(s: &SessionJson) -> String {
             )
         } else if is_win {
             "<span class=\"pill ok\">ЛИДЕР</span>".to_string()
-        } else {
+        } else if is_measured(sch) {
             "<span class=\"pill dim\">ДОПУЩЕНА</span>".to_string()
+        } else {
+            // Раньше такая схема выглядела как обычная допущенная, хотя
+            // прогонов не было ни одного и сравнивать её было не с чем.
+            "<span class=\"pill dim\" title=\"ни одного законченного прогона\">НЕ ИЗМЕРЕНА</span>"
+                .to_string()
         };
         let row_cls = if is_win {
             "win"
@@ -517,8 +524,11 @@ pub fn build_session_report(s: &SessionJson) -> String {
         .map(|n| format!("<div>{}</div>", esc(n)))
         .collect();
 
-    let admitted = s.schemes.iter().filter(|x| !x.rejected).count();
-    let rejected_n = s.schemes.len() - admitted;
+    // Схема без единого законченного прогона не «допущена»: её не с чем было
+    // сравнивать, и в счётчик попадала как равная остальным.
+    let admitted = s.schemes.iter().filter(|x| is_measured(x)).count();
+    let rejected_n = s.schemes.iter().filter(|x| x.rejected).count();
+    let unmeasured_n = s.schemes.len() - admitted - rejected_n;
     let total_runs: usize = s.schemes.iter().map(|x| x.runs).sum();
     let (lead_value, lead_sub) = match &robust {
         Some(r) => (
@@ -527,10 +537,11 @@ pub fn build_session_report(s: &SessionJson) -> String {
         ),
         None => ("—".to_string(), "нет данных".to_string()),
     };
-    let schemes_sub = if rejected_n > 0 {
-        format!("Допущено · брак: {rejected_n}")
-    } else {
-        "Допущено".to_string()
+    let schemes_sub = match (rejected_n, unmeasured_n) {
+        (0, 0) => "Допущено".to_string(),
+        (0, u) => format!("Допущено · без замеров: {u}"),
+        (r, 0) => format!("Допущено · брак: {r}"),
+        (r, u) => format!("Допущено · брак: {r} · без замеров: {u}"),
     };
 
     format!(
@@ -630,10 +641,7 @@ fn render_header(sessions: &[&SessionJson]) -> String {
 
     let mut by_scheme: Vec<(&str, usize, f64)> = Vec::new();
     for s in sessions {
-        for sch in s.schemes.iter().filter(|x| !x.rejected) {
-            if !(sch.median_throughput.is_finite() && sch.median_throughput > 0.0) {
-                continue;
-            }
+        for sch in s.schemes.iter().filter(|x| is_measured(x)) {
             match by_scheme.iter_mut().find(|(id, _, _)| *id == sch.scheme_id) {
                 Some((_, n, sum)) => {
                     *n += 1;
@@ -706,10 +714,7 @@ fn render_chart(sessions: &[&SessionJson]) -> String {
     // считаем и упоминаем под графиком явно, а не прячем молча.
     let mut totals: Vec<(String, f64, usize)> = Vec::new();
     for s in sessions.iter() {
-        for sch in s.schemes.iter().filter(|x| !x.rejected) {
-            if !(sch.median_throughput.is_finite() && sch.median_throughput > 0.0) {
-                continue;
-            }
+        for sch in s.schemes.iter().filter(|x| is_measured(x)) {
             let name = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
             match totals.iter_mut().find(|(n, _, _)| *n == name) {
                 Some(e) => {
@@ -735,10 +740,7 @@ fn render_chart(sessions: &[&SessionJson]) -> String {
     let mut series: Vec<(String, Vec<(usize, f64)>)> = Vec::new();
     let mut all: Vec<f64> = Vec::new();
     for (col, s) in sessions.iter().enumerate() {
-        for sch in s.schemes.iter().filter(|x| !x.rejected) {
-            if !(sch.median_throughput.is_finite() && sch.median_throughput > 0.0) {
-                continue;
-            }
+        for sch in s.schemes.iter().filter(|x| is_measured(x)) {
             let name = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
             if !top.contains(&name) {
                 continue;
@@ -960,8 +962,10 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
             "rejected"
         } else if is_win {
             "lead"
-        } else {
+        } else if is_measured(sch) {
             "admitted"
+        } else {
+            "unmeasured"
         };
         let status = if sch.rejected {
             format!(
@@ -970,8 +974,11 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
             )
         } else if is_win {
             "<span class=\"badge ok\">рекомендована</span>".to_string()
-        } else {
+        } else if is_measured(sch) {
             "<span class=\"badge\">допущена</span>".to_string()
+        } else {
+            "<span class=\"badge\" title=\"ни одного законченного прогона\">не измерена</span>"
+                .to_string()
         };
         let name = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
         sch_rows.push_str(&format!(
@@ -1063,11 +1070,7 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
         score = score_section(s),
         // Внутри раскрытой сессии заголовок уровнем ниже — `.dhead` и таблица
         // без рамки, как соседние блоки деталей.
-        background = background_section(
-            s,
-            "<div class=\"dhead\">Фоновая нагрузка</div>",
-            "sub",
-        ),
+        background = background_section(s, "<div class=\"dhead\">Фоновая нагрузка</div>", "sub",),
         probs = probs,
         mode_html = mode_html,
     )
@@ -1194,14 +1197,15 @@ fn phase_table_section(s: &SessionJson) -> String {
                     m = p.median_throughput,
                     p1 = p.p1_throughput,
                     c = p.consistency_percent,
-                    state = if p.throttled { "троттлинг" } else { "—" }
+                    state = if p.throttled {
+                        "троттлинг"
+                    } else {
+                        "—"
+                    }
                 )
             })
             .collect();
-        rows.push_str(&format!(
-            "<tr><td>{}</td>{cells}</tr>",
-            esc(&name_of(sch))
-        ));
+        rows.push_str(&format!("<tr><td>{}</td>{cells}</tr>", esc(&name_of(sch))));
     }
     if rows.is_empty() {
         return String::new();
@@ -1345,11 +1349,7 @@ fn conditions_section(s: &SessionJson) -> String {
         }
         out.push_str("</ul>");
     }
-    if out.is_empty() {
-        String::new()
-    } else {
-        out
-    }
+    if out.is_empty() { String::new() } else { out }
 }
 
 fn name_of(sch: &crate::result::SchemeJson) -> String {
@@ -1366,6 +1366,15 @@ fn score_section(s: &SessionJson) -> String {
     let n = weights.normalized();
     let scores = crate::score::score_schemes(&s.schemes, &weights);
     let leader = crate::score::score_leader(&scores);
+    // Схемы без законченных прогонов: балл у них 0 «не потому что схема
+    // плохая, а потому что её не мерили». Помечать их «допущена» значило
+    // показывать пустую полосу как результат.
+    let unmeasured: Vec<&str> = s
+        .schemes
+        .iter()
+        .filter(|x| !is_measured(x))
+        .map(|x| x.scheme_id.as_str())
+        .collect();
     let mut admitted = Vec::new();
     let mut bars = String::new();
     for sc in &scores {
@@ -1373,12 +1382,15 @@ fn score_section(s: &SessionJson) -> String {
         let is_leader = leader.map(|l| l.scheme_id == sc.scheme_id).unwrap_or(false);
         let badge = if sc.rejected {
             "<span class=\"badge err\">ЗАБРАКОВАНА</span>".to_string()
+        } else if unmeasured.contains(&sc.scheme_id.as_str()) {
+            "<span class=\"badge\" title=\"ни одного законченного прогона\">НЕ ИЗМЕРЕНА</span>"
+                .to_string()
         } else if is_leader {
             "<span class=\"badge ok\">ЛИДЕР</span>".to_string()
         } else {
             "<span class=\"badge\">ДОПУЩЕНА</span>".to_string()
         };
-        if !sc.rejected && sc.score.is_finite() {
+        if !sc.rejected && !unmeasured.contains(&sc.scheme_id.as_str()) && sc.score.is_finite() {
             admitted.push(sc.score);
         }
         let p = if sc.score.is_finite() && sc.score > 0.0 {
@@ -1508,10 +1520,23 @@ fn lvl_class(level: &str) -> &'static str {
     }
 }
 
+/// Схема реально измерена: не забракована, есть законченный прогон и
+/// конечная положительная медиана.
+///
+/// Всё, что не проходит этот фильтр, не должно попадать ни в счётчики
+/// «допущено», ни в средние по истории: у схемы без прогонов нечем было
+/// мериться, и её нулевая статистика портила разбивку на титуле.
+fn is_measured(sch: &crate::result::SchemeJson) -> bool {
+    !sch.rejected
+        && sch.runs > 0
+        && sch.median_throughput.is_finite()
+        && sch.median_throughput > 0.0
+}
+
 /// Лучшая (незабракованная) схема сессии по median throughput.
 fn best_scheme(s: &SessionJson) -> Option<&crate::result::SchemeJson> {
     let accepted: Vec<&crate::result::SchemeJson> =
-        s.schemes.iter().filter(|x| !x.rejected).collect();
+        s.schemes.iter().filter(|x| is_measured(x)).collect();
     let pool: Vec<&crate::result::SchemeJson> = if accepted.is_empty() {
         s.schemes.iter().collect()
     } else {
@@ -1695,6 +1720,42 @@ mod tests {
         (path, read)
     }
 
+    /// Схема без законченных прогонов не должна попадать в счётчик
+    /// «допущено» на титуле: раньше она выглядела как равная остальным.
+    #[test]
+    fn scheme_without_runs_is_not_counted_as_admitted() {
+        let mut s = sample_session("AAA", 500.0);
+        let mut skipped = SchemeJson::from_aggregate(
+            "SKIPPED".to_string(),
+            false,
+            None,
+            &empty_aggregate(0.0),
+            Vec::new(),
+        );
+        skipped.name = Some("Схема без замеров".into());
+        // Обнуляем явно, чтобы тест повторял ровно случай «ни одного
+        // прогона», а не «нулевые метрики при одном прогоне».
+        skipped.runs = 0;
+        skipped.median_throughput = 0.0;
+        s.schemes.push(skipped);
+
+        assert!(is_measured(&s.schemes[0]));
+        assert!(!is_measured(&s.schemes[1]));
+
+        let html = build_report(std::slice::from_ref(&s));
+        assert!(
+            html.contains("не измерена"),
+            "схема без прогонов обязана быть помечена как неизмеренная"
+        );
+        // В отчёте по одной сессии счётчик на титуле обязан называть их
+        // отдельно, иначе «допущено» читается как «измерено и прошло».
+        let session_html = build_session_report(&s);
+        assert!(
+            session_html.contains("без замеров: 1"),
+            "счётчик на титуле должен отдельно считать неизмеренные схемы"
+        );
+    }
+
     /// Файл отчёта на диске — то же самое, что открывает браузер, поэтому
     /// проверяем именно его: кодировку, самодостаточность и навигацию.
     #[test]
@@ -1774,7 +1835,11 @@ mod tests {
                 let mut sch = SchemeJson::from_aggregate(
                     id.clone(),
                     rejected,
-                    if rejected { Some("Unstable".into()) } else { None },
+                    if rejected {
+                        Some("Unstable".into())
+                    } else {
+                        None
+                    },
                     &empty_aggregate(100.0 + i as f64),
                     Vec::new(),
                 );
@@ -1853,11 +1918,11 @@ mod tests {
             "нет честной пометки о скрытых схемах"
         );
         // Плиток сводки не больше лимита.
-        assert_eq!(
-            html.matches("class=\"sumcard\"").count(),
-            SUMMARY_MAX_CARDS
+        assert_eq!(html.matches("class=\"sumcard\"").count(), SUMMARY_MAX_CARDS);
+        assert!(
+            html.contains("Показаны"),
+            "нет пометки о скрытых схемах в сводке"
         );
-        assert!(html.contains("Показаны"), "нет пометки о скрытых схемах в сводке");
     }
 
     /// Регресс: палитра отчёта обязана совпадать с темой Graphite приложения.
@@ -1882,7 +1947,9 @@ mod tests {
             assert!(html.contains(token), "в отчёте нет токена темы: {token}");
         }
         // Старые синеватые значения не должны вернуться.
-        for stale in ["#0b0c0f", "#141519", "#1a1c22", "#23262e", "#333845", "#c9cdd6"] {
+        for stale in [
+            "#0b0c0f", "#141519", "#1a1c22", "#23262e", "#333845", "#c9cdd6",
+        ] {
             assert!(
                 !html.contains(stale),
                 "в отчёте остался старый синеватый цвет: {stale}"
@@ -1899,7 +1966,10 @@ mod tests {
         let run = stored_run_with_background("aaa", "chrome.exe", 7);
         s.schemes[0].per_run = vec![run];
         let html = build_session_report(&s);
-        assert!(html.contains("Фоновая нагрузка"), "в отчёте нет секции фона");
+        assert!(
+            html.contains("Фоновая нагрузка"),
+            "в отчёте нет секции фона"
+        );
         assert!(html.contains("chrome.exe"), "в отчёте нет имени процесса");
     }
 
@@ -1981,8 +2051,9 @@ mod tests {
         assert!(r.note().contains("размах"));
 
         // Размах большой, но тренда нет: машина гуляла, а не уплывала.
-        let wander = ReferenceSummary::build("g", Some("схема".into()), vec![92.0, 100.0, 92.0], 1.5)
-            .expect("два раунда минимум");
+        let wander =
+            ReferenceSummary::build("g", Some("схема".into()), vec![92.0, 100.0, 92.0], 1.5)
+                .expect("два раунда минимум");
         assert!(
             !wander.unstable,
             "плавание вверх-внир не должно понижать вердикт: {}",
@@ -1990,9 +2061,7 @@ mod tests {
         );
 
         // Один раунд сравнивать не с чем.
-        assert!(
-            ReferenceSummary::build("g", Some("схема".into()), vec![100.0], 1.5).is_none()
-        );
+        assert!(ReferenceSummary::build("g", Some("схема".into()), vec![100.0], 1.5).is_none());
     }
 
     /// Пофазная таблица обязана быть в отчёте: без неё вердикт по смешанному
@@ -2006,8 +2075,7 @@ mod tests {
     fn report_lists_session_warnings() {
         let mut s = sample_session("AAA", 500.0);
         s.warnings = vec![
-            "фон на загруженной машине: до 90 % CPU (пиковое, 95-й перцентиль прогона)"
-                .to_string(),
+            "фон на загруженной машине: до 90 % CPU (пиковое, 95-й перцентиль прогона)".to_string(),
             "троттлинг частоты наблюдался: AAA (1 фаз)".to_string(),
         ];
         let html = build_session_report(&s);
@@ -2224,7 +2292,11 @@ mod tests {
             assert!(!html.contains(pattern), "внешний ресурс: {pattern}");
         }
         // Основные контейнеры закрыты.
-        for (open, close) in [("<html", "</html>"), ("<body", "</body>"), ("<table", "</table>")] {
+        for (open, close) in [
+            ("<html", "</html>"),
+            ("<body", "</body>"),
+            ("<table", "</table>"),
+        ] {
             assert_eq!(
                 html.matches(open).count(),
                 html.matches(close).count(),

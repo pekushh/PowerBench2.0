@@ -159,11 +159,15 @@ export default function BenchmarkPage() {
   const [warmup, setWarmup] = useState(0);
   const [cooling, setCooling] = useState(0);
   const [reps, setReps] = useState(0);
-  const [rawSamples, setRawSamples] = useState(false);
   const [backgroundThreshold, setBackgroundThresholdState] = useState(5);
   const [checkpoint, setCheckpoint] = useState<CheckpointDto | null>(null);
+  const [checkpointError, setCheckpointError] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryMsg | null>(null);
   const [starting, setStarting] = useState(false);
+  // Событие `test-finished` может прийти раньше ответа команды запуска: поток
+  // сессии падает ещё до того, как команда вернёт pid. Флаг нужен, чтобы
+  // оптимистичное `running = true` не залипло навсегда.
+  const finishedRef = useRef(false);
   const [stopping, setStopping] = useState(false);
   const [finished, setFinished] = useState(false);
   const [finishMsg, setFinishMsg] = useState("");
@@ -273,6 +277,18 @@ export default function BenchmarkPage() {
         ? "detailed"
         : "custom";
 
+  // Проверка готовности не декоративная: она перечисляет ровно те условия,
+  // при которых заведомо не получится замер (нет прав, нет сети, недоступен
+  // powercfg, мало места). Показывать баннер и давать кнопку — значит
+  // отправлять пользователя в заведомо падающую сессию.
+  const readinessBlocksStart = !!readiness && !readiness.ok && !running;
+  const startBlockedReason =
+    selected.size === 0
+      ? "Выберите хотя бы одну схему питания"
+      : readiness && !readiness.ok
+        ? "Окружение не готово к замеру — исправьте условия ниже"
+        : undefined;
+
   // «Осталось» = полная оценка сессии минус уже прошедшее время.
   const [remainingEstimate, setRemainingEstimate] = useState("—");
 
@@ -306,8 +322,16 @@ export default function BenchmarkPage() {
     let alive = true;
     commands
       .checkpointStatus()
-      .then((cp) => alive && setCheckpoint(cp))
-      .catch(() => undefined);
+      .then((cp) => {
+        if (!alive) return;
+        setCheckpointError(null);
+        setCheckpoint(cp);
+      })
+      .catch((e) => {
+        // Раньше ошибка молча проглатывалась, и интерфейс просто не показывал
+        // панель продолжения — выглядело так, будто незавершённой сессии нет.
+        if (alive) setCheckpointError(String(e));
+      });
     // Настройки и карантин нужны до выбора схем: без них исключённые и
     // карантинные схемы попадали бы в выбор молча, хотя код ниже обещает
     // обратное. Раньше обе выборки шли параллельно, и `listSchemes` успевал
@@ -344,6 +368,7 @@ export default function BenchmarkPage() {
       setTelemetry(m);
     });
     const unfin = onTestFinished((m) => {
+      finishedRef.current = true;
       setRunning(false);
       setStarting(false);
       setStopping(false);
@@ -367,8 +392,8 @@ export default function BenchmarkPage() {
       }
     });
     return () => {
-      untele.then((f) => f());
-      unfin.then((f) => f());
+      untele.then((f) => f()).catch(() => undefined);
+      unfin.then((f) => f()).catch(() => undefined);
     };
   }, []);
 
@@ -457,6 +482,7 @@ export default function BenchmarkPage() {
         }
       }
       setStarting(true);
+      finishedRef.current = false;
       setFinished(false);
       setFinishMsg("");
       t0.current = 0;
@@ -475,7 +501,6 @@ export default function BenchmarkPage() {
           background_threshold_percent: resume ? null : backgroundThreshold,
           worker_count: null,
           scheme_ids: resume ? [] : chosen,
-          export_raw_samples: resume ? false : rawSamples,
           // Активная схема идёт эталоном: по её прогонам оценивается дрейф
           // машины за сессию, и вердикт понижается, если машина «плывёт»
       // сильнее, чем различаются схемы.
@@ -483,9 +508,16 @@ export default function BenchmarkPage() {
           resume,
         })
         .then(() => {
-          pushToast("info", "Сессия запущена");
-          setRunning(true);
+          pushToast("info", "запуск принят");
           setCheckpoint(null);
+          // Если сессия уже завершилась (мгновенная ошибка), возвращать
+          // `running = true` нельзя: экран замера залипнет, схемы останутся
+          // заблокированы, и лечится это только перезапуском приложения.
+          if (finishedRef.current) {
+            setStarting(false);
+            return;
+          }
+          setRunning(true);
         })
         .catch((e) => {
           setStarting(false);
@@ -493,7 +525,7 @@ export default function BenchmarkPage() {
         });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, preset, duration, warmup, cooling, reps, settings, rawSamples, quarantine],
+    [selected, preset, duration, warmup, cooling, reps, settings, quarantine],
   );
 
   const stop = () => {
@@ -532,8 +564,8 @@ export default function BenchmarkPage() {
         </Button>
         <Button
           variant="primary"
-          disabled={starting || running || selected.size === 0}
-          title={selected.size === 0 ? "Выберите хотя бы одну схему питания" : undefined}
+          disabled={starting || running || selected.size === 0 || readinessBlocksStart}
+          title={startBlockedReason}
           onClick={() => start(false)}
         >
           {starting ? "Запуск…" : "Запустить тест"}
@@ -653,23 +685,22 @@ export default function BenchmarkPage() {
                             </span>
                             <p className="desc">{PRESETS[preset].desc}</p>
                             <div className="spacer" />
-                            <label className="check">
-                              <input
-                                type="checkbox"
-                                checked={rawSamples}
-                                onChange={(e) => setRawSamples(e.target.checked)}
-                              />
-                              <span>Подробные замеры (JSON)</span>
-                            </label>
+                            <div className="hint">
+                              Флажок «Подробные замеры (JSON)» убран: бэкенд поле
+                              принимал и молча игнорировал, а интерфейс
+                              утверждал, что запись включена. Если сырые выборки
+                              нужны — это отдельная осознанная доработка.
+                            </div>
                           </div>
                         ) : (
                           <div className="settings-pane">
                             <h3 className="pane-title">Параметры</h3>
                             <div className="grid2">
-                              <Field label="Длительность теста, с">
+                              <Field label="Длительность прогона, с">
                                 <NumInput
                                   value={duration}
-                                  min={9}
+                                  min={16}
+                                  max={3600}
                                   unit="с"
                                   onChange={(v) => setDuration(v)}
                                 />
@@ -778,8 +809,18 @@ export default function BenchmarkPage() {
                 quarantine={quarantine}
                 onChanged={loadAll}
                 onToggle={(guid, active) => {
+                  // Раньше активную схему нельзя было снять с плитки, а
+                  // сообщение звало «снимите галочку», которой на плитке нет.
+                  // Снять её можно было только кнопкой «Выбрать все», которая
+                  // её наоборот добавляла. Активная схема нужна и как
+                  // `active_scheme_id` для оценки дрейфа, и в списке сравнения,
+                  // но участие в сравнении — выбор пользователя.
                   if (active && selected.has(guid)) {
-                    pushToast("err", "Эта схема уже выбрана для сравнения — снимите галочку.");
+                    setSelected((prev) => {
+                      const next = new Set(prev);
+                      next.delete(guid);
+                      return next;
+                    });
                     return;
                   }
                   // Исключённую пользователем схему нельзя вернуть в сравнение
@@ -820,14 +861,43 @@ export default function BenchmarkPage() {
                   </div>
                 </div>
               ) : null}
+              {checkpointError ? (
+                <Glass className="inset">
+                  <div className="card-title">Незавершённая сессия не читается</div>
+                  <div className="hint" style={{ marginBottom: 10 }}>
+                    {checkpointError} Продолжить её нельзя: отработанные раунды
+                    восстановить не из чего. Файл{" "}
+                    <span className="mono break">benchmark-checkpoint.json</span>{" "}
+                    лежит в каталоге данных — сохраните его себе, если он
+                    нужен, и запустите новый замер.
+                  </div>
+                </Glass>
+              ) : null}
               {checkpoint && !checkpoint.original_restored ? (
                 <Glass className="inset">
                   <div className="card-title">Незавершённая сессия</div>
                   <div className="hint" style={{ marginBottom: 10 }}>
                     <span className="mono break">{checkpoint.plan_guid}</span> · схем{" "}
                     {checkpoint.scheme_ids.length} · повторов {checkpoint.repetitions} ·{" "}
-                    {checkpoint.completed_keys.length}{" "}
-                    {plural(checkpoint.completed_keys.length, "раунд выполнен", "раунда выполнено", "раундов выполнено")}
+                    {(() => {
+                      // `completed_keys` содержит по записи на СХЕМУ на раунд,
+                      // а не по раунду: при 3 схемах и 2 выполненных раундах
+                      // длина 6, и интерфейс писал «6 раундов выполнено» рядом с
+                      // «повторов 5» — работа выглядела почти законченной.
+                      const perRound = Math.max(1, checkpoint.scheme_ids.length);
+                      const done = Math.floor(checkpoint.completed_keys.length / perRound);
+                      return (
+                        <>
+                          {done}{" "}
+                          {plural(
+                            done,
+                            "раунд выполнен",
+                            "раунда выполнено",
+                            "раундов выполнено",
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                   <div className="row wrap gap-2">
                     <Button variant="primary" disabled={running} onClick={() => start(true)}>
@@ -867,8 +937,10 @@ export default function BenchmarkPage() {
                     </div>
                     <div className="rh-sub">
                       {telemetry
-                        ? `прогон ${telemetry.run_index}/${telemetry.run_total} · раунд ${telemetry.round + 1}`
-                        : "подготовка к сессии…"}
+                        ? `прогон ${telemetry.run_index}/${telemetry.run_total} · раунд ${telemetry.round + 1}${
+                            telemetry.scheme_name ? ` · ${telemetry.scheme_name}` : ""
+                          }`
+                        : "идёт подготовка к сессии:"}
                     </div>
                   </div>
                   <div className="run-ring">
@@ -979,7 +1051,7 @@ export default function BenchmarkPage() {
                       </Badge>
                     </div>
                     <div className="run-row">
-                      <span className="run-k">Длительность теста</span>
+                      <span className="run-k">Длительность прогона</span>
                       <b>{duration} с</b>
                     </div>
                     <div className="run-row">
@@ -992,16 +1064,12 @@ export default function BenchmarkPage() {
                       <span className="run-k">Повторов (раундов)</span>
                       <b>{reps}</b>
                     </div>
-                    <div className="run-row">
-                      <span className="run-k">Подробные замеры</span>
-                      <b>{rawSamples ? "да" : "нет"}</b>
-                    </div>
                   </Panel>
                 </div>
                 <div className="run-summary">
                   <div className="grow">
                     <div className="run-total">
-                      Длительность теста: <b>{estimate}</b>
+                      Всего на сессию: <b>{estimate}</b>
                     </div>
                     <div className="hint">
                       {selected.size}{" "}
@@ -1016,8 +1084,8 @@ export default function BenchmarkPage() {
                   <Button
                     variant="primary"
                     big
-                    disabled={starting || running || selected.size === 0}
-                    title={selected.size === 0 ? "Выберите хотя бы одну схему питания" : undefined}
+                    disabled={starting || running || selected.size === 0 || readinessBlocksStart}
+                    title={startBlockedReason}
                     onClick={() => start(false)}
                   >
                     {starting ? "Запуск…" : "Запустить тест"}

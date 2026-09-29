@@ -57,7 +57,7 @@ export default function App() {
     commands.testRunning().then(setRunning).catch(() => undefined);
     const unfor = onTestFinished(() => setRunning(false));
     return () => {
-      unfor.then((f) => f());
+      unfor.then((f) => f()).catch(() => undefined);
     };
   }, []);
 

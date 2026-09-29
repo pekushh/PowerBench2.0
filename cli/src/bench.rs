@@ -171,10 +171,32 @@ fn parse_f64(option: &str, v: &str) -> Result<f64, String> {
 }
 
 /// План для команды `bench`.
-fn build_plan(cli: &BenchCli) -> Result<SessionConfig, String> {
+fn build_plan(cli: &BenchCli, scheme_ids: &[String]) -> Result<SessionConfig, String> {
     let p = cli
         .preset
         .unwrap_or(powerbench_orchestrator::config::DETAILED_PRESET);
+    // Эталон по умолчанию — активная схема: она и так мерится в каждом
+    // раунде, и по её прогонам видно, насколько «плывёт» машина за сессию.
+    //
+    // Раньше CLI оставлял эталон пустым, и дрейф не оценивался вовсе: на тех
+    // же данных приложение и CLI выдавали разные вердикты. Берём активную
+    // схему, но только если она реально участвует в сравнении — иначе
+    // эталон был бы прогоном со схемы, которой нет в плане.
+    let active = powerbench_windows::powercfg::active_scheme().ok();
+    let reference_scheme_id = active.as_ref().and_then(|guid| {
+        scheme_ids
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(guid))
+            .then(|| guid.clone())
+    });
+    if reference_scheme_id.is_none()
+        && let Some(active) = active.as_ref()
+    {
+        eprintln!(
+            "PowerBench CLI: активная схема {active} не участвует в сравнении, \
+             дрейф машины оцениваться не будет."
+        );
+    }
     let plan = SessionConfig {
         duration_seconds: cli.duration.unwrap_or(p.duration_seconds),
         warmup_seconds: cli.warmup.unwrap_or(p.warmup_seconds),
@@ -184,11 +206,9 @@ fn build_plan(cli: &BenchCli) -> Result<SessionConfig, String> {
             .threshold
             .unwrap_or(powerbench_orchestrator::config::DEFAULT_BACKGROUND_PERCENT),
         worker_count: cli.workers,
-        scheme_ids: cli.schemes.clone().unwrap_or_default(),
+        scheme_ids: scheme_ids.to_vec(),
         plan_guid: cli.plan.clone().unwrap_or_else(crate::new_plan_guid),
-        // Эталон по умолчанию — активная схема: она и так мерится в каждом
-        // раунде, и по её прогонам видно, насколько «плывёт» машина за сессию.
-        reference_scheme_id: None,
+        reference_scheme_id,
     };
     match validate_config(&plan) {
         Some(reason) => Err(reason),
@@ -431,14 +451,20 @@ fn finish_session(
     println!(
         "Итоговый вердикт [{}]{}",
         json.recommendation.level_label,
-        if json.screening { " — режим скрининга" } else { "" }
+        if json.screening {
+            " — режим скрининга"
+        } else {
+            ""
+        }
     );
     if let Some(r) = &json.reference {
         println!("{}", r.note());
     }
-    for w in json.warnings.iter().filter(|w| {
-        w.contains("фон") || w.contains("троттлинг") || w.contains("нестабильна")
-    }) {
+    for w in json
+        .warnings
+        .iter()
+        .filter(|w| w.contains("фон") || w.contains("троттлинг") || w.contains("нестабильна"))
+    {
         println!("Предупреждение: {w}");
     }
     println!("Итоговый результат: {}", out.display());
@@ -458,10 +484,13 @@ fn finish_session(
 }
 
 /// Записать HTML-отчёт сессии рядом с её JSON.
-fn write_report_next_to(json: &powerbench_orchestrator::result::SessionJson) -> Result<String, String> {
+fn write_report_next_to(
+    json: &powerbench_orchestrator::result::SessionJson,
+) -> Result<String, String> {
     use powerbench_orchestrator::history;
     let dir = history::results_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("не удалось создать {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("не удалось создать {}: {e}", dir.display()))?;
     let start = history::session_started_at_ns(json).unwrap_or(0);
     let stamp = history::date_time_stamp(start);
     let plan = history::sanitize(&json.plan_guid);
@@ -522,7 +551,7 @@ pub fn cmd_bench(args: &[String]) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let mut plan = match build_plan(&cli) {
+    let mut plan = match build_plan(&cli, cli.schemes.as_deref().unwrap_or(&[])) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("PowerBench CLI: {e}");
@@ -537,6 +566,16 @@ pub fn cmd_bench(args: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+        // Схемы выбрали уже после сборки плана, поэтому эталон дрейфа
+        // назначаем здесь — иначе он всегда оставался пустым.
+        if let Ok(active) = powerbench_windows::powercfg::active_scheme()
+            && plan
+                .scheme_ids
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(&active))
+        {
+            plan.reference_scheme_id = Some(active);
+        }
     }
     crate::ctrlc::install();
     // Восстановление исходной схемы после прошлого прерывания (если было).
@@ -594,10 +633,16 @@ pub fn cmd_resume(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     // План берётся из контрольной точки — иначе нечего продолжать.
+    // Нечитаемый план — это ошибка, а не «сессии нет»: раньше битый файл
+    // выглядел как отсутствующая точка, и resume стартовал с нуля молча.
     let plan = match powerbench_orchestrator::checkpoint::load_checkpoint() {
-        Some(cp) => cp.plan,
-        None => {
+        Ok(Some(cp)) => cp.plan,
+        Ok(None) => {
             eprintln!("PowerBench CLI: нет сохранённой контрольной точки (запустите bench).");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("PowerBench CLI: контрольная точка не читается: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -623,7 +668,14 @@ pub fn cmd_resume(args: &[String]) -> ExitCode {
 
 /// `powerbench-cli status`.
 pub fn cmd_status(_args: &[String]) -> ExitCode {
-    match powerbench_orchestrator::checkpoint::load_checkpoint() {
+    let cp = match powerbench_orchestrator::checkpoint::load_checkpoint() {
+        Ok(cp) => cp,
+        Err(e) => {
+            eprintln!("PowerBench CLI: контрольная точка не читается: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match cp {
         None => {
             println!("Контрольная точка отсутствует.");
             ExitCode::SUCCESS
@@ -668,7 +720,10 @@ pub fn cmd_settings_show(_args: &[String]) -> ExitCode {
         "<дефолт, файла нет>".to_string()
     };
     println!("Файл: {src}");
-    println!("benchmark: порог фона {}", s.benchmark.background_threshold_percent);
+    println!(
+        "benchmark: порог фона {}",
+        s.benchmark.background_threshold_percent
+    );
     // Состояние машины: без него нельзя понять, сопоставимы ли две сессии,
     // и не объяснить, почему замер вдруг замедлился.
     let p = powerbench_windows::power::power_state();
@@ -691,7 +746,11 @@ pub fn cmd_settings_show(_args: &[String]) -> ExitCode {
     );
     println!(
         "питание: {}, частота {}/{} МГц, троттлинг {}, термолимит {}, ACPI-причина {}",
-        if p.on_ac { "от сети" } else { "от батареи" },
+        if p.on_ac {
+            "от сети"
+        } else {
+            "от батареи"
+        },
         p.current_mhz,
         p.max_mhz,
         yes_no(p.throttled),

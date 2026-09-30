@@ -246,9 +246,14 @@ const COOLING_MODE_PASSIVE: u16 = 1;
 ///
 /// * `max_mhz` / `current_mhz` — частота, которую система разрешает и которую
 ///   выдаёт процессор. Схема питания с пониженным максимальным состоянием
-///   уменьшает `max_mhz`, а троттлинг уменьшает `current_mhz`;
-/// * `throttled` — `current_mhz` заметно ниже `max_mhz`, то есть система уже
-///   ограничивает частоту прямо сейчас;
+///   уменьшает `max_mhz`, а троттлинг уменьшает `current_mhz`.
+///   **Важно:** `max_mhz` — это текущий разрешённый потолок *с учётом буста*,
+///   а не базовая частота процессора. Базовая частота в этих данных
+///   отсутствует, поэтому равенство `current_mhz == max_mhz` доказывает лишь
+///   «система не держит процессор ниже разрешённого потолка» и не доказывает,
+///   что буст отрабатывает полностью;
+/// * `throttled` — какое-то ядро удерживается заметно ниже **собственного**
+///   потолка прямо сейчас;
 /// * `thermal_throttle` — пассивное охлаждение, то есть причина ограничения
 ///   именно температура;
 /// * `policy_reason` — код ACPI-ограничения системы (0 — ограничений нет).
@@ -283,13 +288,14 @@ const MHZ_TOLERANCE: u32 = 50;
 pub fn power_state() -> PowerState {
     #[cfg(windows)]
     {
-        let (max_mhz, current_mhz) = processor_clocks();
+        let clocks = processor_clocks();
         let (policy_reason, cooling) = system_power_info();
-        let throttled = max_mhz > 0 && current_mhz > 0 && current_mhz + MHZ_TOLERANCE < max_mhz;
+        let max_mhz = clocks.ceiling_mhz;
+        let current_mhz = clocks.slowest_mhz;
         PowerState {
             max_mhz,
             current_mhz,
-            throttled,
+            throttled: clocks.held_below_own_ceiling,
             thermal_throttle: cooling == COOLING_MODE_PASSIVE,
             policy_reason,
             on_ac: ac_power_online().unwrap_or(false),
@@ -305,9 +311,31 @@ pub fn power_state() -> PowerState {
     }
 }
 
-/// `(наибольший MaxMhz, наименьший CurrentMhz)` по всем логическим ядрам.
+/// Что удалось выяснить о частоте процессора.
+///
+/// Важное о смысле полей: `PROCESSOR_POWER_INFORMATION::MaxMhz` — это **не
+/// базовая частота**, а тот потолок, который Windows разрешает *прямо сейчас*,
+/// то есть на бусте ускорения. Поэтому равенство `current == max` означает
+/// лишь «процессор не удерживается ниже разрешённого потолка», и НЕ означает
+/// «буст отрабатывает полностью»: застрять на базовой частоте этот способ
+/// обнаружить не может — базовой частоты в данных просто нет.
+struct Clocks {
+    /// Наивысший потолок среди ядер (для показа).
+    ceiling_mhz: u32,
+    /// Наименьшая текущая частота среди ядер (для показа).
+    slowest_mhz: u32,
+    /// Есть ли ядро, удерживаемое ниже **собственного** потолка.
+    ///
+    /// Сравнение идёт по каждому ядру отдельно. Прежняя версия брала
+    /// максимум потолков и минимум текущих частот, то есть сравнивала
+    /// разные ядра между собой: на процессорах с разными ядрами (P/E)
+    /// это давало ложное «троттлинг» там, где его нет.
+    held_below_own_ceiling: bool,
+}
+
+/// `(наибольший MaxMhz, наименьший CurrentMhz, удерживается ли кто-то ниже своего потолка)`.
 #[cfg(windows)]
-fn processor_clocks() -> (u32, u32) {
+fn processor_clocks() -> Clocks {
     // Буфер рассчитан на 256 процессоров — с запасом больше любой реальной
     // машины. Лишние записи API не заполняет, они остаются нулевыми.
     const MAX_PROCESSORS: usize = 256;
@@ -324,24 +352,47 @@ fn processor_clocks() -> (u32, u32) {
     };
     // STATUS_SUCCESS == 0; NTSTATUS типа u32 в windows-sys.
     if status != 0 {
-        return (0, 0);
+        return Clocks {
+            ceiling_mhz: 0,
+            slowest_mhz: 0,
+            held_below_own_ceiling: false,
+        };
     }
-    let mut max_mhz = 0u32;
-    let mut min_current = u32::MAX;
-    let mut seen = false;
+    clocks_from_buffer(&buf)
+}
+
+/// Разбор ответа `CallNtPowerInformation` — отдельно от самого вызова,
+/// чтобы правило «каждое ядро сравнивается со своим потолком» можно было
+/// проверить тестом на конкретных цифрах.
+#[cfg(windows)]
+fn clocks_from_buffer(buf: &[PROCESSOR_POWER_INFORMATION]) -> Clocks {
+    let mut ceiling_mhz = 0u32;
+    let mut slowest_mhz = u32::MAX;
+    let mut held = false;
     for p in buf.iter() {
         // Нулевая запись — хвост буфера, реального ядра с 0 МГц не бывает.
         if p.MaxMhz == 0 && p.CurrentMhz == 0 {
             continue;
         }
-        seen = true;
-        max_mhz = max_mhz.max(p.MaxMhz);
-        min_current = min_current.min(p.CurrentMhz);
+        ceiling_mhz = ceiling_mhz.max(p.MaxMhz);
+        slowest_mhz = slowest_mhz.min(p.CurrentMhz);
+        // Каждое ядро сравнивается со своим же потолком.
+        if p.MaxMhz > 0 && p.CurrentMhz > 0 && p.CurrentMhz + MHZ_TOLERANCE < p.MaxMhz {
+            held = true;
+        }
     }
-    if !seen {
-        (0, 0)
+    if slowest_mhz == u32::MAX {
+        Clocks {
+            ceiling_mhz: 0,
+            slowest_mhz: 0,
+            held_below_own_ceiling: false,
+        }
     } else {
-        (max_mhz, min_current)
+        Clocks {
+            ceiling_mhz,
+            slowest_mhz,
+            held_below_own_ceiling: held,
+        }
     }
 }
 
@@ -691,6 +742,68 @@ pub fn local_offset_label(epoch_secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn core(max: u32, current: u32) -> PROCESSOR_POWER_INFORMATION {
+        PROCESSOR_POWER_INFORMATION {
+            Number: 0,
+            MaxMhz: max,
+            CurrentMhz: current,
+            MhzLimit: 0,
+            MaxIdleState: 0,
+            CurrentIdleState: 0,
+        }
+    }
+
+    /// Ядра с разными потолками (например, P/E) не должны давать ложного
+    /// «троттлинга»: каждое ядро сравнивается со своим же потолком.
+    ///
+    /// Прежняя версия брала максимум потолков и минимум текущих частот, то
+    /// есть сравнивала 3000 МГц с чужим потолком 5200 МГц и объявляла
+    /// ограничение там, где его нет.
+    #[test]
+    fn asymmetric_cores_are_not_called_throttled() {
+        let buf = [core(5200, 5190), core(3000, 2990)];
+        let c = clocks_from_buffer(&buf);
+        assert_eq!(c.ceiling_mhz, 5200);
+        assert_eq!(c.slowest_mhz, 2990);
+        assert!(
+            !c.held_below_own_ceiling,
+            "оба ядра идут на своих потолках — ограничения нет"
+        );
+    }
+
+    /// Настоящее ограничение ловится: ядро заметно ниже своего потолка.
+    #[test]
+    fn core_below_its_own_ceiling_is_throttled() {
+        let buf = [core(5200, 5190), core(5200, 3100)];
+        let c = clocks_from_buffer(&buf);
+        assert!(
+            c.held_below_own_ceiling,
+            "ядро на 3100 при потолке 5200 — это ограничение"
+        );
+    }
+
+    /// Хвост буфера (нулевые записи) не должен считаться ядром с 0 МГц.
+    #[test]
+    fn zero_tail_is_ignored() {
+        let buf = [core(5200, 5190), core(0, 0), core(0, 0)];
+        let c = clocks_from_buffer(&buf);
+        assert_eq!(c.ceiling_mhz, 5200);
+        assert_eq!(
+            c.slowest_mhz, 5190,
+            "нулевой хвост не должен понижать частоту"
+        );
+        assert!(!c.held_below_own_ceiling);
+    }
+
+    /// Полностью пустой ответ — «информации нет», а не «троттлинг».
+    #[test]
+    fn empty_buffer_means_no_information() {
+        let c = clocks_from_buffer(&[]);
+        assert_eq!(c.ceiling_mhz, 0);
+        assert_eq!(c.slowest_mhz, 0);
+        assert!(!c.held_below_own_ceiling);
+    }
 
     #[test]
     fn cpu_identifier_falls_back_to_architecture() {

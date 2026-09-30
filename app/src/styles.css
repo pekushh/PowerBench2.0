@@ -98,7 +98,6 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .page-head h1{font-size:var(--fs-h1);font-weight:650;letter-spacing:var(--ls-tight);line-height:var(--lh-tight)}
 .page-head .sub{color:var(--fg-dim);font-size:var(--fs-sm)}
 .page-head .actions{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
-.page-head-line,.page-head-line .storage-line{display:inline-flex;align-items:center;gap:var(--sp-2)}
 .glass{background:var(--bg-2);border:1px solid var(--line-1);border-radius:var(--radius-lg);box-shadow:var(--shadow-card);padding:var(--sp-4)}
 .glass.lift{transition:border-color var(--dur) var(--ease),transform var(--dur-slow) var(--ease),box-shadow var(--dur-slow) var(--ease)}
 .glass.lift:hover{border-color:var(--line-2);transform:translateY(-2px);box-shadow:var(--shadow-lift)}
@@ -195,16 +194,6 @@ table.grid td.num,table.grid th.num{text-align:right;font-variant-numeric:tabula
 .switch input:checked+.track:after{transform:translate(16px);background:var(--accent)}
 .switch .label{color:var(--fg-dim);font-size:var(--fs-body)}
 .switch:hover .track{border-color:var(--border-strong)}
-.scheme-tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-3)}
-@media (max-width: 1100px){.scheme-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
-}
-@media (max-width: 760px){.scheme-tiles{grid-template-columns:1fr}
-}
-.tile-scheme{display:flex;flex-direction:column;gap:var(--sp-2);padding:var(--sp-4);border-radius:var(--radius-lg);border:1px solid var(--line-1);background:var(--bg-2);cursor:pointer;-webkit-user-select:none;user-select:none;transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
-.tile-scheme:hover{border-color:var(--line-2);background:color-mix(in srgb,var(--bg-2) 90%,var(--fg) 4%);transform:translateY(-2px);box-shadow:var(--shadow-lift)}
-.tile-scheme:active{transform:translateY(-1px) scale(.99)}
-.tile-scheme.sel{border-color:color-mix(in srgb,var(--accent) 55%,var(--line-2));box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 18%,transparent)}
-.tile-scheme.active{border-color:color-mix(in srgb,var(--ok) 65%,var(--line-2));background:color-mix(in srgb,var(--ok) 7%,var(--bg-2));box-shadow:0 0 0 1px color-mix(in srgb,var(--ok) 28%,transparent),0 16px 40px -26px color-mix(in srgb,var(--ok) 45%,transparent)}
 /* Внутреннее наполнение плитки схемы — одно набором правил для обоих экранов
    (страница «Схемы» и выбор в мастере бенчмарка). Раньше у каждого были свои
    классы (`ts-*` и `pick-*`) с почти одинаковыми правилами, из-за чего плитки
@@ -216,7 +205,6 @@ table.grid td.num,table.grid th.num{text-align:right;font-variant-numeric:tabula
 .scheme-card-state{display:inline-flex;align-items:center;gap:7px;font-size:var(--fs-caption);font-weight:600;
 color:var(--fg-mute)}
 .ts-grow{flex:1}
-.tile-scheme.excluded{opacity:.6}
 .progress{height:8px;border-radius:var(--radius-full);background:var(--bg-1);border:1px solid var(--line-1);overflow:hidden}
 .progress>i{display:block;height:100%;border-radius:var(--radius-full);background:linear-gradient(90deg,var(--accent),color-mix(in srgb,var(--accent) 72%,#fff));transition:width .18s linear}
 
@@ -368,12 +356,6 @@ table.grid.results td{overflow:hidden;text-overflow:ellipsis}
 @keyframes riseIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @keyframes modalIn{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:none}}
 .fade-in{animation:var(--motion-page) var(--ease) both}
-.scheme-tiles>*,.evid>*{animation:var(--motion-rise) var(--ease) backwards}
-.scheme-tiles>*:nth-child(2),.evid>*:nth-child(2){animation-delay:30ms}
-.scheme-tiles>*:nth-child(3),.evid>*:nth-child(3){animation-delay:60ms}
-.scheme-tiles>*:nth-child(4){animation-delay:90ms}
-.scheme-tiles>*:nth-child(n+5){animation-delay:.12s}
-.scheme-tiles>*:nth-child(n+11){animation-delay:40ms}
 html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{transition:none!important;animation:none!important}
 /* Системная настройка ОС применяется так же — полным отключением. */
 @media (prefers-reduced-motion: reduce){*,*:before,*:after{transition:none!important;animation:none!important}}
@@ -602,24 +584,6 @@ html.bench-running .pick-tile{
    заголовка и читалась как надстрочный индекс над «Результаты» — то же самое
    повторялось на всех страницах. */
 .page-head{align-items:baseline}
-.page-head .actions{align-self:center}
-.storage-line{flex:1 1 100%;display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;
-color:var(--fg-mute);font-size:var(--fs-caption);min-width:0}
-/* --- ╨б╨┐╨╕╤Б╨╛╨║ ╤Б╨╡╤Б╤Б╨╕╨╣ --- */
-.res-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:var(--sp-3);
-padding:var(--sp-3) var(--sp-4);cursor:default}
-/* Строка результата лежит в прокручиваемом списке, поэтому подсветка при
-   наведении не должна выходить за её рамку: `translateY` и растущая наружу
-   тень уезжали за правый край списка, и карточка выглядела «вылезшей из
-   фрейма». Вместо этого — внутреннее кольцо и чуть светлее фон. */
-.res-row:hover{transform:none;box-shadow:inset 0 0 0 1px var(--line-2);
-background:color-mix(in srgb,var(--bg-2) 92%,var(--fg) 4%)}
-.res-when{font-size:var(--fs-sm);color:var(--fg-mute);font-variant-numeric:tabular-nums;white-space:nowrap}
-.res-name{font-size:var(--fs-title);font-weight:600;letter-spacing:-.1px;overflow:hidden;
-text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.res-meta{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;margin-top:5px;min-width:0}
-.res-meta .num{color:var(--fg-dim);font-size:var(--fs-caption)}
-.res-acts{display:flex;align-items:center;gap:var(--sp-2)}
 /* --- ╨б╨╛╨┤╨╡╤А╨╢╨╕╨╝╨╛╨╡ ╨╝╨╛╨┤╨░╨╗╨║╨╕ ╤А╨╡╨╖╤Г╨╗╤М╤В╨░╤В╨░ --- */
 .rd{display:flex;flex-direction:column;gap:var(--sp-4);padding-bottom:var(--sp-2)}
 .rd-hero{display:flex;flex-direction:column;align-items:center;gap:var(--sp-2);text-align:center}
@@ -799,3 +763,163 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 .support-bar{width:100%;justify-content:space-between;flex-wrap:wrap}
 .log-card{min-height:220px}
 }
+/* ===== Схемы питания: шапка, панель фильтров, карточки ===== */
+/* Кнопки шапки: белая акцентная для главного действия и приглушённая для
+   второстепенного. Раньше это были `Button` со `variant="ghost"` — одинаковые
+   серые, и первое действие не читалось как главное. */
+.act-primary{display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:9px;border:0;background:var(--accent);color:#111;font:inherit;font-size:var(--fs-sm);font-weight:650;cursor:pointer;white-space:nowrap;transition:opacity var(--dur) var(--ease)}
+.act-primary svg,.act-secondary svg{width:14px;height:14px;flex:0 0 auto}
+.act-primary:hover{opacity:.92}
+.act-primary:disabled{opacity:.55;cursor:default}
+.act-secondary{display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border-radius:9px;border:1px solid var(--line-1);background:var(--bg-1);color:var(--fg-dim);font:inherit;font-size:var(--fs-sm);font-weight:500;cursor:pointer;white-space:nowrap;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+.act-secondary svg{color:var(--fg-mute);transition:color var(--dur) var(--ease)}
+.act-secondary:hover{background:var(--bg-2);border-color:var(--line-2);color:var(--fg)}
+.act-secondary:hover svg{color:var(--fg-dim)}
+.act-secondary:disabled{opacity:.55;cursor:default}
+
+.schemes-block{display:flex;flex-direction:column;gap:var(--sp-3)}
+.schemes-meta{font-size:var(--fs-sm);color:var(--fg-mute);font-variant-numeric:tabular-nums}
+.schemes-meta b{color:var(--fg-dim);font-weight:600}
+.schemes-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.schemes-toolbar .toolbar-left{display:flex;align-items:center;gap:10px;flex:1 1 auto;flex-wrap:wrap;min-width:0}
+.sch-search{flex:1 1 250px;max-width:320px;width:auto}
+.sch-search .search{padding:7px 12px 7px 32px;border-radius:10px;background:var(--bg-1);border-color:var(--line-1)}
+.sch-search .search:focus{border-color:var(--line-2);box-shadow:none}
+.view-switch{display:inline-flex;background:var(--bg-1);border:1px solid var(--line-1);border-radius:9px;padding:2px;gap:2px}
+.vbtn{width:30px;height:28px;border:1px solid transparent;background:transparent;color:var(--fg-mute);border-radius:7px;display:inline-grid;place-items:center;cursor:pointer;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.vbtn svg{width:14px;height:14px}
+.vbtn:hover{color:var(--fg-dim)}
+.vbtn.active{background:var(--bg-2);color:var(--fg);border-color:var(--line-2)}
+
+.schemes-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.scheme-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:13px;padding:12px 14px;display:flex;flex-direction:column;justify-content:space-between;gap:10px;min-width:0;transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease)}
+.scheme-card:hover{border-color:var(--line-2);background:color-mix(in srgb,var(--bg-2) 70%,var(--bg-1))}
+.scheme-card.is-active{border-color:color-mix(in srgb,var(--ok) 42%,transparent);background:linear-gradient(180deg,color-mix(in srgb,var(--ok) 6%,transparent),var(--bg-1) 65%)}
+.scheme-card.is-excluded{opacity:.58}
+.scheme-card.is-sel{border-color:color-mix(in srgb,var(--accent) 55%,var(--line-2));box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 18%,transparent)}
+
+.sc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.sc-name{font-size:var(--fs-body);font-weight:650;color:var(--fg);line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word;min-width:0}
+.sc-badge{font-size:10px;font-weight:700;letter-spacing:.4px;padding:1.5px 6px;border-radius:5px;white-space:nowrap;flex:0 0 auto;border:1px solid transparent}
+.sc-badge.dup{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent);border-color:color-mix(in srgb,var(--warn) 42%,transparent)}
+.sc-badge.sys{color:var(--fg-mute);background:rgba(255,255,255,.04);border-color:var(--line-1)}
+.sc-badge.ex{color:var(--err);background:color-mix(in srgb,var(--err) 12%,transparent);border-color:color-mix(in srgb,var(--err) 42%,transparent)}
+
+.sc-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:8px;border-top:1px solid var(--line-1)}
+.sc-left-act{display:flex;align-items:center;gap:7px;min-width:0}
+.btn-power{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:7px;border:1px solid var(--line-2);background:var(--bg-2);color:var(--fg-dim);font:inherit;font-size:var(--fs-meta);font-weight:600;cursor:pointer;white-space:nowrap;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.btn-power:hover:not(:disabled){border-color:color-mix(in srgb,var(--ok) 42%,transparent);color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent)}
+.btn-power:disabled{cursor:default;opacity:.8}
+.scheme-card.is-active .btn-power{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent);border-color:color-mix(in srgb,var(--ok) 42%,transparent)}
+/* Полный GUID занимал строку целиком (36 символов), а для `powercfg` он и
+   нужен целиком — поэтому в карточке он сокращён и копируется по клику. */
+.guid-chip{font-family:ui-monospace,Cascadia Code,Consolas,monospace;font-size:var(--fs-xs);color:var(--fg-mute);background:transparent;border:0;padding:2px 4px;border-radius:4px;cursor:pointer;white-space:nowrap;transition:color var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease)}
+.guid-chip:hover{color:var(--fg-dim);background:rgba(255,255,255,.05)}
+.sc-export{width:24px;height:24px;border-radius:6px;border:1px solid transparent;background:transparent;color:var(--fg-mute);display:inline-grid;place-items:center;cursor:pointer;flex:0 0 auto}
+.sc-export svg{width:14px;height:14px}
+.sc-export:hover{color:var(--fg);background:var(--bg-2);border-color:var(--line-1)}
+.sc-export.on{color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);border-color:color-mix(in srgb,var(--accent) 42%,transparent)}
+
+.sc-icons{display:flex;align-items:center;gap:2px;flex:0 0 auto}
+.ic-btn{width:28px;height:28px;border-radius:7px;border:1px solid transparent;background:transparent;color:var(--fg-mute);display:inline-grid;place-items:center;cursor:pointer;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.ic-btn svg{width:14px;height:14px}
+.ic-btn:hover:not(:disabled){color:var(--fg);background:var(--bg-2);border-color:var(--line-1)}
+.ic-btn:disabled{opacity:.45;cursor:default}
+.ic-btn.fav.on{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent);border-color:color-mix(in srgb,var(--warn) 42%,transparent)}
+.ic-btn.excl.on{color:var(--err);background:color-mix(in srgb,var(--err) 12%,transparent);border-color:color-mix(in srgb,var(--err) 42%,transparent)}
+.ic-btn.del:hover:not(:disabled){color:var(--err);background:color-mix(in srgb,var(--err) 12%,transparent);border-color:color-mix(in srgb,var(--err) 42%,transparent)}
+
+/* Компактный список: одна колонка для обзора сотни схем. */
+.schemes-grid.list-mode{grid-template-columns:1fr;gap:6px}
+.schemes-grid.list-mode .scheme-card{flex-direction:row;align-items:center;gap:12px;padding:9px 14px}
+.schemes-grid.list-mode .sc-head{flex:1 1 auto;align-items:center;justify-content:flex-start;min-width:0}
+.schemes-grid.list-mode .sc-name{-webkit-line-clamp:1}
+.schemes-grid.list-mode .sc-foot{border-top:0;padding-top:0;flex:0 0 auto;gap:14px}
+
+.empty-card{background:var(--bg-1);border:1px dashed var(--line-2);border-radius:14px;padding:36px 20px;text-align:center;color:var(--fg-mute);font-size:var(--fs-body)}
+
+.schemes-grid>*{animation:var(--motion-rise) var(--ease) backwards}
+.schemes-grid>*:nth-child(2){animation-delay:30ms}
+.schemes-grid>*:nth-child(3){animation-delay:60ms}
+.schemes-grid>*:nth-child(4){animation-delay:90ms}
+.schemes-grid>*:nth-child(n+5){animation-delay:.12s}
+.schemes-grid.list-mode>*{animation:none}
+
+@media (max-width:920px){
+.schemes-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:620px){
+.schemes-grid{grid-template-columns:1fr}
+.sch-search{max-width:none}
+.schemes-toolbar .toolbar-left{width:100%}
+}
+/* ===== Результаты: шапка, панель фильтров, карточки сессий ===== */
+.results-page{gap:var(--sp-3)}
+.results-meta-line{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;flex:0 0 auto}
+
+.results-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;flex:0 0 auto}
+.res-search{flex:1 1 220px;max-width:300px;width:auto}
+.res-search .search{padding:6.5px 12px 6.5px 32px;border-radius:9px;background:var(--bg-1);border-color:var(--line-1)}
+.res-search .search:focus{border-color:var(--line-2);box-shadow:none}
+.results-toolbar .toolbar-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mode-tabs{display:inline-flex;background:var(--bg-1);border:1px solid var(--line-1);border-radius:9px;padding:2px;gap:2px}
+.mtab{border:1px solid transparent;background:transparent;color:var(--fg-mute);font:inherit;font-size:var(--fs-xs);font-weight:600;padding:4px 10px;border-radius:7px;cursor:pointer;white-space:nowrap;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.mtab:hover{color:var(--fg-dim)}
+.mtab.active{background:var(--bg-2);color:var(--fg);border-color:var(--line-2)}
+.sort-select{background:var(--bg-1);color:var(--fg-dim);border:1px solid var(--line-1);border-radius:9px;padding:6px 11px;font:inherit;font-size:var(--fs-sm);font-weight:500;cursor:pointer;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+.sort-select:hover,.sort-select:focus{border-color:var(--line-2);color:var(--fg);outline:none}
+
+.session-list{display:flex;flex-direction:column;gap:10px;flex:1 1 auto;min-height:0;max-height:none;overflow-y:auto}
+.session-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:14px;padding:14px 18px;display:grid;grid-template-columns:minmax(200px,1.4fr) auto auto;align-items:center;gap:20px;transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease)}
+.session-card:hover{border-color:var(--line-2);background:color-mix(in srgb,var(--bg-2) 70%,var(--bg-1))}
+.session-card.is-unreadable{opacity:.7}
+.session-card[role=button]{cursor:pointer}
+
+.sc-main{min-width:0}
+.sc-top{display:flex;align-items:center;gap:8px;margin-bottom:5px;min-width:0}
+.sc-winner-tag{font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent);border:1px solid color-mix(in srgb,var(--ok) 42%,transparent);padding:1.5px 7px;border-radius:6px;flex:0 0 auto}
+.sc-title{font-size:var(--fs-h3);font-weight:700;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.2px;min-width:0}
+.sc-sub{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:var(--fs-xs);color:var(--fg-mute);font-variant-numeric:tabular-nums}
+.mode-pill{display:inline-block;padding:1.5px 8px;border-radius:var(--radius-full);font-size:var(--fs-meta);font-weight:600;color:var(--fg-dim);background:var(--bg-2);border:1px solid var(--line-1)}
+.mode-pill.warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent);border-color:color-mix(in srgb,var(--warn) 42%,transparent)}
+.dot-sep{color:var(--line-2)}
+
+/* Метрики отдельными колонками: раньше результат, число схем и погрешность
+   лежали одной строкой под названием, и на широком окне строка расползалась
+   нечитаемой полосой. */
+.sc-metrics{display:flex;align-items:center;gap:18px;padding:0 14px;border-left:1px solid var(--line-1);border-right:1px solid var(--line-1);font-variant-numeric:tabular-nums}
+.m-col{display:flex;flex-direction:column;align-items:flex-end;min-width:68px}
+.m-label{font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--fg-mute);margin-bottom:1px;white-space:nowrap}
+.m-val{font-size:var(--fs-h3);font-weight:700;color:var(--fg);white-space:nowrap}
+.m-val.score{color:var(--ok);font-size:16px}
+.m-val small{font-size:var(--fs-sm);font-weight:500;color:var(--fg-mute);margin-left:2px}
+
+.sc-actions{display:flex;align-items:center;gap:8px}
+.btn-report{display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border-radius:9px;border:1px solid var(--line-2);background:var(--bg-2);color:var(--fg);font:inherit;font-size:var(--fs-sm);font-weight:600;cursor:pointer;white-space:nowrap;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+.btn-report svg{width:14px;height:14px;flex:0 0 auto}
+.btn-report:hover{border-color:color-mix(in srgb,var(--ok) 42%,transparent);background:color-mix(in srgb,var(--ok) 12%,transparent);color:var(--ok)}
+.btn-del{width:34px;height:34px;border-radius:9px;border:1px solid transparent;background:transparent;color:var(--fg-mute);display:inline-grid;place-items:center;cursor:pointer;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+.btn-del svg{width:15px;height:15px}
+.btn-del:hover{color:var(--err);background:color-mix(in srgb,var(--err) 12%,transparent);border-color:color-mix(in srgb,var(--err) 42%,transparent)}
+
+.session-list>*{animation:var(--motion-rise) var(--ease) backwards}
+.session-list>*:nth-child(2){animation-delay:30ms}
+.session-list>*:nth-child(n+3){animation-delay:60ms}
+
+@media (max-width:780px){
+.results-page{height:auto;min-height:0}
+.session-card{grid-template-columns:1fr;gap:12px}
+.sc-metrics{border-left:0;border-right:0;border-top:1px solid var(--line-1);border-bottom:1px solid var(--line-1);padding:10px 0;justify-content:space-between}
+.m-col{align-items:flex-start}
+.sc-actions{justify-content:flex-end}
+}
+/* Кнопка экспорта с выбором формата: основная часть отдаёт JSON, стрелка
+   раскрывает CSV. Раньше формат выбирался отдельным выпадающим списком, и он
+   не помещался в шапку по макету. */
+.split-act{position:relative;display:inline-flex}
+.split-act>.act-secondary:first-child{border-top-right-radius:0;border-bottom-right-radius:0}
+.split-act .caret{padding:7px 7px;margin-left:-1px;border-top-left-radius:0;border-bottom-left-radius:0}
+.split-act .caret svg{width:12px;height:12px}
+.mini-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:40;min-width:104px;background:var(--bg-1);border:1px solid var(--line-2);border-radius:9px;padding:4px;box-shadow:var(--shadow-modal)}
+.mini-menu button{display:block;width:100%;text-align:left;padding:6px 9px;border:0;border-radius:6px;background:transparent;color:var(--fg-dim);font:inherit;font-size:var(--fs-sm);cursor:pointer}
+.mini-menu button:hover{background:var(--bg-2);color:var(--fg)}

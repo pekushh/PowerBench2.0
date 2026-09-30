@@ -9,19 +9,21 @@ import {
   type SchemeRow,
   type SettingsDto,
 } from "../api";
-import { Badge, Button, Modal, Seg, Spot } from "./ui";
 import {
+  ExportIcon,
+  GridIcon,
+  ListViewIcon,
   MinusCircleIcon,
   MinusIcon,
-  PowerIcon,
   SearchIcon,
   StarFilledIcon,
   StarOutlineIcon,
   TrashIcon,
 } from "./icons";
+import { Badge, Button, Modal, Seg, Spot } from "./ui";
 import { pushToast } from "../store";
 
-type Filter = "all" | "fav" | "excluded";
+type Filter = "all" | "fav" | "excluded" | "dup";
 
 // Ветка `restore` удалена как мёртвая: восстановление стандартных схем живёт
 // на странице «Схемы» (SchemesPage), а отсюда `setConfirm` вызывался только с
@@ -327,6 +329,42 @@ export function SchemePicker({
   );
 }
 
+/**
+ * Три встроенные схемы Windows. Сверяем по GUID, а не по названию: названия
+ * локализованы («Сбалансированная», «Balanced», «Equilibrato»), а GUID у них
+ * неизменны и служат для этого официально.
+ */
+const WINDOWS_BUILTIN_GUIDS = [
+  "381b4222-f694-41f0-9685-ff5bb260df2e", // Сбалансированная
+  "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", // Высокая производительность
+  "a1841308-3541-4fab-bc81-f71556f20b4a", // Экономия энергии
+];
+
+/**
+ * Номер копии внутри группы одноимённых схем и размер группы.
+ *
+ * Копии — это разные люди, назвавшие схему одинаково. Схемы с одинаковым
+ * именем измеряются отдельно, но выбирать придётся одну, и без метки нельзя
+ * понять, какая именно. Первую в группе считаем оригиналом и не помечаем,
+ * остальным показываем «Копия #k/m».
+ */
+function copyMark(list: SchemeRow[]): Map<string, { copy: number; of: number }> {
+  const groups = new Map<string, SchemeRow[]>();
+  for (const s of list) {
+    const key = (s.name || "").trim().toLowerCase();
+    if (!key) continue;
+    const g = groups.get(key);
+    if (g) g.push(s);
+    else groups.set(key, [s]);
+  }
+  const out = new Map<string, { copy: number; of: number }>();
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    g.forEach((s, i) => out.set(s.guid, { copy: i + 1, of: g.length }));
+  }
+  return out;
+}
+
 export default function SchemeTiles({
   schemes,
   settings,
@@ -335,6 +373,7 @@ export default function SchemeTiles({
   exportTarget,
   onSelectExport,
   onChanged,
+  headerMeta,
 }: {
   schemes: SchemeRow[];
   settings: SettingsDto | null;
@@ -343,10 +382,14 @@ export default function SchemeTiles({
   exportTarget?: string | null;
   onSelectExport?: (guid: string | null) => void;
   onChanged: () => void;
+  /** Готовая сводка для шапки страницы («N схем · дубликатов по имени: M»). */
+  headerMeta?: React.ReactNode;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  const [view, setView] = useState<"grid" | "list">("grid");
   const [confirm, setConfirm] = useState<Confirm>(null);
+  const [copied, setCopied] = useState<string | null>(null);
 
   const favs = useMemo(
     () => new Set((settings?.favorite_schemes ?? []).map((g) => g.toLowerCase())),
@@ -355,6 +398,17 @@ export default function SchemeTiles({
   const excluded = useMemo(
     () => new Set((settings?.excluded_schemes ?? []).map((g) => g.toLowerCase())),
     [settings],
+  );
+  const copies = useMemo(() => copyMark(schemes), [schemes]);
+
+  const counts = useMemo(
+    () => ({
+      all: schemes.length,
+      fav: schemes.filter((s) => favs.has(s.guid.toLowerCase())).length,
+      excluded: schemes.filter((s) => excluded.has(s.guid.toLowerCase())).length,
+      dup: copies.size,
+    }),
+    [schemes, favs, excluded, copies],
   );
 
   const visible = useMemo(() => {
@@ -365,10 +419,11 @@ export default function SchemeTiles({
           return false;
         if (filter === "fav" && !favs.has(s.guid.toLowerCase())) return false;
         if (filter === "excluded" && !excluded.has(s.guid.toLowerCase())) return false;
+        if (filter === "dup" && !copies.has(s.guid)) return false;
         return true;
       })
       .sort(schemeOrder);
-  }, [schemes, query, filter, favs, excluded]);
+  }, [schemes, query, filter, favs, excluded, copies]);
 
   // Записи настроек выстраиваются в очередь: два быстрых щелчка раньше читали
   // один и тот же снимок `settings`, и вторая запись затирала первую.
@@ -401,14 +456,24 @@ export default function SchemeTiles({
     patchSettings({ excluded_schemes: flip(settings?.excluded_schemes, guid) });
   };
 
-  const runAction = async (kind: string, guid?: string | null, path?: string | null) => {
+  const activate = async (s: SchemeRow) => {
+    if (s.active) return;
     try {
-      const res = await commands.schemeAction(kind, guid ?? null, path ?? null);
-      pushToast(
-        "okk",
-        kind === "activate" ? "Схема активирована" : kind === "duplicate" ? `Дубль: ${res}` : "Готово",
-      );
+      await commands.schemeAction("activate", s.guid, null);
+      pushToast("okk", `Схема «${s.name || s.guid}» активирована`);
       onChanged();
+    } catch (e) {
+      pushToast("err", String(e));
+    }
+  };
+
+  // Полный GUID в буфер обмена. В карточке он показан коротким: 36 символов
+  // занимали строку целиком, а для `powercfg` нужен именно полный.
+  const copyGuid = async (guid: string) => {
+    try {
+      await navigator.clipboard.writeText(guid);
+      setCopied(guid);
+      window.setTimeout(() => setCopied((cur) => (cur === guid ? null : cur)), 1000);
     } catch (e) {
       pushToast("err", String(e));
     }
@@ -425,147 +490,201 @@ export default function SchemeTiles({
     }
   };
 
+  const tabs: { value: Filter; label: string; count: number }[] = [
+    { value: "all", label: "Все", count: counts.all },
+    { value: "fav", label: "Избранные", count: counts.fav },
+    { value: "excluded", label: "Исключённые", count: counts.excluded },
+    { value: "dup", label: "Дубликаты", count: counts.dup },
+  ];
+
   return (
-    <div>
-      <div className="wizard-toolbar" style={{ marginBottom: 10 }}>
-        <div className="search-box">
-          <SearchIcon />
-          <input
-            id="schemes-search"
-            className="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Поиск схемы по имени или GUID…"
-            aria-label="Поиск схемы питания по имени или GUID"
-          />
-        </div>
-        <Seg
-          options={[
-            { value: "all", label: "Все" },
-            { value: "fav", label: "Избранные" },
-            { value: "excluded", label: "Исключённые" },
-          ]}
-          value={filter}
-          onChange={setFilter}
-        />
-      </div>
-      <div className="scheme-tiles">
-        {visible.map((s) => {
-          const isFav = favs.has(s.guid.toLowerCase());
-          const isEx = excluded.has(s.guid.toLowerCase());
-          const isSel = exportTarget === s.guid;
-          return (
-            <div
-              key={s.guid}
-              className={`tile-scheme${s.active ? " active" : ""}${isSel ? " sel" : ""}${isEx ? " excluded" : ""}`}
-              // Выбор для экспорта — тоже интерактивный элемент: раньше это
-              // был `<div>` без роли и клавиатуры.
-              role={onSelectExport ? "button" : undefined}
-              tabIndex={onSelectExport ? 0 : undefined}
-              aria-pressed={isSel}
-              onClick={() => onSelectExport?.(s.guid)}
-              onKeyDown={(e) => {
-                if (!onSelectExport) return;
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onSelectExport(s.guid);
-                }
-              }}
-              title="Клик — выбрать для экспорта"
-            >
-              <div className="scheme-card-name">{s.name || "Без названия"}</div>
-              {/* Порядок блоков и сами стили — те же, что у плитки в мастере
-                  бенчмарка: окно выбора схем и страница «Схемы» должны
-                  выглядеть одинаково, иначе их невозможно сопоставлять. */}
-              <div className="scheme-card-badges">
-                {s.active ? <Badge kind="ok">АКТИВНА</Badge> : null}
-                {isEx ? <Badge kind="plain">исключена</Badge> : null}
-              </div>
-              <div className="scheme-card-id" title="ID схемы">
-                {s.guid}
-              </div>
-              <div className="scheme-card-foot">
-                <button
-                  type="button"
-                  className="icon-btn ts-act"
-                  title={s.active ? "Уже активна" : "Сделать активной"}
-                  aria-label={`Сделать схемой по умолчанию: ${s.name || s.guid}`}
-                  disabled={s.active || !isAdmin || running}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void runAction("activate", s.guid);
-                  }}
-                >
-                  <PowerIcon />
-                </button>
-                <button
-                  type="button"
-                  className={`icon-btn${isFav ? " on-fav" : ""}`}
-                  title={isFav ? "Убрать из избранного" : "В избранное"}
-                  aria-label={
-                    isFav
-                      ? `Убрать «${s.name || s.guid}» из избранного`
-                      : `Добавить «${s.name || s.guid}» в избранное`
-                  }
-                  aria-pressed={isFav}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggleFav(s.guid);
-                  }}
-                >
-                  {isFav ? <StarFilledIcon /> : <StarOutlineIcon />}
-                </button>
-                <button
-                  type="button"
-                  className={`icon-btn${isEx ? " on-ex" : ""}`}
-                  title={isEx ? "Включить в бенчмарк" : "Исключить из бенчмарка"}
-                  aria-label={
-                    isEx
-                      ? `Вернуть «${s.name || s.guid}» в бенчмарк`
-                      : `Исключить «${s.name || s.guid}» из бенчмарка`
-                  }
-                  aria-pressed={isEx}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggleExcluded(s.guid);
-                  }}
-                >
-                  <MinusCircleIcon />
-                </button>
-                <span className="ts-grow" />
-                <button
-                  type="button"
-                  className="icon-btn on-del"
-                  title="Удалить схему"
-                  aria-label={`Удалить схему «${s.name || s.guid}»`}
-                  disabled={!isAdmin || running}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setConfirm({ kind: "delete", guid: s.guid, name: s.name });
-                  }}
-                >
-                  <TrashIcon />
-                </button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      {visible.length === 0 ? (
-        <div className="glass inset">
-          {/* Разные причины пустого списка требуют разных действий, поэтому
-              сообщаем именно ту, что сработала. */}
-          <div className="muted">
-            {query.trim()
-              ? `По запросу «${query.trim()}» ничего не найдено.`
-              : filter === "fav"
-                ? "Нет избранных схем. Отметьте звездой на плитке."
-                : filter === "excluded"
-                  ? "Нет исключённых схем."
-                  : "Нет схем для отображения."}
+    <div className="schemes-block">
+      {headerMeta ? <div className="schemes-meta">{headerMeta}</div> : null}
+      <div className="schemes-toolbar">
+        <div className="toolbar-left">
+          <div className="search-box sch-search">
+            <SearchIcon />
+            <input
+              id="schemes-search"
+              className="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Поиск по названию или GUID…"
+              aria-label="Поиск схемы питания по названию или GUID"
+            />
+          </div>
+          <div className="filter-tabs" role="tablist" aria-label="Фильтр схем">
+            {tabs.map((t) => (
+              <button
+                key={t.value}
+                type="button"
+                role="tab"
+                aria-selected={filter === t.value}
+                className={`ftab${filter === t.value ? " active" : ""}`}
+                onClick={() => setFilter(t.value)}
+              >
+                <span>{t.label}</span>
+                <span className="cnt">{t.count}</span>
+              </button>
+            ))}
           </div>
         </div>
-      ) : null}
+        <div className="view-switch" role="group" aria-label="Вид списка">
+          <button
+            type="button"
+            className={`vbtn${view === "grid" ? " active" : ""}`}
+            title="Сетка карточек"
+            aria-pressed={view === "grid"}
+            onClick={() => setView("grid")}
+          >
+            <GridIcon />
+          </button>
+          <button
+            type="button"
+            className={`vbtn${view === "list" ? " active" : ""}`}
+            title="Компактный список"
+            aria-pressed={view === "list"}
+            onClick={() => setView("list")}
+          >
+            <ListViewIcon />
+          </button>
+        </div>
+      </div>
+
+      {visible.length === 0 ? (
+        <div className="empty-card">
+          {query.trim()
+            ? `По запросу «${query.trim()}» ничего не найдено.`
+            : filter === "fav"
+              ? "Нет избранных схем. Отметьте звездой на карточке."
+              : filter === "excluded"
+                ? "Нет исключённых схем."
+                : filter === "dup"
+                  ? "Схем с одинаковыми названиями нет."
+                  : "Нет схем для отображения."}
+        </div>
+      ) : (
+        <div className={`schemes-grid${view === "list" ? " list-mode" : ""}`}>
+          {visible.map((s) => {
+            const isFav = favs.has(s.guid.toLowerCase());
+            const isEx = excluded.has(s.guid.toLowerCase());
+            const isSel = exportTarget === s.guid;
+            const copy = copies.get(s.guid);
+            const isWin = WINDOWS_BUILTIN_GUIDS.includes(s.guid.toLowerCase());
+            const canAct = isAdmin && !running;
+            return (
+              <article
+                key={s.guid}
+                className={`scheme-card${s.active ? " is-active" : ""}${
+                  isEx ? " is-excluded" : ""
+                }${isSel ? " is-sel" : ""}`}
+              >
+                <div className="sc-head">
+                  <span className="sc-name" title={s.name || s.guid}>
+                    {s.name || "Без названия"}
+                  </span>
+                  {copy && copy.copy > 1 ? (
+                    <span
+                      className="sc-badge dup"
+                      title={`Схем с таким именем: ${copy.of}`}
+                    >
+                      Копия #{copy.copy}/{copy.of}
+                    </span>
+                  ) : null}
+                  {isWin ? (
+                    <span className="sc-badge sys" title="Встроенная схема Windows">
+                      Windows
+                    </span>
+                  ) : null}
+                  {isEx ? <span className="sc-badge ex">исключена</span> : null}
+                </div>
+
+                <div className="sc-foot">
+                  <div className="sc-left-act">
+                    <button
+                      type="button"
+                      className="btn-power"
+                      disabled={s.active || !canAct}
+                      title={
+                        s.active
+                          ? "Схема уже активна"
+                          : !isAdmin
+                            ? "Требуются права администратора"
+                            : running
+                              ? "Во время замера схемы менять нельзя"
+                              : "Сделать активной"
+                      }
+                      onClick={() => void activate(s)}
+                    >
+                      {s.active ? "✓ Активна" : "Включить"}
+                    </button>
+                    <button
+                      type="button"
+                      className="guid-chip"
+                      title={`Копировать GUID: ${s.guid}`}
+                      onClick={() => void copyGuid(s.guid)}
+                    >
+                      {copied === s.guid ? "Скопировано" : `${s.guid.slice(0, 8)}…`}
+                    </button>
+                    {onSelectExport ? (
+                      <button
+                        type="button"
+                        className={`sc-export${isSel ? " on" : ""}`}
+                        title={isSel ? "Выбрана для экспорта" : "Выбрать для экспорта и дублирования"}
+                        aria-pressed={isSel}
+                        onClick={() => onSelectExport(isSel ? null : s.guid)}
+                      >
+                        <ExportIcon />
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="sc-icons">
+                    <button
+                      type="button"
+                      className={`ic-btn fav${isFav ? " on" : ""}`}
+                      title={isFav ? "Убрать из избранного" : "В избранное"}
+                      aria-label={
+                        isFav
+                          ? `Убрать «${s.name || s.guid}» из избранного`
+                          : `Добавить «${s.name || s.guid}» в избранное`
+                      }
+                      aria-pressed={isFav}
+                      onClick={() => toggleFav(s.guid)}
+                    >
+                      {isFav ? <StarFilledIcon /> : <StarOutlineIcon />}
+                    </button>
+                    <button
+                      type="button"
+                      className={`ic-btn excl${isEx ? " on" : ""}`}
+                      title={isEx ? "Включить в бенчмарк" : "Исключить из бенчмарка"}
+                      aria-label={
+                        isEx
+                          ? `Вернуть «${s.name || s.guid}» в бенчмарк`
+                          : `Исключить «${s.name || s.guid}» из бенчмарка`
+                      }
+                      aria-pressed={isEx}
+                      onClick={() => toggleExcluded(s.guid)}
+                    >
+                      <MinusCircleIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className="ic-btn del"
+                      title="Удалить схему"
+                      aria-label={`Удалить схему «${s.name || s.guid}»`}
+                      disabled={!canAct}
+                      onClick={() => setConfirm({ kind: "delete", guid: s.guid, name: s.name })}
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+
       <Modal
         open={confirm !== null}
         title="Удалить схему?"

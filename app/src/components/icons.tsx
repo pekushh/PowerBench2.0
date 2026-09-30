@@ -221,8 +221,7 @@ export function ExportIcon(props: SVGProps<SVGSVGElement>) {
 
 /** Лупа (поиск). */
 export function SearchIcon(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" {...props}>
+  return (    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" {...props}>
       <path
         d="M8.75 3.5a5.25 5.25 0 1 0 0 10.5a5.25 5.25 0 0 0 0-10.5Z"
         stroke="currentColor"
@@ -230,5 +229,57 @@ export function SearchIcon(props: SVGProps<SVGSVGElement>) {
       />
       <path d="m12.5 12.5 4 4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
     </svg>
+  );
+}
+
+/** Плюс (импорт схемы из файла). */
+export function PlusIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" {...props}>
+      <path d="M12 5.5v13M5.5 12h13" />
+    </Base>
+  );
+}
+
+/** Круговая стрелка (вернуть стандартные схемы, обновить список). */
+export function RestoreIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M3 4.5V11h6.5" />
+      <path d="M4.6 12.2A8.5 8.5 0 1 0 7 5.6L3 9.5" />
+    </Base>
+  );
+}
+
+/** Сетка (вид списка схем плитками). */
+export function GridIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={2} {...props}>
+      <rect x="3.5" y="3.5" width="7" height="7" rx="1.5" />
+      <rect x="13.5" y="3.5" width="7" height="7" rx="1.5" />
+      <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
+      <rect x="3.5" y="13.5" width="7" height="7" rx="1.5" />
+    </Base>
+  );
+}
+
+/** Список (компактный вид схем). */
+export function ListViewIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" {...props}>
+      <path d="M8.5 6.5H20M8.5 12H20M8.5 17.5H20" />
+      <path d="M4 6.5h.01M4 12h.01M4 17.5h.01" />
+    </Base>
+  );
+}
+
+/** Документ (HTML-отчёт). */
+export function ReportIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M14 2.5H6.5a1.5 1.5 0 0 0-1.5 1.5v16a1.5 1.5 0 0 0 1.5 1.5h11a1.5 1.5 0 0 0 1.5-1.5V7.5Z" />
+      <path d="M14 2.5V7.5h5" />
+      <path d="M8.5 13h7M8.5 16.5h7" />
+    </Base>
   );
 }

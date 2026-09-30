@@ -8,7 +8,16 @@ import {
   type HistoryRow,
   type SessionJson,
 } from "../api";
-import { Badge, Button, Dropdown, FadeScroll, Modal, Panel } from "../components/ui";
+import { Badge, Button, FadeScroll, Modal } from "../components/ui";
+import {
+  ChevronIcon,
+  ExportIcon,
+  FolderIcon,
+  ReportIcon,
+  RestoreIcon,
+  SearchIcon,
+  TrashIcon,
+} from "../components/icons";
 import { pushToast } from "../store";
 
 type SortKey = "started" | "level" | "margin" | "stability";
@@ -112,6 +121,28 @@ export function fmtStamp(stamp: string): string {
 export default function ResultsPage() {
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [sort, setSort] = useState<SortKey>("started");
+  const [mode, setMode] = useState<"all" | "screening" | "full">("all");
+  const [query, setQuery] = useState("");
+  // Формат экспорта по умолчанию JSON, а CSV берётся из выпадающей части
+  // кнопки: раньше формат выбирался в выпадающем списке, и он не помещался
+  // в шапку по макету, но убирать выбор формата нельзя.
+  const [fmtOpen, setFmtOpen] = useState(false);
+  const fmtRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!fmtOpen) return;
+    const away = (e: PointerEvent) => {
+      if (!fmtRef.current?.contains(e.target as Node)) setFmtOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFmtOpen(false);
+    };
+    document.addEventListener("pointerdown", away);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("pointerdown", away);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [fmtOpen]);
   const [stats, setStats] = useState<{
     free_bytes: number;
     history_bytes: number;
@@ -250,66 +281,164 @@ export default function ResultsPage() {
 
   const lowDisk = stats != null && stats.free_bytes < 250 * 1024 * 1024;
 
+  // Режим замера различаем по числу завершённых раундов, а не по строке
+  // уровня: при одном прогоне на схему доверительный интервал не строится, и
+  // такой результат ничего не утверждает, даже если уровень называется иначе.
+  const modeOf = (r: HistoryRow): "screening" | "full" =>
+    r.rounds_completed >= 2 ? "full" : "screening";
+
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return sorted.filter((r) => {
+      if (mode !== "all" && !r.readable) return false;
+      if (mode !== "all" && modeOf(r) !== mode) return false;
+      if (q) {
+        const hay = `${r.scheme_name} ${r.file_name} ${r.started_label} ${r.level_label}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [sorted, mode, query]);
+
   return (
-    <div className="page fill">
+    <div className="page fill results-page">
       <div className="page-head">
         <h1>Результаты</h1>
-        <span className="sub">
-          {rows.length} {plural(rows.length, "запись", "записи", "записей")}
-        </span>
         <div className="actions">
-          <Dropdown
-            title="Сортировка"
-            value={sort}
-            onChange={setSort}
-            options={[
-              { value: "started", label: "По дате" },
-              { value: "level", label: "По уровню" },
-              { value: "margin", label: "По перевесу" },
-              { value: "stability", label: "По стабильности" },
-            ]}
-          />
-          <Button variant="ghost" onClick={() => void exportAll("json")}>
-            Экспорт…
-          </Button>
-          <Button
-            variant="ghost"
-            title="Открыть папку с результатами"
+          <div className="split-act" ref={fmtRef}>
+            <button
+              type="button"
+              className="act-secondary"
+              title="Экспортировать результаты в JSON"
+              onClick={() => void exportAll("json")}
+            >
+              <ExportIcon />
+              Экспорт…
+            </button>
+            <button
+              type="button"
+              className="act-secondary caret"
+              title="Выбрать формат экспорта"
+              aria-label="Формат экспорта"
+              aria-expanded={fmtOpen}
+              onClick={() => setFmtOpen((v) => !v)}
+            >
+              <ChevronIcon />
+            </button>
+            {fmtOpen ? (
+              <div className="mini-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setFmtOpen(false);
+                    void exportAll("json");
+                  }}
+                >
+                  JSON
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setFmtOpen(false);
+                    void exportAll("csv");
+                  }}
+                >
+                  CSV
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            className="act-secondary"
+            title="Открыть папку с отчётами в Проводнике"
             onClick={() => commands.historyOpenFolder().catch((e) => pushToast("err", String(e)))}
           >
+            <FolderIcon />
             Папка
-          </Button>
-          <Button variant="ghost" title="Обновить список" onClick={refresh}>
+          </button>
+          <button
+            type="button"
+            className="act-secondary"
+            title="Пересканировать папку результатов"
+            onClick={refresh}
+          >
+            <RestoreIcon />
             Обновить
-          </Button>
-        </div>
-        <div className="page-head-line">
-          <span className="storage-line">
-            {lowDisk ? <Badge kind="warn">Место на диске заканчивается</Badge> : null}
-            Свободно {fmtBytes(stats?.free_bytes ?? 0)} · история {fmtBytes(stats?.history_bytes ?? 0)}
-            {stats && stats.max_sessions > 0
-              ? ` · хранится не более ${stats.max_sessions} ${plural(
-                  stats.max_sessions,
-                  "сессии",
-                  "сессий",
-                  "сессий",
-                )}`
-              : ""}
-          </span>
+          </button>
         </div>
       </div>
 
-      <FadeScroll className="results-list fill-list">
-        {sorted.length === 0 ? (
-          <Panel title="Нет сопоставимых сессий">
-            <div className="muted">Завершённые сессии с данными по схемам появятся здесь.</div>
-          </Panel>
-        ) : (
-          sorted.map((r) => (
-            <div
+      <div className="results-meta-line">
+        <span className="schemes-meta">
+          <b>{rows.length}</b>
+          {stats && stats.max_sessions > 0 ? ` из ${stats.max_sessions}` : ""} сессий
+          {stats ? ` · ${fmtBytes(stats.history_bytes)}` : ""}
+        </span>
+        {lowDisk ? <Badge kind="warn">Место на диске заканчивается</Badge> : null}
+      </div>
+
+      <div className="results-toolbar">
+        <div className="search-box res-search">
+          <SearchIcon />
+          <input
+            className="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Поиск по схеме или дате…"
+            aria-label="Поиск по результатам"
+          />
+        </div>
+        <div className="toolbar-right">
+          <div className="mode-tabs" role="tablist" aria-label="Режим замера">
+            {(
+              [
+                { value: "all", label: "Все" },
+                { value: "screening", label: "Скрининг" },
+                { value: "full", label: "Полный замер" },
+              ] as const
+            ).map((t) => (
+              <button
+                key={t.value}
+                type="button"
+                role="tab"
+                aria-selected={mode === t.value}
+                className={`mtab${mode === t.value ? " active" : ""}`}
+                onClick={() => setMode(t.value)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <select
+            className="sort-select"
+            value={sort}
+            aria-label="Сортировка"
+            onChange={(e) => setSort(e.target.value as SortKey)}
+          >
+            <option value="started">По дате</option>
+            <option value="level">По уровню</option>
+            <option value="margin">По перевесу</option>
+            <option value="stability">По стабильности</option>
+          </select>
+        </div>
+      </div>
+
+      {shown.length === 0 ? (
+        <div className="empty-card">
+          {rows.length === 0
+            ? "Завершённые сессии с данными по схемам появятся здесь."
+            : "Подходящих сессий не найдено"}
+        </div>
+      ) : (
+        <FadeScroll className="session-list fill-list">
+          {shown.map((r) => (
+            <article
               key={r.file_name}
-              className="glass lift res-row"
-              // Строка открывает сессию кликом; раньше это был `<div>` без
+              className={`session-card${r.readable ? "" : " is-unreadable"}`}
+              // Карточка открывает сессию кликом; раньше это был `<div>` без
               // роли и клавиатуры, то есть недоступный с клавиатуры элемент.
               role={r.readable ? "button" : undefined}
               tabIndex={r.readable ? 0 : undefined}
@@ -322,52 +451,81 @@ export default function ResultsPage() {
                 }
               }}
             >
-              <div style={{ minWidth: 0 }}>
-                <div className="res-name">{r.readable ? r.scheme_name || "Сессия без схемы" : r.file_name}</div>
-                <div className="res-meta">
-                  <span className="res-when">{r.readable ? fmtStamp(r.started_label) : "—"}</span>
-                  {r.readable ? <Badge kind={levelKind(r.level)}>{r.level_label}</Badge> : <Badge kind="plain">Не завершено</Badge>}
-                  <span className="num">
-                    {r.schemes} {plural(r.schemes, "схема", "схемы", "схем")}
+              <div className="sc-main">
+                <div className="sc-top">
+                  {r.readable ? <span className="sc-winner-tag">Лидер</span> : null}
+                  <span className="sc-title">
+                    {r.readable ? r.scheme_name || "Сессия без схемы" : r.file_name}
                   </span>
-                  {r.throughput != null ? (
-                    <span className="num">{f1(r.throughput, 0)} тик/с</span>
-                  ) : null}
-                  {r.margin != null && Number.isFinite(r.margin) ? (
-                    <span className="num">ДИ ±{r.margin.toFixed(1)}</span>
-                  ) : null}
-                  {r.early_stopped ? <Badge kind="plain">ранняя остановка</Badge> : null}
-                  {!r.readable && r.error ? (
-                    <span className="num break" title={r.error}>
-                      {r.error}
-                    </span>
-                  ) : null}
+                </div>
+                <div className="sc-sub">
+                  <span>{r.readable ? fmtStamp(r.started_label) : "—"}</span>
+                  <span className="dot-sep">·</span>
+                  <span className="mode-pill">
+                    {!r.readable
+                      ? "Не завершено"
+                      : modeOf(r) === "full"
+                        ? "Полный"
+                        : "Скрининг"}
+                  </span>
+                  {r.early_stopped ? <span className="mode-pill warn">ранняя остановка</span> : null}
                 </div>
               </div>
-              <div className="res-acts">
+
+              <div className="sc-metrics">
+                <div className="m-col" title="Медианный throughput лидера">
+                  <span className="m-label">Результат</span>
+                  <span className="m-val score">
+                    {f1(r.throughput, 0)}
+                    <small>тик/с</small>
+                  </span>
+                </div>
+                <div className="m-col">
+                  <span className="m-label">Схем</span>
+                  <span className="m-val">{r.schemes}</span>
+                </div>
+                <div className="m-col" title="Доверительный интервал (разброс оценки)">
+                  <span className="m-label">Погрешность</span>
+                  <span className="m-val">
+                    {r.margin != null && Number.isFinite(r.margin)
+                      ? `±${r.margin.toFixed(1)}`
+                      : "—"}
+                  </span>
+                </div>
+              </div>
+
+              <div className="sc-actions">
                 {r.readable ? (
-                  <Button sm variant="ghost" title="Открыть HTML-отчёт в браузере" onClick={(e) => {
-                    e.stopPropagation();
-                    openReport(r.plan_guid);
-                  }}>
-                    HTML
-                  </Button>
+                  <button
+                    type="button"
+                    className="btn-report"
+                    title="Открыть HTML-отчёт в браузере"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openReport(r.plan_guid);
+                    }}
+                  >
+                    <ReportIcon />
+                    Отчёт HTML
+                  </button>
                 ) : null}
-                <Button
-                  sm
-                  variant="ghost"
+                <button
+                  type="button"
+                  className="btn-del"
+                  title="Удалить запись"
+                  aria-label={`Удалить запись ${r.readable ? r.scheme_name || r.plan_guid : r.file_name}`}
                   onClick={(e) => {
                     e.stopPropagation();
                     void deleteRow(r);
                   }}
                 >
-                  Удалить
-                </Button>
+                  <TrashIcon />
+                </button>
               </div>
-            </div>
-          ))
-        )}
-      </FadeScroll>
+            </article>
+          ))}
+        </FadeScroll>
+      )}
 
       <Modal open={detail !== null} title="Результат сессии" wide onClose={() => setDetail(null)}>
         {detail ? (

@@ -1,10 +1,10 @@
 // Страница «Схемы»: управление схемами питания.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { commands, type SchemeRow, type SettingsDto } from "../api";
 import { Badge, Button, Modal } from "../components/ui";
-import { ExportIcon } from "../components/icons";
+import { ExportIcon, PlusIcon, RestoreIcon } from "../components/icons";
 import SchemeTiles from "../components/SchemeTiles";
 import { pushToast, useSession } from "../store";
 
@@ -96,28 +96,43 @@ export default function SchemesPage() {
   };
 
   const selName = schemes.find((s) => s.guid === exportTarget)?.name ?? "";
+  const dupCount = useMemo(() => {
+    const names = new Map<string, number>();
+    for (const s of schemes) {
+      const key = (s.name || "").trim().toLowerCase();
+      if (!key) continue;
+      names.set(key, (names.get(key) ?? 0) + 1);
+    }
+    let extra = 0;
+    for (const n of names.values()) if (n > 1) extra += n - 1;
+    return extra;
+  }, [schemes]);
 
   return (
     <div className="page">
       <div className="page-head">
         <h1>Схемы питания</h1>
-        <span className="sub">
-          {schemes.length}{" "}
-          {schemes.length % 10 === 1 && schemes.length % 100 !== 11
-            ? "схема"
-            : schemes.length % 10 >= 2 &&
-                schemes.length % 10 <= 4 &&
-                !(schemes.length % 100 >= 12 && schemes.length % 100 <= 14)
-              ? "схемы"
-              : "схем"}
-        </span>
         <div className="actions">
-          <Button variant="ghost" disabled={busy || !isAdmin} title={isAdmin ? undefined : "Требуются права администратора"} onClick={() => void importScheme()}>
+          <button
+            type="button"
+            className="act-primary"
+            disabled={busy || !isAdmin}
+            title={isAdmin ? "Импортировать схему питания из файла .pow" : "Требуются права администратора"}
+            onClick={() => void importScheme()}
+          >
+            <PlusIcon />
             Импорт .pow
-          </Button>
-          <Button variant="ghost" disabled={busy || !isAdmin} title={isAdmin ? undefined : "Требуются права администратора"} onClick={() => setAskRestore(true)}>
+          </button>
+          <button
+            type="button"
+            className="act-secondary"
+            disabled={busy || !isAdmin}
+            title={isAdmin ? "Восстановить стандартные схемы Windows" : "Требуются права администратора"}
+            onClick={() => setAskRestore(true)}
+          >
+            <RestoreIcon />
             Вернуть стандартные схемы
-          </Button>
+          </button>
         </div>
       </div>
       {!isAdmin ? (
@@ -153,6 +168,19 @@ export default function SchemesPage() {
         exportTarget={exportTarget}
         onSelectExport={setExportTarget}
         onChanged={refresh}
+        headerMeta={
+          <>
+            <b>{schemes.length}</b>{" "}
+            {schemes.length % 10 === 1 && schemes.length % 100 !== 11
+              ? "схема"
+              : schemes.length % 10 >= 2 &&
+                  schemes.length % 10 <= 4 &&
+                  !(schemes.length % 100 >= 12 && schemes.length % 100 <= 14)
+                ? "схемы"
+                : "схем"}{" "}
+            · дубликатов по имени: <b>{dupCount}</b>
+          </>
+        }
       />
       <Modal
         open={askRestore}

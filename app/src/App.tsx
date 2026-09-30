@@ -285,26 +285,30 @@ export default function App() {
               Остальные страницы монтируются по требованию: раньше все пять
               висели в DOM, скрытые `display:none`, и каждая держала свои
               IPC-вызовы, подписки и таймеры всё время работы приложения. */}
-          <div className={`page-host${leaving ? " leaving" : ""}`}>
+          <div
+            className={`page-host${shown === "test" ? " on" : ""}${
+              leaving ? " leaving" : ""
+            }`}
+          >
             <BenchmarkPage active={shown === "test" && !leaving} />
           </div>
           {shown === "schemes" ? (
-            <div className="page-host on">
+            <div className={`page-host on${leaving ? " leaving" : ""}`}>
               <SchemesPage active={!leaving} />
             </div>
           ) : null}
           {shown === "results" ? (
-            <div className="page-host on">
+            <div className={`page-host on${leaving ? " leaving" : ""}`}>
               <ResultsPage active={!leaving} />
             </div>
           ) : null}
           {shown === "log" ? (
-            <div className="page-host on">
+            <div className={`page-host on${leaving ? " leaving" : ""}`}>
               <LogPage active={!leaving} />
             </div>
           ) : null}
           {shown === "settings" ? (
-            <div className="page-host on">
+            <div className={`page-host on${leaving ? " leaving" : ""}`}>
               <SettingsPage onAppearance={onAppearance} active={!leaving} />
             </div>
           ) : null}

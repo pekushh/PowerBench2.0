@@ -25,7 +25,10 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 *::-webkit-scrollbar-corner{background:transparent}
 .shell{height:100vh;display:flex;flex-direction:column;gap:0;padding:10px;background:var(--bg-0)}
 .titlebar{flex:0 0 48px;display:flex;align-items:center;gap:4px;padding:0 10px 0 16px;background:var(--bg-1);border:1px solid var(--line-1);border-bottom:0;border-radius:var(--radius-lg) var(--radius-lg) var(--radius-lg) 0;-webkit-user-select:none;user-select:none}
-.titlebar-brand{display:flex;align-items:center;gap:10px;flex:1;min-width:0;font-size:var(--fs-body);font-weight:600;color:var(--fg);letter-spacing:.1px}
+/* Бренд не тянется: иначе `flex: 1` съедал всё свободное место и название
+   раздела с чипами прижимались к кнопкам окна вплотную. */
+.titlebar-brand{display:flex;align-items:center;gap:10px;flex:0 0 auto;min-width:0;font-size:var(--fs-body);font-weight:600;color:var(--fg);letter-spacing:.1px}
+.titlebar-chips{display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;margin-left:auto;overflow:hidden}
 .titlebar-brand .mark{width:12px;height:12px;border-radius:4px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 52%,#fff));box-shadow:0 0 14px -3px var(--accent)}
 .titlebar-controls{display:flex;align-items:center;gap:4px}
 .titlebar-btn{height:32px;min-width:40px;display:grid;place-items:center;border:0;background:transparent;color:var(--fg-dim);border-radius:var(--radius-sm);cursor:pointer;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
@@ -50,13 +53,13 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .nav-glyph{flex:0 0 auto;display:grid;place-items:center;width:22px;height:22px;color:var(--fg-mute)}
 .nav-glyph svg{width:20px;height:20px}
 .nav-item .icon-btn{margin-left:auto}
-.sidebar.collapsed .nav-label{display:none}
 /* Свёрнутый сайдбар.
    Раньше кнопки оставались шириной во всю колонку, а полоса-акцент (3 px
    у левого края) попадала внутрь квадрата и читалась как случайный штрих.
-   Теперь это ровные 40×40, состояние показывают фон и цвет иконки, а
+   Теперь это ровные квадраты, состояние показывают фон и цвет иконки, а
    нижний блок настроек не отделяется линией и выравнивается по той же
-   сетке, что и остальные пункты. */
+   сетке, что и остальные пункты. Подписи не выключаются через `display`:
+   кадр после сворачивания дёргался бы, панель гаснет плавно. */
 .sidebar.collapsed{padding:12px 8px}
 .sidebar.collapsed .nav-item{
   justify-content:center;padding:0;width:40px;height:40px;margin:0 auto;
@@ -1175,7 +1178,7 @@ button,.ic-btn,.mini-ic,.act-pill,.titlebar-btn{transition-property:background-c
 button:active,.ic-btn:active,.mini-ic:active,.act-pill:active{transform:scale(.975)}
 
 /* --- Ripple для кнопок с фоном --- */
-.btn,.act-primary,.act-secondary,.btn-next,.btn-launch-main,.btn-open-report,.btn-delete,.btn-report,.btn-back,.adv-toggle{position:relative;overflow:hidden}
+.btn,.titlebar-btn,.act-primary,.act-secondary,.btn-next,.btn-launch-main,.btn-open-report,.btn-delete,.btn-report,.btn-back,.adv-toggle{position:relative;overflow:hidden}
 .pb-ripple{position:absolute;border-radius:50%;pointer-events:none;background:radial-gradient(circle,rgba(255,255,255,.34),rgba(255,255,255,0) 70%);animation:pb-ripple 560ms var(--e-out) forwards}
 
 /* --- Подъём карточек только на точном указателе --- */
@@ -1327,15 +1330,16 @@ html[data-motion="off"] *::after{
 .nav-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;transition:opacity var(--t-2) var(--e-out)}
 .nav-glyph{flex:0 0 auto;display:grid;place-items:center}
 
-/* Полоска активного пункта: 3 px, едет между пунктами. */
-.pb-marker{position:absolute;left:0;top:0;width:3px;border-radius:0 3px 3px 0;background:var(--accent);pointer-events:none;z-index:0;transition:transform var(--t-3) var(--e-spring),height var(--t-3) var(--e-spring),opacity var(--t-2) var(--e-out)}
+/* Полоска активного пункта: 3 px, едет между пунктами. Рисуется поверх
+   пунктов: у активного пункта своя заливка, и полоска под ней пропадала бы. */
+.pb-marker{position:absolute;left:0;top:0;width:3px;border-radius:0 3px 3px 0;background:var(--accent);pointer-events:none;z-index:2;transition:transform var(--t-3) var(--e-spring),height var(--t-3) var(--e-spring),opacity var(--t-2) var(--e-out)}
 .sidebar-nav>*,.sidebar-foot>*{position:relative;z-index:1}
 
 /* Сворачивание: подписи схлопываются шириной, группа и палитра исчезают в
-   конце, пункты становятся квадратами. */
-.sidebar.collapsed .nav-label{opacity:0}
-.sidebar.collapsed .nav-item{width:34px;height:34px;padding:0;justify-content:center}
-.sidebar.collapsed .nav-group-title,.sidebar.collapsed .sidebar-palette{opacity:0;width:0;overflow:hidden;margin:0;padding:0;pointer-events:none}
+   конце. Пунктов меню с подписями групп и палитрой в приложении пока нет,
+   правило оставлено на будущее и не ломает текущую разметку. */
+.sidebar.collapsed .nav-label{opacity:0;max-width:0}
+.sidebar.collapsed .nav-item{width:40px;height:40px;padding:0;justify-content:center}
 
 /* Уходящая вкладка: вниз на 6 px и гаснет. */
 .page-host.leaving{animation:pb-slide-out 150ms var(--e-in-out) both}

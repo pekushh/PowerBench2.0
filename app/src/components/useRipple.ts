@@ -10,6 +10,7 @@ import { useEffect } from "react";
 /** Классы кнопок, на которых рисуется волна. */
 const RIPPLE_HOSTS = [
   ".btn",
+  ".titlebar-btn",
   ".act-primary",
   ".act-secondary",
   ".btn-next",

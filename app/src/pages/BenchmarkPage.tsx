@@ -17,7 +17,7 @@ import {
 import { Button, Glass, Spot } from "../components/ui";
 import { GearIcon } from "../components/icons";
 import { useCascade } from "../components/useCascade";
-import { pushToast, setRunning, useSession } from "../store";
+import { pushToast, setRunning, setSectionDetail, useSession } from "../store";
 import { SchemePicker, filterEligible, sortSchemes } from "../components/SchemeTiles";
 
 type Stage = "mode" | "schemes" | "run";
@@ -166,6 +166,19 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
   // раз при монтировании: страницы смонтированы все сразу и переключаются
   // классом, поэтому анимация иначе играла бы только в первый раз.
   const rootRef = useCascade<HTMLDivElement>(active);
+  // Состояние для крошки в шапке: идёт ли замер, какая фаза и сколько схем в
+  // очереди. Название раздела в шапке не дублируется — оно и так крупно
+  // написано на странице.
+  useEffect(() => {
+    const tail =
+      selected.size > 0
+        ? `${selected.size} ${plural(selected.size, "схема", "схемы", "схем")}`
+        : "";
+    const phase = running && telemetry?.phase ? `фаза «${telemetry.phase}»` : "";
+    const head = running ? "Идёт замер" : "Замер не запущен";
+    setSectionDetail([head, phase, tail].filter(Boolean).join(" · "));
+    return () => setSectionDetail("");
+  }, [running, selected.size, telemetry?.phase]);
   // Событие `test-finished` может прийти раньше ответа команды запуска: поток
   // сессии падает ещё до того, как команда вернёт pid. Флаг нужен, чтобы
   // оптимистичное `running = true` не залипло навсегда.

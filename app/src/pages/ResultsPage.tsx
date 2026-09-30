@@ -160,13 +160,16 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
       document.removeEventListener("keydown", esc);
     };
   }, [fmtOpen]);
-  // Уточнение для шапки: «Результаты · 2 сессии».
+  // Состояние для крошки в шапке: «2 сессии · лидер Icyy's Powerplan».
   useEffect(() => {
+    const leader = rows.find((r) => r.readable && r.throughput != null && r.throughput > 0);
+    const count = rows.length > 0 ? `${rows.length} ${plural(rows.length, "сессия", "сессии", "сессий")}` : "";
+    const name = leader ? leader.scheme_name : "";
     setSectionDetail(
-      rows.length > 0 ? `${rows.length} ${plural(rows.length, "сессия", "сессии", "сессий")}` : "",
+      [count, name ? `лидер ${name}` : ""].filter(Boolean).join(" · "),
     );
     return () => setSectionDetail("");
-  }, [rows.length]);
+  }, [rows]);
 
   const [stats, setStats] = useState<{    free_bytes: number;
     history_bytes: number;

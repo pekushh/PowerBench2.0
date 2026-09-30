@@ -2,16 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronIcon, CloseIcon, MinusIcon, MotionIcon } from "./icons";
+import { CrossIcon, MenuIcon, MinusIcon, MotionIcon } from "./icons";
 
 export default function TitleBar({
   collapsed,
   onToggleCollapse,
   motionOff,
   onToggleMotion,
-  section,
-  sectionDetail,
+  status,
   hardware,
+  hardwareFull,
   quietOn,
 }: {
   collapsed: boolean;
@@ -19,21 +19,23 @@ export default function TitleBar({
   /** Моторика выключена ручным выбором (гасится системный — отдельно). */
   motionOff: boolean;
   onToggleMotion: () => void;
-  /** Название текущего раздела и уточнение к нему, например
-   *  `Схемы питания · 111 схем`. */
-  section?: string;
-  sectionDetail?: string;
-  /** Чип железа, например `Ryzen 5 7500F · 32 ГБ`. */
+  /** Состояние приложения для крошки: «Идёт замер · раунд 2», «111 схем»,
+   *  «5000 записей». Название раздела в шапке не дублируется — оно уже
+   *  написано крупно под ней. */
+  status?: string;
+  /** Короткое имя железа для чипа: `Ryzen 5 7500F · 32 ГБ`. */
   hardware?: string;
+  /** Полное название для подсказки. */
+  hardwareFull?: string;
   quietOn?: boolean;
 }) {
-  // Смена названия раздела: ключ по названию пересоздаёт узел, и кросс-фейд
+  // Смена состояния: ключ по тексту пересоздаёт узел, и кросс-фейд
   // (уход вверх, приход снизу) проигрывается снова. Без ключа текст
   // подменялся бы мгновенно.
-  const [sectionShown, setSectionShown] = useState(section);
+  const [statusShown, setStatusShown] = useState(status);
   useEffect(() => {
-    setSectionShown(section);
-  }, [section]);
+    setStatusShown(status);
+  }, [status]);
   function win() {
     try {
       return getCurrentWindow();
@@ -53,77 +55,85 @@ export default function TitleBar({
       }}
     >
       <div className="titlebar-brand" data-tauri-drag-region>
-        <span className="mark" />
+        {/* Переключатель меню — слева, рядом со знаком: так он стоит в
+            VS Code и Figma, и на него смотрят по умолчанию. */}
+        <button
+          type="button"
+          className={`titlebar-btn menu${collapsed ? " off" : ""}`}
+          title={collapsed ? "Развернуть меню (Ctrl+B)" : "Свернуть меню (Ctrl+B)"}
+          aria-label={collapsed ? "Развернуть меню" : "Свернуть меню"}
+          aria-pressed={collapsed}
+          onClick={onToggleCollapse}
+        >
+          <MenuIcon />
+        </button>
+        {/* Знак приложения: плитка с молнией вместо серого кружка, который
+            ничего не сообщал. */}
+        <span className="mark">
+          <MotionIcon width={12} height={12} />
+        </span>
         <span>PowerBench</span>
       </div>
-      {sectionShown ? (
+      {statusShown ? (
         <span className="split" />
       ) : null}
-      {sectionShown ? (
+      {/* В шапке — состояние, а не название раздела: название уже написано
+          крупно под шапкой, а полезно то, чего на экране нет. */}
+      {statusShown ? (
         <span
           className="titlebar-section is-in"
-          key={sectionShown}
+          key={statusShown}
           data-tauri-drag-region
         >
-          <span className="titlebar-section-name">{sectionShown}</span>
-          {sectionDetail ? (
-            <span className="titlebar-section-detail">{sectionDetail}</span>
-          ) : null}
+          {statusShown}
         </span>
       ) : null}
       <div className="titlebar-chips" data-tauri-drag-region>
-        {quietOn ? (
-          <span className="titlebar-chip on" title="Тихий режим включён">
-            <span className="dot-live" />
-            Тихий режим
-          </span>
-        ) : null}
+        <span
+          className={`titlebar-chip${quietOn ? " on" : ""}`}
+          title={quietOn ? "Тихий режим включён" : "Тихий режим выключен"}
+        >
+          <span className="dot-live" />
+          {quietOn ? "Тихий режим: вкл" : "Тихий режим: выкл"}
+        </span>
         {hardware ? (
-          <span className="titlebar-chip" title={hardware}>
+          <span className="titlebar-chip trunc" title={hardwareFull ?? hardware}>
             {hardware}
           </span>
         ) : null}
       </div>
       <div className="titlebar-controls">
+        {/* Кнопка с подписью: одна иконка без подписи читалась как
+            «питание / энергосбережение». */}
         <button
           type="button"
-          className={`titlebar-btn motion${motionOff ? " off" : ""}`}
-          title={motionOff ? "Включить анимации" : "Отключить анимации"}
-          aria-label={motionOff ? "Включить анимации" : "Отключить анимации"}
-          aria-pressed={motionOff}
+          className={`titlebar-toggle${motionOff ? " off" : ""}`}
           onClick={onToggleMotion}
         >
-          <MotionIcon />
+          <MotionIcon width={12} height={12} />
+          Анимации
         </button>
-        <span className="split" />
-        <button
-          type="button"
-          className="titlebar-btn narrow"
-          title={collapsed ? "Развернуть меню" : "Свернуть меню"}
-          aria-label={collapsed ? "Развернуть меню" : "Свернуть меню"}
-          onClick={onToggleCollapse}
-        >
-          <ChevronIcon flip={collapsed} />
-        </button>
-        <span className="split" />
-        <button
-          type="button"
-          className="titlebar-btn"
-          title="Свернуть"
-          aria-label="Свернуть"
-          onClick={() => win()?.minimize().catch(() => undefined)}
-        >
-          <MinusIcon />
-        </button>
-        <button
-          type="button"
-          className="titlebar-btn close"
-          title="Закрыть"
-          aria-label="Закрыть"
-          onClick={() => win()?.close().catch(() => undefined)}
-        >
-          <CloseIcon />
-        </button>
+        {/* Кнопки окна — своим блоком за разделителем. */}
+        <span className="window-group">
+          <button
+            type="button"
+            className="titlebar-btn"
+            title="Свернуть"
+            aria-label="Свернуть"
+            onClick={() => win()?.minimize().catch(() => undefined)}
+          >
+            <MinusIcon />
+          </button>
+          <button
+            type="button"
+            className="titlebar-btn close"
+            title="Закрыть"
+            aria-label="Закрыть"
+            onClick={() => win()?.close().catch(() => undefined)}
+          >
+            <CrossIcon />
+          </button>
+        </span>
       </div>
     </div>
   );

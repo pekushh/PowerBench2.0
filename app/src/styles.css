@@ -1361,3 +1361,36 @@ html[data-motion="off"] *::after{
 .titlebar-chip .dot-live{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
 .titlebar-chip.on .dot-live{animation:pb-breathe 1.5s var(--e-in-out) infinite}
 .titlebar-btn.close:hover{background:rgba(229,121,121,.92);color:#161616;border-color:transparent}
+/* ===== Шапка и меню по разбору оболочки =====
+   Знак приложения — плитка с молнией, кнопка меню — слева, кнопки окна — в
+   своём блоке за разделителем, чип железа короткий, а в крошке состояние, а
+   не название раздела. */
+.titlebar-brand{gap:8px}
+.titlebar-btn.menu{width:26px;min-width:26px;height:26px;border:1px solid var(--line-1);background:var(--bg-1)}
+.titlebar-btn.menu:hover{background:var(--bg-2);border-color:var(--line-2)}
+.titlebar-btn.menu svg{width:13px;height:13px}
+.titlebar-brand .mark{width:22px;height:22px;border-radius:7px;display:grid;place-items:center;background:linear-gradient(160deg,#2e2e2e,#171717);box-shadow:inset 0 0 0 1px #ffffff1a;color:var(--fg)}
+.titlebar-brand .mark svg{width:12px;height:12px}
+/* Кнопка с подписью: одна иконка без подписи читалась как «питание». */
+.titlebar-toggle{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:7px;border:1px solid var(--line-1);background:var(--bg-1);color:var(--fg-dim);font:600 11.5px/1 inherit;cursor:pointer;white-space:nowrap;transition:background var(--t-2) var(--e-out),border-color var(--t-2) var(--e-out),color var(--t-2) var(--e-out)}
+.titlebar-toggle:hover{background:var(--bg-2);border-color:var(--line-2);color:var(--fg)}
+.titlebar-toggle svg{width:12px;height:12px}
+.titlebar-toggle.off{color:var(--fg-mute);opacity:.8}
+.window-group{display:inline-flex;align-items:center;gap:2px;margin-left:8px;padding-left:8px;border-left:1px solid var(--line-1)}
+.titlebar-btn.close:hover{background:rgba(229,121,121,.92);color:#150505;border-color:transparent}
+
+/* Чип железа не обрезаем многоточием: короткое имя, полное — в подсказке. */
+.titlebar-chip.trunc{max-width:220px}
+.titlebar-chip.trunc>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.titlebar-chip .dot-live{background:var(--fg-mute)}
+.titlebar-chip.on .dot-live{background:var(--ok)}
+
+/* Рельса: полоса прокрутки не должна прошивать иконки. В свёрнутом виде
+   список не прокручивается вовсе, в развёрнутом — тонкий скроллбар,
+   появляющийся при наведении. */
+.sidebar-nav{scrollbar-color:transparent transparent}
+.sidebar-nav:hover{scrollbar-color:rgba(255,255,255,.16) transparent}
+.sidebar.collapsed .sidebar-nav{overflow:hidden}
+/* У неактивного пункта подвала заливки нет: иначе «Настройки» выглядит
+   главнее рабочих разделов. */
+.sidebar-foot .nav-item:not(.active){background:transparent}

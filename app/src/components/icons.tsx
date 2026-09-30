@@ -169,6 +169,78 @@ export function MotionIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/* --- Иконки разделов по разбору оболочки ---
+   Смысл прежней была сбита: «Бенчмарк» домиком читался как «главная»,
+   «Результаты» кубом — как «пакет». Теперь каждая иконка называет раздел. */
+
+/** Спидометр — «Бенчмарк», единственный раздел, который запускает замер. */
+export function GaugeIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M4.6 16a8 8 0 1 1 14.8 0" />
+      <path d="M12 16l4.2-4.8" />
+      <circle cx="12" cy="16" r="1.3" />
+    </Base>
+  );
+}
+
+/** Вилка — «Схемы питания»: речь о схемах, а не о выключении. */
+export function PlugIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M9 3v5M15 3v5" />
+      <path d="M6.5 8h11v2.5a5.5 5.5 0 0 1-11 0z" />
+      <path d="M12 16v5" />
+    </Base>
+  );
+}
+
+/** Столбцы — «Результаты»: внутри таблицы, медианы и сравнение. */
+export function BarsIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" {...props}>
+      <path d="M5 19.5V13M10 19.5V7M15 19.5v-9M20 19.5V4.5" />
+      <path d="M2.5 19.5h19" />
+    </Base>
+  );
+}
+
+/** Строки журнала — «Логи». Документ уже занят шестерёнкой настроек. */
+export function LogLinesIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" {...props}>
+      <path d="M4 6h16M4 11h16M4 16h10" />
+    </Base>
+  );
+}
+
+/** Меню (свернуть/развернуть боковую панель). */
+export function MenuIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" {...props}>
+      <path d="M4 6h16M4 12h10M4 18h16" />
+    </Base>
+  );
+}
+
+/** Квадрат окна (развернуть). */
+export function SquareIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.3} {...props}>
+      <rect x="3" y="3" width="18" height="18" rx="2.4" />
+    </Base>
+  );
+}
+
+/** Закрыть. */
+export function CrossIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.3} strokeLinecap="round" {...props}>
+      <path d="M5 5l14 14M19 5 5 19" />
+    </Base>
+  );
+}
+
 /** Корзина (удалить). */
 export function TrashIcon(props: SVGProps<SVGSVGElement>) {
   return (

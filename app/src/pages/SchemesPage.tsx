@@ -31,16 +31,20 @@ export default function SchemesPage({ active = true }: { active?: boolean }) {
   };
 
   useEffect(refresh, []);
-  // Уточнение для шапки: «Схемы питания · 111 схем». Публикует сама страница,
-  // чтобы шапка не делала собственный запрос и не показывала другое число.
+  // Состояние для крошки в шапке: сколько схем и какая активна. Название
+  // раздела в шапке не дублируется — оно и так крупно на странице.
   useEffect(() => {
+    const active = schemes.find((s) => s.active);
+    const count = schemes.length > 0
+      ? `${schemes.length} ${pluralish(schemes.length, "схема", "схемы", "схем")}`
+      : "";
     setSectionDetail(
-      schemes.length > 0
-        ? `${schemes.length} ${pluralish(schemes.length, "схема", "схемы", "схем")}`
-        : "",
+      [count, active?.name ? `активна «${active.name}»` : ""]
+        .filter(Boolean)
+        .join(" · "),
     );
     return () => setSectionDetail("");
-  }, [schemes.length]);
+  }, [schemes]);
   // После сессии список схем мог измениться (схема восстановлена, карантин
   // обновился) — перечитываем, чтобы страница не показывала устаревшее.
   useEffect(refresh, [running]);

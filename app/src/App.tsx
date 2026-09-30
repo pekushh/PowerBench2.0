@@ -7,7 +7,7 @@ import { useScrollFade } from "./components/ui";
 import { usePill } from "./components/usePill";
 import { useRipple } from "./components/useRipple";
 import TitleBar from "./components/TitleBar";
-import { CubeIcon, GearIcon, HomeIcon, ListIcon, PowerIcon } from "./components/icons";
+import { BarsIcon, GaugeIcon, GearIcon, LogLinesIcon, PlugIcon } from "./components/icons";
 import BenchmarkPage from "./pages/BenchmarkPage";
 import LogPage from "./pages/LogPage";
 import ResultsPage from "./pages/ResultsPage";
@@ -19,29 +19,14 @@ import "./styles.css";
 export type PageId = "test" | "schemes" | "results" | "log" | "settings";
 
 const NAV: { id: PageId; label: string; icon: React.ReactNode }[] = [
-  { id: "test", label: "Бенчмарк", icon: <HomeIcon /> },
-  { id: "schemes", label: "Схемы", icon: <PowerIcon /> },
-  { id: "results", label: "Результаты", icon: <CubeIcon /> },
-  { id: "log", label: "Логи", icon: <ListIcon /> },
+  { id: "test", label: "Бенчмарк", icon: <GaugeIcon /> },
+  { id: "schemes", label: "Схемы питания", icon: <PlugIcon /> },
+  { id: "results", label: "Результаты", icon: <BarsIcon /> },
+  { id: "log", label: "Логи", icon: <LogLinesIcon /> },
 ];
 
-/** Названия разделов для шапки: они же подпись пункта меню. */
-const SECTION_NAMES: Record<PageId, string> = {
-  test: "Бенчмарк",
-  schemes: "Схемы питания",
-  results: "Результаты",
-  log: "Логи",
-  settings: "Настройки",
-};
-
-/** Короткое имя процессора для чипа в шапке: без длинных хвостов вида
- *  «AMD Ryzen 5 7500F with Radeon Graphics». */
-function shortCpu(brand: string): string {
-  const first = brand.split(/[,(]/)[0].trim();
-  return first.length > 28 ? `${first.slice(0, 27)}…` : first;
-}
-
-function resolveMode(mode: string): string {  if (mode === "Auto") {
+function resolveMode(mode: string): string {
+  if (mode === "Auto") {
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "Light" : "Dark";
   }
   return mode;
@@ -186,25 +171,32 @@ export default function App() {
 
   const onAppearance = useCallback((s: SettingsDto) => setAppearance(s), []);
 
-  // Название раздела и чип железа в шапке. Уточнение публикует активная
-  // страница: так шапка не делает собственных запросов, а показывает то же
-  // число, что и на экране.
+  // В шапке — состояние, а не название раздела: название уже написано
+  // крупно на странице. Уточнение публикует активная страница через стор,
+  // чтобы шапка не делала собственный запрос и не показывала другое число.
   const { sectionDetail } = useSession();
-  const sectionName = SECTION_NAMES[page];
   const [hwChip, setHwChip] = useState<string | undefined>(undefined);
+  const [hwFull, setHwFull] = useState<string | undefined>(undefined);
   useEffect(() => {
     let alive = true;
     commands
       .identityInfo()
       .then((id) => {
         if (!alive) return;
-        const cpu = (id.cpu_brand || id.cpu_identifier || "").trim();
-        if (!cpu) return;
-        setHwChip(
-          id.memory_gib > 0
-            ? `${shortCpu(cpu)} · ${id.memory_gib.toFixed(0)} ГБ`
-            : shortCpu(cpu),
-        );
+        const full = (id.cpu_brand || id.cpu_identifier || "").trim();
+        if (!full) return;
+        const mem = id.memory_gib > 0 ? ` · ${id.memory_gib.toFixed(0)} ГБ` : "";
+        setHwFull(`${full}${mem}`);
+        // Короткое имя без хвостов вида «6-Core Processor»: в чипе режется
+        // многоточием, а полное остаётся в подсказке.
+        const short = full
+          .replace(/\b(AMD|Intel)\b/gi, "")
+          .replace(/\s*\(?\s*(with\s+)?Radeon.*$/i, "")
+          .replace(/\s*-?\s*\d+-Core\s+Processor\s*$/i, "")
+          .replace(/\s*\(.*?\)\s*$/, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        setHwChip(`${short.slice(0, 30)}${short.length > 30 ? "…" : ""}${mem}`);
       })
       .catch(() => undefined);
     return () => {
@@ -236,9 +228,9 @@ export default function App() {
         onToggleCollapse={toggleCollapse}
         motionOff={appearance?.reduce_motion ?? false}
         onToggleMotion={toggleMotion}
-        section={sectionName}
-        sectionDetail={sectionDetail}
+        status={sectionDetail}
         hardware={hwChip}
+        hardwareFull={hwFull}
         quietOn={sessionRunning}
       />
       <div className="body">

@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { commands, type SettingsDto } from "../api";
 import { Button, Glass, Seg, Switch } from "../components/ui";
 import { useCascade } from "../components/useCascade";
+import { setSectionDetail } from "../store";
 import { FolderIcon, MotionIcon, ShieldIcon, SocketIcon, ThemeIcon } from "../components/icons";
 import { pushToast } from "../store";
 
@@ -35,8 +36,26 @@ const QUICK_TAGS: { label: string; text: string }[] = [
 ];
 
 export default function SettingsPage({ onAppearance, active = true }: { onAppearance: (s: SettingsDto) => void; active?: boolean }) {
+  /** Режим «Авто» показываем словами, а не служебным значением. */
+  function resolveModeName(mode: string): string {
+    if (mode === "Auto") {
+      return window.matchMedia("(prefers-color-scheme: light)").matches ? "светлая" : "тёмная";
+    }
+    return mode === "Light" ? "светлая" : "тёмная";
+  }
   const [st, setSt] = useState<SettingsDto | null>(null);
   const rootRef = useCascade<HTMLDivElement>(active);
+  // Состояние для крошки в шапке: тема и режим движения.
+  useEffect(() => {
+    if (!st) return;
+    const motion = st.reduce_motion ? "движение уменьшено" : "анимации включены";
+    const mode =
+      st.mode === "Auto"
+        ? `тема ${resolveModeName(st.mode)}`
+        : `тема ${st.mode === "Light" ? "светлая" : "тёмная"}`;
+    setSectionDetail(`${mode} · ${motion}`);
+    return () => setSectionDetail("");
+  }, [st?.theme, st?.mode, st?.reduce_motion]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [adm, setAdm] = useState<boolean | null>(null);
   const [ac, setAc] = useState<boolean | null>(null);

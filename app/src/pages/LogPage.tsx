@@ -223,13 +223,15 @@ export default function LogPage({ active = true }: { active?: boolean }) {
         `для более старых уточните фильтр или поиск`
       : `Показано ${shown.length} из ${all.length} записей`;
 
-  // Уточнение для шапки: «Логи · 5000 записей».
+  // Состояние для крошки в шапке: «5000 записей» или «5000 записей · 2 ошибки».
   useEffect(() => {
-    setSectionDetail(
-      all.length > 0 ? `${all.length} ${pluralish(all.length, "запись", "записи", "записей")}` : "",
-    );
+    const count = all.length > 0
+      ? `${all.length} ${pluralish(all.length, "запись", "записи", "записей")}`
+      : "";
+    const tail = counts.error > 0 ? `${counts.error} ошибок` : "";
+    setSectionDetail([count, tail].filter(Boolean).join(" · "));
     return () => setSectionDetail("");
-  }, [all.length]);
+  }, [all.length, counts.error]);
 
   return (
     <div className="page fill logs-page" ref={rootRef}>

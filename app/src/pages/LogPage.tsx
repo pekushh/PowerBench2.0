@@ -69,6 +69,11 @@ export default function LogPage() {
   const nextKey = useRef(0);
   const listRef = useRef<HTMLDivElement | null>(null);
   const copyTimer = useRef<number | null>(null);
+  // Держим ли взгляд на свежих записях. Пока пользователь не отлистал вверх —
+  // да, и новые строки подтягивают список вниз; отлистал — остаём на месте,
+  // иначе он читал бы старое событие, пока список уезжает под пальцем.
+  const stickToBottom = useRef(true);
+  const firstPaint = useRef(true);
 
   useEffect(() => {
     let alive = true;
@@ -126,6 +131,35 @@ export default function LogPage() {
   // ограниченным независимо от того, сколько сессий накопилось.
   const visible = shown.length > RENDER_CAP ? shown.slice(-RENDER_CAP) : shown;
   const hidden = shown.length - visible.length;
+
+  // Журнал открывают ради последнего события, а не ради первого за сессию, и
+  // без прокрутки вниз на экране просто самые старые записи. Первая отрисовка
+  // и появление новых строк ведут вниз; если человек отлистал вверх —
+  // оставляем его там, иначе он читал бы одно, пока список уезжает.
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    if (firstPaint.current || stickToBottom.current) {
+      el.scrollTop = el.scrollHeight;
+      stickToBottom.current = true;
+    }
+    firstPaint.current = false;
+  }, [visible.length]);
+
+  const onListScroll = () => {
+    const el = listRef.current;
+    if (!el) return;
+    // Порог в 48px: «у нижнего края» с небольшим запасом, иначе колесо мыши
+    // на одно колесо выключало бы слежение.
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  };
+
+  const scrollToBottom = () => {
+    const el = listRef.current;
+    if (!el) return;
+    stickToBottom.current = true;
+    el.scrollTop = el.scrollHeight;
+  };
 
   // Сохранение отчёта для поддержки. Диалог спрашивает только путь: сам
   // отчёт собирает бэкенд, и он берёт данные из всех источников разом —
@@ -267,10 +301,7 @@ export default function LogPage() {
             <button
               type="button"
               className="tool-btn"
-              onClick={() => {
-                const el = listRef.current;
-                if (el) el.scrollTop = el.scrollHeight;
-              }}
+              onClick={scrollToBottom}
             >
               В конец ↓
             </button>
@@ -288,7 +319,7 @@ export default function LogPage() {
               : "Записей по выбранному фильтру не найдено"}
           </div>
         ) : (
-          <div className="log-list" ref={listRef}>
+          <div className="log-list" ref={listRef} onScroll={onListScroll}>
             {visible.map((e) => {
               const k = normLevel(e.level);
               return (

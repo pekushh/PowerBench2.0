@@ -412,6 +412,8 @@ export const commands = {
   logHistory: () => invoke<LoggerEntry[]>("log_history"),
   systemReady: (requestedSchemes?: number | null) =>
     invoke<Readiness>("system_ready", { requestedSchemes: requestedSchemes ?? null }),
+  /** Текущая фоновая нагрузка CPU, % — для предстартовой проверки. */
+  backgroundSample: () => invoke<number>("background_sample"),
   resultsDir: () => invoke<string>("results_dir"),
   appsettingsPath: () => invoke<string>("appsettings_path"),
 };

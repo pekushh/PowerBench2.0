@@ -1058,6 +1058,21 @@ pub fn system_ready(requested_schemes: Option<u32>) -> Readiness {
     }
 }
 
+/// Текущая фоновая нагрузка CPU, % от суммарной загрузки всех процессов.
+///
+/// Нужен на предстартовом экране, где пользователь решает, запускать ли замер
+/// сейчас. Сэмпл идёт по одному интервалу в ~1.2 с: `cpu_usage()` у sysinfo
+/// считается от предыдущего обновления, поэтому мгновенный вызов без паузы
+/// всегда возвращал бы ноль. Сумма по процессам — та же величина, что и в
+/// замере сессии, иначе индикатор врал бы относительно порога.
+#[tauri::command(async)]
+pub fn background_sample() -> f64 {
+    let mut sampler = powerbench_windows::monitor::ProcessSampler::new();
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let sum: f64 = sampler.sample().iter().map(|p| p.cpu_percent).sum();
+    (sum * 10.0).round() / 10.0
+}
+
 // --- Вспомогательные ---
 
 fn find_session(plan_guid: &str) -> Result<SessionJson, String> {

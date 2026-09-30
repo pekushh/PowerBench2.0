@@ -14,13 +14,13 @@ import {
   GridIcon,
   ListViewIcon,
   MinusCircleIcon,
-  MinusIcon,
+  RestoreIcon,
   SearchIcon,
   StarFilledIcon,
   StarOutlineIcon,
   TrashIcon,
 } from "./icons";
-import { Badge, Button, Modal, Seg, Spot } from "./ui";
+import { Button, Modal, Spot } from "./ui";
 import { pushToast } from "../store";
 
 type Filter = "all" | "fav" | "excluded" | "dup";
@@ -86,6 +86,10 @@ export function SchemePicker({
   quarantine,
   onToggle,
   onChanged,
+  onToggleMany,
+  estimate,
+  oneScheme,
+  detailed,
 }: {
   schemes: SchemeRow[];
   selected: Set<string>;
@@ -93,6 +97,14 @@ export function SchemePicker({
   quarantine: QuarantineEntry[];
   onToggle: (guid: string, active: boolean) => void;
   onChanged: () => void;
+  /** Заменить весь набор выбранных схем (быстрые действия над списком). */
+  onToggleMany: (guids: string[]) => void;
+  /** Оценка времени всей сессии для полосы-сводки. */
+  estimate?: string;
+  /** Оценка времени одной схемы: нужна для подсказки про режим «Быстро». */
+  oneScheme?: string;
+  /** Выбран детальный режим — подсказка про >20 схем показывается в нём. */
+  detailed?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
@@ -111,6 +123,10 @@ export function SchemePicker({
     return m;
   }, [quarantine]);
 
+  const copies = useMemo(() => copyMark(schemes), [schemes]);
+
+  // Активная схема идёт первой: она стартует первой же, а при афавитной
+  // сортировке её приходилось искать в списке из сотни строк.
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return [...schemes]
@@ -120,8 +136,24 @@ export function SchemePicker({
         if (filter === "excluded" && !excluded.has(s.guid.toLowerCase())) return false;
         return true;
       })
-      .sort(schemeOrder);
+      .sort((a, b) => Number(b.active) - Number(a.active) || schemeOrder(a, b));
   }, [schemes, query, filter, favs, excluded]);
+
+  // Наборы для быстрых действий над списком.
+  const eligibleGuids = useMemo(
+    () => filterEligible(schemes, settings?.excluded_schemes ?? [], quarantine).map((s) => s.guid),
+    [schemes, settings, quarantine],
+  );
+  // «Без дубликатов»: из группы одноимённых остаётся первая, вторая и
+  // дальше снимаются — иначе одна и та же схема меряется дважды.
+  const firstCopyGuids = useMemo(
+    () => schemes.filter((s) => (copies.get(s.guid)?.copy ?? 1) === 1).map((s) => s.guid),
+    [schemes, copies],
+  );
+  const activeGuids = useMemo(
+    () => schemes.filter((s) => s.active).map((s) => s.guid),
+    [schemes],
+  );
 
   // Очередь записи: два быстрых щелчка читали один и тот же снимок `settings`,
   // и вторая запись затирала первую. Состояние читается в момент записи.
@@ -160,12 +192,14 @@ export function SchemePicker({
       .catch((e) => pushToast("err", String(e)));
   };
 
-  const activate = (s: SchemeRow) => {
+  // Карточка схемы: клик по всей площади переключает выбор, поэтому клик
+  // мимо кнопок должен честно сказать, что схема в карантине.
+  const pick = (s: SchemeRow) => {
     const q = quarantined.get(s.guid.toLowerCase());
     if (q) {
       pushToast(
         "err",
-        `Схема в карантине (${QUARANTINE_LABELS[q.kind] ?? q.kind}): ${q.reason}. Верните её кнопкой на плитке.`,
+        `Схема в карантине (${QUARANTINE_LABELS[q.kind] ?? q.kind}): ${q.reason}. Верните её кнопкой на карточке.`,
       );
       return;
     }
@@ -174,42 +208,104 @@ export function SchemePicker({
 
   return (
     <div className="scheme-picker">
-      <div className="pick-search">
-        <div className="search-box">
-          <SearchIcon />
-          <input
-            className="search"
-            placeholder="Поиск схемы по имени или GUID…"
-            aria-label="Поиск схемы питания"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          {query ? (
-            <button className="search-clear" title="Очистить поиск" onClick={() => setQuery("")}>
-              ×
-            </button>
+      <div className="step2-bar">
+        <div className="s2-left">
+          <div className="search-box">
+            <SearchIcon />
+            <input
+              className="search"
+              placeholder="Поиск схемы по имени или GUID…"
+              aria-label="Поиск схемы питания"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {query ? (
+              <button
+                type="button"
+                className="search-clear"
+                title="Очистить поиск"
+                onClick={() => setQuery("")}
+              >
+                ×
+              </button>
+            ) : null}
+          </div>
+          <div className="filter-tabs" role="tablist" aria-label="Фильтр схем">
+            {(
+              [
+                { value: "all", label: "Все", count: schemes.length },
+                { value: "fav", label: "Избранные", count: favs.size },
+                { value: "excluded", label: "Исключённые", count: excluded.size },
+              ] as { value: Filter; label: string; count: number }[]
+            ).map((t) => (
+              <button
+                key={t.value}
+                type="button"
+                role="tab"
+                aria-selected={filter === t.value}
+                className={`ftab${filter === t.value ? " active" : ""}`}
+                onClick={() => setFilter(t.value)}
+              >
+                <span>{t.label}</span>
+                <span className="cnt">{t.count}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="s2-actions">
+          <button
+            type="button"
+            className="act-pill"
+            onClick={() => onToggleMany(eligibleGuids)}
+          >
+            Выбрать все
+          </button>
+          <button
+            type="button"
+            className="act-pill"
+            title="Снять выбор со вторых копий одноимённых схем"
+            onClick={() => onToggleMany(firstCopyGuids)}
+          >
+            Без дубликатов
+          </button>
+          <button
+            type="button"
+            className="act-pill"
+            title="Оставить только активную схему"
+            onClick={() => onToggleMany(activeGuids)}
+          >
+            Только активная
+          </button>
+          <button type="button" className="act-pill" onClick={() => onToggleMany([])}>
+            Снять все
+          </button>
+        </div>
+      </div>
+
+      <div className="sel-summary-strip">
+        <span>
+          Выбрано схем: <b>{selected.size}</b> из {schemes.length}
+        </span>
+        <div className="sel-summary-right">
+          <span>
+            Оценка времени: <span className="est">{estimate ?? "—"}</span>
+          </span>
+          {detailed && selected.size > 20 ? (
+            <span className="time-tip">
+              Совет: для &gt;20 схем начните с режима «Быстро» ({oneScheme ?? "—"} на схему)
+            </span>
           ) : null}
         </div>
-        <Seg
-          options={[
-            { value: "all", label: "Все" },
-            { value: "fav", label: "Избранные" },
-            { value: "excluded", label: "Исключённые" },
-          ]}
-          value={filter}
-          onChange={setFilter}
-        />
-        <span className="pick-count">
-          {visible.length} из {schemes.length} · выбрано {selected.size}
-        </span>
       </div>
 
       {visible.length === 0 ? (
         <div className="glass inset">
           <div className="muted">
-            {query.trim()
-              ? `По запросу «${query.trim()}» ничего не найдено.`
-              : "Нет схем для отображения."}
+            {schemes.length === 0
+              ? "Схемы питания не найдены. Проверьте, что PowerBench запущен от имени администратора."
+              : query.trim()
+                ? "По этому запросу ничего не найдено."
+                : "В этой вкладке нет схем."}
           </div>
         </div>
       ) : (
@@ -220,58 +316,61 @@ export function SchemePicker({
             const isEx = excluded.has(key);
             const q = quarantined.get(key);
             const on = selected.has(s.guid);
-            const cls = [
-              "pick-tile",
-              on ? "on" : "",
-              q ? "quarantined" : "",
-              !q && isEx ? "excluded" : "",
-            ]
-              .filter(Boolean)
-              .join(" ");
+            const copy = copies.get(s.guid);
             return (
               <Spot
                 key={s.guid}
-                className={cls}
-                role="button"
+                className={`pick-card${on ? " checked" : ""}${s.active ? " is-active-scheme" : ""}`}
+                role="checkbox"
+                aria-checked={on}
                 tabIndex={0}
-                // Плитка работает и на Space, иначе с клавиатуры её не выбрать.
-                // `aria-pressed` сообщает скринридеру, что это переключатель.
-                aria-pressed={on && !q}
                 aria-label={`${s.name || "Схема без названия"}${on ? " — выбрана" : ""}`}
                 title={q ? `Карантин (${QUARANTINE_LABELS[q.kind] ?? q.kind}): ${q.reason}` : undefined}
-                onClick={() => activate(s)}
+                onClick={() => pick(s)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    activate(s);
+                    pick(s);
                   }
                 }}
               >
-                <div className="scheme-card-name">{s.name || "Без названия"}</div>
-                <div className="scheme-card-badges">
-                  {s.active ? <Badge kind="ok">АКТИВНА</Badge> : null}
-                  {q ? (
-                    <Badge kind="danger" title={q.reason}>
-                      карантин · {QUARANTINE_LABELS[q.kind] ?? q.kind}
-                    </Badge>
-                  ) : isEx ? (
-                    <Badge kind="plain">исключена</Badge>
-                  ) : null}
+                <div className="pc-left">
+                  <span className="chk-box">✓</span>
+                  <div className="pc-info">
+                    <div className="pc-name-row">
+                      <span className="pc-name">{s.name || "Без названия"}</span>
+                      {s.active ? <span className="badge-active">Активна</span> : null}
+                    </div>
+                    <div className="pc-meta">
+                      {s.guid.slice(0, 8)}…
+                      {s.active ? " · стартует первой" : ""}
+                      {copy && copy.of > 1 ? ` · копия #${copy.copy} из ${copy.of}` : ""}
+                      {q ? ` · карантин: ${QUARANTINE_LABELS[q.kind] ?? q.kind}` : ""}
+                    </div>
+                  </div>
                 </div>
-                <div className="scheme-card-id" title="ID схемы">
-                  {s.guid}
-                </div>
-                {q ? <div className="pick-why">{q.reason}</div> : null}
-                <div className="scheme-card-foot">
-                  <span className="scheme-card-state">
-                    <span className="tick">{on && !q ? "✓" : ""}</span>
-                    {q ? "в карантине" : on ? "Выбрано" : "Выбрать"}
-                  </span>
-                  <span className="ts-grow" />
+                <div className="pc-quick">
+                  <button
+                    type="button"
+                    className={`mini-ic${isFav ? " on" : ""}`}
+                    title={isFav ? "Убрать из избранного" : "В избранное"}
+                    aria-label={
+                      isFav
+                        ? `Убрать «${s.name || s.guid}» из избранного`
+                        : `Добавить «${s.name || s.guid}» в избранное`
+                    }
+                    aria-pressed={isFav}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleFav(s.guid);
+                    }}
+                  >
+                    {isFav ? <StarFilledIcon /> : <StarOutlineIcon />}
+                  </button>
                   {q ? (
                     <button
                       type="button"
-                      className="icon-btn"
+                      className="mini-ic warn"
                       title="Вернуть из карантина"
                       aria-label={`Вернуть «${s.name || s.guid}» из карантина`}
                       onClick={(e) => {
@@ -279,45 +378,26 @@ export function SchemePicker({
                         restore(s.guid);
                       }}
                     >
-                      <MinusIcon />
+                      <RestoreIcon />
                     </button>
                   ) : (
-                    <>
-                      <button
-                        type="button"
-                        className={`icon-btn${isFav ? " on-fav" : ""}`}
-                        title={isFav ? "Убрать из избранного" : "В избранное"}
-                        aria-label={
-                          isFav
-                            ? `Убрать «${s.name || s.guid}» из избранного`
-                            : `Добавить «${s.name || s.guid}» в избранное`
-                        }
-                        aria-pressed={isFav}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleFav(s.guid);
-                        }}
-                      >
-                        {isFav ? <StarFilledIcon /> : <StarOutlineIcon />}
-                      </button>
-                      <button
-                        type="button"
-                        className={`icon-btn${isEx ? " on-ex" : ""}`}
-                        title={isEx ? "Включить в бенчмарк" : "Исключить из бенчмарка"}
-                        aria-label={
-                          isEx
-                            ? `Вернуть «${s.name || s.guid}» в бенчмарк`
-                            : `Исключить «${s.name || s.guid}» из бенчмарка`
-                        }
-                        aria-pressed={isEx}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleExcluded(s.guid);
-                        }}
-                      >
-                        <MinusCircleIcon />
-                      </button>
-                    </>
+                    <button
+                      type="button"
+                      className={`mini-ic${isEx ? " on ex" : ""}`}
+                      title={isEx ? "Включить в бенчмарк" : "Исключить из бенчмарка"}
+                      aria-label={
+                        isEx
+                          ? `Вернуть «${s.name || s.guid}» в бенчмарк`
+                          : `Исключить «${s.name || s.guid}» из бенчмарка`
+                      }
+                      aria-pressed={isEx}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleExcluded(s.guid);
+                      }}
+                    >
+                      <MinusCircleIcon />
+                    </button>
                   )}
                 </div>
               </Spot>

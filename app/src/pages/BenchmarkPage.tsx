@@ -14,7 +14,7 @@ import {
   type SettingsDto,
   type TelemetryMsg,
 } from "../api";
-import { Badge, Button, FadeScroll, Field, Glass, NumInput, Panel, Progress, Spot, Stat } from "../components/ui";
+import { Button, Glass, Spot } from "../components/ui";
 import { GearIcon } from "../components/icons";
 import { pushToast, setRunning, useSession } from "../store";
 import { SchemePicker, filterEligible, sortSchemes } from "../components/SchemeTiles";
@@ -54,9 +54,6 @@ function paramsOf(p: PresetDto): PresetParams {
     reps: p.repetitions,
   };
 }
-
-/** Порог, с которого режим считается повышенной точностью (фаза ≥ 30 с). */
-const ACCURATE_DURATION_SECONDS = 30;
 
 function sameParams(a: PresetParams, b: PresetParams): boolean {
   return (
@@ -187,6 +184,8 @@ export default function BenchmarkPage() {
   // одна, и копия в интерфейсе рано или поздно разошлась бы с планировщиком.
   const [phasePlan, setPhasePlan] = useState<PhasePlanRow[]>([]);
   const [oneScheme, setOneScheme] = useState("—");
+  // Фоновая нагрузка CPU перед стартом, % (сэмплится бэкендом).
+  const [bgSample, setBgSample] = useState<number | null>(null);
 
   // План фаз перечитывается при смене длительности: это подписи на экране
   // запуска, и брать их надо у того, кто действительно делит время.
@@ -455,12 +454,6 @@ export default function BenchmarkPage() {
   };
 
   /** Схемы к бенчмарку: исключённые и карантинные не выбираются по умолчанию. */
-  const eligible = useCallback(
-    (list: SchemeRow[]): string[] =>
-      filterEligible(list, settings?.excluded_schemes ?? [], quarantine).map((x) => x.guid),
-    [settings, quarantine],
-  );
-
   const start = useCallback(
     (resume: boolean) => {
       const chosen = [...selected];
@@ -543,36 +536,6 @@ export default function BenchmarkPage() {
     return stage === "run" ? "active" : "pending";
   };
 
-  const nav =
-    stage === "mode" ? (
-      <Button variant="primary" onClick={() => go("schemes", "fwd")}>
-        Далее →
-      </Button>
-    ) : stage === "schemes" ? (
-      <>
-        <Button variant="ghost" onClick={() => go("mode", "back")}>
-          ← Назад
-        </Button>
-        <Button variant="primary" disabled={selected.size === 0} onClick={() => go("run", "fwd")}>
-          Далее →
-        </Button>
-      </>
-    ) : (
-      <>
-        <Button variant="ghost" onClick={() => go("schemes", "back")}>
-          ← Назад
-        </Button>
-        <Button
-          variant="primary"
-          disabled={starting || running || selected.size === 0 || readinessBlocksStart}
-          title={startBlockedReason}
-          onClick={() => start(false)}
-        >
-          {starting ? "Запуск…" : "Запустить тест"}
-        </Button>
-      </>
-    );
-
   // Прогресс фазы: телеметрия шлёт событие до конца фазы, поэтому значение
   // может слегка превысить 100 — клампим, иначе кольцо и подписи «ломаются».
   // Нефинитное время тоже даёт NaN, а `Math.min/max` его не убирают: на экране
@@ -586,34 +549,148 @@ export default function BenchmarkPage() {
     return Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : 0;
   }, [telemetry]);
 
+  // Идёт ли замер: телеметрия может ещё не прийти (подготовка сессии), но
+  // дашборд уже должен быть на месте, и кнопка остановки — в шапке.
+  const live = running || telemetry != null;
+
+  // Общий прогресс сессии по всем выбранным схемам и раундам.
+  //
+  // Кольцо раньше показывало процент текущей фазы, то есть на длинной сессии
+  // оно снова и снова возвращалось к нулю: выглядело, будто замер начинается
+  // заново. `run_index` измеряет прогоны по всем схемам (`run_total` =
+  // схемы × повторы), поэтому общий процент = выполненные прогоны плюс
+  // текущая фаза.
+  const sessionProgress = useMemo(() => {
+    const total = telemetry?.run_total;
+    const idx = telemetry?.run_index;
+    if (telemetry == null || total == null || total <= 0 || idx == null) return 0;
+    const frac = phaseProgress / 100;
+    const done = Math.max(0, idx - 1 + frac);
+    const p = (done / total) * 100;
+    return Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : 0;
+  }, [telemetry, phaseProgress]);
+
+  const next = () => go(stage === "mode" ? "schemes" : "run", "fwd");
+  const back = () => go(stage === "run" ? "schemes" : "mode", "back");
+
+  // Фоновая нагрузка перед стартом: пользователь видит, что машина занята,
+  // ещё до того, как замер начался. Сэмпл занимает ~1.2 с, поэтому берём его
+  // один раз на входе на предстартовый экран, а не в цикле.
+  useEffect(() => {
+    if (stage !== "run" || live) {
+      setBgSample(null);
+      return;
+    }
+    let alive = true;
+    setBgSample(null);
+    commands
+      .backgroundSample()
+      .then((v) => alive && setBgSample(Number.isFinite(v) ? v : null))
+      .catch(() => alive && setBgSample(null));
+    return () => {
+      alive = false;
+    };
+  }, [stage, live]);
+
+  /** Переключить схему в списке сравнения с проверкой ограничений. */
+  const toggleScheme = (guid: string, on?: boolean) => {
+    // Раньше активную схему нельзя было снять с плитки, а сообщение звало
+    // «снимите галочку», которой на плитке нет. Снять её можно было только
+    // кнопкой «Выбрать все», которая её наоборот добавляла. Активная схема
+    // нужна и как опора для оценки дрейфа, и в списке сравнения, но участие
+    // в сравнении — выбор пользователя.
+    const isChecked = on ?? selected.has(guid);
+    if (isChecked && selected.has(guid)) {
+      setSelected((prev) => {
+        const nextSet = new Set(prev);
+        nextSet.delete(guid);
+        return nextSet;
+      });
+      return;
+    }
+    // Исключённую пользователем схему нельзя вернуть в сравнение щелчком:
+    // исключение — это явное «не мерить её».
+    if (isChecked) {
+      const row = schemes.find((s) => s.guid === guid);
+      const isExcluded = (settings?.excluded_schemes ?? []).some(
+        (g) => g.toLowerCase() === guid.toLowerCase(),
+      );
+      const isQuarantined = quarantine.some(
+        (q) => q.scheme_id.toLowerCase() === guid.toLowerCase(),
+      );
+      if (isExcluded) {
+        pushToast("err", "Схема помечена как исключённая — снимите метку «исключить».");
+        return;
+      }
+      if (isQuarantined) {
+        pushToast(
+          "err",
+          `Схема в карантине${row?.name ? ` (${row.name})` : ""} — верните её из карантина.`,
+        );
+        return;
+      }
+    }
+    setSelected((prev) => {
+      const nextSet = new Set(prev);
+      if (nextSet.has(guid)) nextSet.delete(guid);
+      else nextSet.add(guid);
+      return nextSet;
+    });
+  };
+
   return (
-    <div className="page">
-      <div className="page-head">
-        <h1>Бенчмарк</h1>
-        <div className="actions">
-          {running ? (
-            <Button variant="danger" disabled={stopping} onClick={stop}>
-              {stopping ? "Остановка…" : "Остановить"}
-            </Button>
+    <div className="page benchmark-view">
+      {/* Единая шапка: заголовок, степпер и кнопки навигации. */}
+      <div className="wizard-header">
+        <div className="wh-left">
+          <h1 className="page-title">Бенчмарк</h1>
+          <nav className="stepper" aria-label="Этапы запуска">
+            {STAGES.map((s, idx) => {
+              const st = stepState(s.id);
+              return (
+                <span className="steps-group" key={s.id}>
+                  <button
+                    type="button"
+                    className={`step-item ${st}`}
+                    aria-current={st === "active" ? "step" : undefined}
+                    disabled={live}
+                    title={live ? "Во время замера шаги менять нельзя" : `К шагу «${s.label}»`}
+                    onClick={() => !live && go(s.id, s.id === stage ? "fwd" : "back")}
+                  >
+                    <span className="step-badge">{st === "done" ? "✓" : idx + 1}</span>
+                    <span>{s.label}</span>
+                  </button>
+                  {idx < STAGES.length - 1 ? <span className="step-line" /> : null}
+                </span>
+              );
+            })}
+          </nav>
+        </div>
+
+        <div className="wh-actions">
+          {stage === "mode" ? null : (
+            <button type="button" className="btn-back" disabled={live} onClick={back}>
+              ← Назад
+            </button>
+          )}
+          {stage === "mode" || stage === "schemes" ? (
+            <button
+              type="button"
+              className="btn-next"
+              disabled={stage === "schemes" && selected.size === 0}
+              onClick={next}
+            >
+              Далее →
+            </button>
+          ) : null}
+          {/* На предстарте кнопку запуска в шапке не дублируем: она одна,
+              в панели `.launch-cta-bar`, иначе два одинаковых вызова рядом. */}
+          {live ? (
+            <button type="button" className="btn-stop" disabled={stopping} onClick={stop}>
+              {stopping ? "■ Остановка…" : "■ Остановить тест"}
+            </button>
           ) : null}
         </div>
-      </div>
-
-      <div className="steps">
-        {STAGES.map((s, idx) => {
-          const st = stepState(s.id);
-          return (
-            <div className="steps-group" key={s.id}>
-              <div className={`step ${st}`}>
-                <span className="dot">{st === "done" ? "✓" : idx + 1}</span>
-                <span className="label">{s.label}</span>
-              </div>
-              {idx < STAGES.length - 1 ? <span className="step-link" /> : null}
-            </div>
-          );
-        })}
-        <div className="steps-spacer" />
-        <div className="steps-nav">{nav}</div>
       </div>
 
       <div className="wizard">
@@ -624,234 +701,193 @@ export default function BenchmarkPage() {
         >
           {stage === "mode" ? (
             <>
-              <div className="mode-area">
-                <div className={`mode-cards${expanded ? " expanded" : ""}`}>
-                  {(Object.keys(PRESETS) as ("quick" | "detailed")[]).map((key, cardIdx) => {
-                    const def = PRESETS[key];
-                    const open = preset === key;
-                    const p = presets?.[key];
-                    return (
-                      <Spot
-                        key={key}
-                        className={`mode-card ${open ? "open" : ""}`}
-                        role="button"
-                        tabIndex={0}
-                        aria-pressed={open}
-                        aria-label={`Режим «${def.title}»`}
-                        onClick={() => {
-                          if (!expanded) applyPreset(key);
-                        }}
-                        onKeyDown={(e) => {
-                          // Space тоже выбирает режим: на Enter-only карточка
-                          // недоступна с клавиатуры привычным образом.
-                          if ((e.key === "Enter" || e.key === " ") && !expanded) {
-                            e.preventDefault();
-                            applyPreset(key);
-                          }
-                        }}
-                      >
-                        <div className="face" style={{ textAlign: "center" }}>
-                          <h3>{def.title}</h3>
-                          <p className="desc">{def.desc}</p>
-                          <p className="desc sub">{def.expand}</p>
-                          <div className="spacer" />
-                          <div className="mode-stats">
-                            <div className="mode-stat">
-                              <div className="ms-label">Повторов</div>
-                              <div className="ms-value">{p ? p.reps : "—"}</div>
-                            </div>
-                            <div className="mode-stat">
-                              <div className="ms-label">Точность</div>
-                              <div className="ms-value">
-                                {!p
-                                  ? "—"
-                                  : p.reps <= 1
-                                    ? "Скрининг"
-                                    : p.duration >= ACCURATE_DURATION_SECONDS
-                                      ? "Повышенная"
-                                      : "Стандартная"}
-                              </div>
-                            </div>
+              {/* Шаг 1: два режима рядом и выдвижные параметры под ними. */}
+              <div className="mode-grid">
+                {(Object.keys(PRESETS) as ("quick" | "detailed")[]).map((key) => {
+                  const def = PRESETS[key];
+                  const open = preset === key;
+                  const p = presets?.[key];
+                  return (
+                    <Spot
+                      key={key}
+                      className={`mode-card${open ? " selected" : ""}`}
+                      role="radio"
+                      aria-checked={open}
+                      tabIndex={0}
+                      aria-label={`Режим «${def.title}»`}
+                      onClick={() => applyPreset(key)}
+                      onKeyDown={(e) => {
+                        // Space тоже выбирает режим: на Enter-only карточка
+                        // недоступна с клавиатуры привычным образом.
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          applyPreset(key);
+                        }
+                      }}
+                    >
+                      <div className="mc-top">
+                        <div>
+                          <div className="mc-title-row">
+                            <h2 className="mc-title">{def.title}</h2>
+                            <span className="mc-tag">{key === "quick" ? "Скрининг" : "Рекомендуется"}</span>
                           </div>
-                          <div className="mode-time">
-                            Одна схема целиком: <b>{presetEstimates[key] ?? "—"}</b>
-                          </div>
+                          <p className="mc-desc">{def.desc}</p>
                         </div>
-                        {cardIdx === 0 ? (
-                          <div className="settings-pane">
-                            <h3 className="pane-title">Настройки теста</h3>
-                            <span className="est">
-                              Одна схема: <b>{oneScheme}</b>
-                            </span>
-                            <p className="desc">{PRESETS[preset].desc}</p>
-                            <div className="spacer" />
-                            <div className="hint">
-                              Флажок «Подробные замеры (JSON)» убран: бэкенд поле
-                              принимал и молча игнорировал, а интерфейс
-                              утверждал, что запись включена. Если сырые выборки
-                              нужны — это отдельная осознанная доработка.
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="settings-pane">
-                            <h3 className="pane-title">Параметры</h3>
-                            <div className="grid2">
-                              <Field label="Длительность прогона, с">
-                                <NumInput
-                                  value={duration}
-                                  min={16}
-                                  max={3600}
-                                  unit="с"
-                                  onChange={(v) => setDuration(v)}
-                                />
-                              </Field>
-                              <Field label="Разогрев, с">
-                                <NumInput
-                                  value={warmup}
-                                  min={2}
-                                  unit="с"
-                                  onChange={(v) => setWarmup(v)}
-                                />
-                              </Field>
-                              <Field label="Охлаждение, с">
-                                <NumInput
-                                  value={cooling}
-                                  min={0}
-                                  max={60}
-                                  unit="с"
-                                  onChange={(v) => setCooling(v)}
-                                />
-                              </Field>
-                              <Field label="Повторов, раз">
-                                <NumInput
-                                  value={reps}
-                                  min={1}
-                                  max={9}
-                                  onChange={(v) => setReps(v)}
-                                />
-                              </Field>
-                            </div>
-                            <div className="hint mt-3">{earlyStopHint(reps)}</div>
-                            {/* Порог фона — параметр замера, а не оформления,
-                                поэтому он живёт здесь, рядом с остальными
-                                числами теста, а не в настройках приложения. */}
-                            <div className="mt-3">
-                              <Field label="Порог фоновой нагрузки, %">
-                                <NumInput
-                                  value={backgroundThreshold}
-                                  min={0.5}
-                                  max={100}
-                                  step={0.5}
-                                  unit="%"
-                                  onChange={(v) => setBackgroundThreshold(v)}
-                                />
-                              </Field>
-                              <div className="field-hint">
-                                Выше порога сессия помечается как замер на загруженном
-                                фоне.
-                              </div>
-                            </div>
-                          </div>
-                        )}
-                      </Spot>
-                    );
-                  })}
-                </div>
+                        <span className="mc-radio">✓</span>
+                      </div>
+                      <div className="mc-stats">
+                        <div className="mc-pill">
+                          <small>Повторов</small>
+                          <b>{p ? `${p.reps} ${plural(p.reps, "раунд", "раунда", "раундов")}` : "—"}</b>
+                        </div>
+                        <div className="mc-pill">
+                          <small>Прогон / Разогрев</small>
+                          <b>{p ? `${p.duration} с / ${p.warmup} с` : "—"}</b>
+                        </div>
+                        <div className="mc-pill time">
+                          <small>Одна схема</small>
+                          <b>{presetEstimates[key] ?? "—"}</b>
+                        </div>
+                      </div>
+                    </Spot>
+                  );
+                })}
               </div>
-              <Button
-                variant="ghost"
-                className="toggle-settings"
-                onClick={() => setExpanded((v) => !v)}
-              >
-                <GearIcon className="nav-i" />
-                {expanded ? "Скрыть настройки" : "Настройки теста"}
-              </Button>
               {activePreset === "custom" ? (
-                <div className="hint" style={{ textAlign: "center" }}>
-                  Режим: {PRESET_SHORT.custom} (параметры изменены вручную)
+                <div className="hint center-hint">
+                  Режим: {PRESET_SHORT.custom} — параметры изменены вручную
                 </div>
               ) : null}
+
+              <div className={`adv-wrap${expanded ? " open" : ""}`}>
+                <button
+                  type="button"
+                  className="adv-toggle"
+                  aria-expanded={expanded}
+                  onClick={() => setExpanded((v) => !v)}
+                >
+                  <span className="adv-toggle-left">
+                    <GearIcon className="nav-i" />
+                    <span>Параметры теста</span>
+                  </span>
+                  <span className="adv-toggle-right">
+                    <span className="adv-summary">
+                      Прогон {duration} с · Разогрев {warmup} с · Охлаждение {cooling} с ·
+                      Повторов {reps} · Фон ≤ {tf(backgroundThreshold, 1)}%
+                    </span>
+                    <span className="adv-chevron">
+                      {expanded ? "Свернуть" : "Настроить"} <i>▾</i>
+                    </span>
+                  </span>
+                </button>
+
+                <div className="adv-body">
+                  <div className="param-grid">
+                    <div className="p-field">
+                      <label htmlFor="pDur">Длительность прогона</label>
+                      <div className="p-input-wrap">
+                        <input
+                          id="pDur"
+                          type="number"
+                          value={duration}
+                          min={16}
+                          max={3600}
+                          onChange={(e) => setDuration(Number(e.target.value) || 0)}
+                        />
+                        <span className="p-unit">с</span>
+                      </div>
+                    </div>
+                    <div className="p-field">
+                      <label htmlFor="pWarm">Разогрев</label>
+                      <div className="p-input-wrap">
+                        <input
+                          id="pWarm"
+                          type="number"
+                          value={warmup}
+                          min={2}
+                          max={300}
+                          onChange={(e) => setWarmup(Number(e.target.value) || 0)}
+                        />
+                        <span className="p-unit">с</span>
+                      </div>
+                    </div>
+                    <div className="p-field">
+                      <label htmlFor="pCool">Охлаждение</label>
+                      <div className="p-input-wrap">
+                        <input
+                          id="pCool"
+                          type="number"
+                          value={cooling}
+                          min={0}
+                          max={120}
+                          onChange={(e) => setCooling(Number(e.target.value) || 0)}
+                        />
+                        <span className="p-unit">с</span>
+                      </div>
+                    </div>
+                    <div className="p-field">
+                      <label htmlFor="pReps">Повторов (раундов)</label>
+                      <div className="p-input-wrap">
+                        <input
+                          id="pReps"
+                          type="number"
+                          value={reps}
+                          min={1}
+                          max={9}
+                          onChange={(e) => setReps(Number(e.target.value) || 1)}
+                        />
+                        <span className="p-unit">раз</span>
+                      </div>
+                    </div>
+                    {/* Порог фона — параметр замера, а не оформления, поэтому
+                        он живёт здесь, рядом с остальными числами теста. */}
+                    <div className="p-field">
+                      <label htmlFor="pBg">Порог фоновой нагрузки</label>
+                      <div className="p-input-wrap">
+                        <input
+                          id="pBg"
+                          type="number"
+                          value={backgroundThreshold}
+                          min={0.5}
+                          max={100}
+                          step={0.5}
+                          onChange={(e) => setBackgroundThreshold(Number(e.target.value) || 0.5)}
+                        />
+                        <span className="p-unit">%</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="adv-footer">
+                    <span>{earlyStopHint(reps)}</span>
+                    <button
+                      type="button"
+                      className="btn-reset-params"
+                      disabled={!presets || running}
+                      onClick={() => {
+                        applyPreset(activePreset === "quick" ? "quick" : "detailed");
+                      }}
+                    >
+                      Сбросить по умолчанию
+                    </button>
+                  </div>
+                </div>
+              </div>
             </>
           ) : null}
 
           {stage === "schemes" ? (
             <>
-              <div className="wizard-toolbar">
-                <span className="ttl">Схемы питания</span>
-                <span className="cnt">
-                  выбрано {selected.size} из {schemes.length}
-                </span>
-                <div className="spacer" />
-                <Button sm variant="ghost" onClick={() => setSelected(new Set(eligible(schemes)))}>
-                  Выбрать все
-                </Button>
-                <Button
-                  sm
-                  variant="ghost"
-                  title="Оставить только активную схему"
-                  onClick={() =>
-                    setSelected((prev) => {
-                      const active = schemes.find((s) => s.active);
-                      const next = new Set<string>();
-                      if (active) next.add(active.guid);
-                      else if (prev.size > 0) next.add([...prev][0]);
-                      return next;
-                    })
-                  }
-                >
-                  Только активная
-                </Button>
-              </div>
               <SchemePicker
                 schemes={schemes}
                 selected={selected}
                 settings={settings}
                 quarantine={quarantine}
                 onChanged={loadAll}
-                onToggle={(guid, active) => {
-                  // Раньше активную схему нельзя было снять с плитки, а
-                  // сообщение звало «снимите галочку», которой на плитке нет.
-                  // Снять её можно было только кнопкой «Выбрать все», которая
-                  // её наоборот добавляла. Активная схема нужна и как
-                  // `active_scheme_id` для оценки дрейфа, и в списке сравнения,
-                  // но участие в сравнении — выбор пользователя.
-                  if (active && selected.has(guid)) {
-                    setSelected((prev) => {
-                      const next = new Set(prev);
-                      next.delete(guid);
-                      return next;
-                    });
-                    return;
-                  }
-                  // Исключённую пользователем схему нельзя вернуть в сравнение
-                  // щелчком по плитке: исключение — это явное «не мерить её».
-                  if (active) {
-                    const row = schemes.find((s) => s.guid === guid);
-                    const isExcluded = (settings?.excluded_schemes ?? []).some(
-                      (g) => g.toLowerCase() === guid.toLowerCase(),
-                    );
-                    const isQuarantined = quarantine.some(
-                      (q) => q.scheme_id.toLowerCase() === guid.toLowerCase(),
-                    );
-                    if (isExcluded) {
-                      pushToast("err", "Схема помечена как исключённая — снимите метку «исключить».");
-                      return;
-                    }
-                    if (isQuarantined) {
-                      pushToast(
-                        "err",
-                        `Схема в карантине${row?.name ? ` (${row.name})` : ""} — верните её из карантина.`,
-                      );
-                      return;
-                    }
-                  }
-                  setSelected((prev) => {
-                    const next = new Set(prev);
-                    if (next.has(guid)) next.delete(guid);
-                    else next.add(guid);
-                    return next;
-                  });
-                }}
+                estimate={estimate}
+                oneScheme={oneScheme}
+                detailed={activePreset !== "quick"}
+                onToggle={toggleScheme}
+                onToggleMany={(guids) => setSelected(new Set(guids))}
               />
               {schemes.length === 0 ? (
                 <div className="glass inset">
@@ -926,187 +962,276 @@ export default function BenchmarkPage() {
           ) : null}
 
           {stage === "run" ? (
-            running || telemetry ? (
+            live ? (
               <>
-                <div className="run-hero">
-                  <div className="rh-stat grow">
-                    <div className="rh-label">Текущая скорость</div>
-                    <div className="rh-value">
+                <div className="live-hero">
+                  <div className="lh-hero-left">
+                    <div className="lh-label">Текущая скорость</div>
+                    <div className="lh-speed">
                       {telemetry ? tf(telemetry.ticks_per_sec, 1) : "—"}
-                      <span className="rh-suffix">тик/с</span>
+                      <small>тик/с</small>
                     </div>
-                    <div className="rh-sub">
-                      {telemetry
-                        ? `прогон ${telemetry.run_index}/${telemetry.run_total} · раунд ${telemetry.round + 1}${
-                            telemetry.scheme_name ? ` · ${telemetry.scheme_name}` : ""
-                          }`
-                        : "идёт подготовка к сессии:"}
+                    <div className="lh-meta">
+                      {telemetry ? (
+                        <>
+                          <span>
+                            Прогон <b>{telemetry.run_index}</b> / {telemetry.run_total}
+                          </span>
+                          <span className="muted">·</span>
+                          <span>
+                            Раунд <b>{telemetry.round + 1}</b> из {reps}
+                          </span>
+                          <span className="muted">·</span>
+                          <span>
+                            Схема: <b>{telemetry.scheme_name || "—"}</b>
+                          </span>
+                        </>
+                      ) : (
+                        <span>идёт подготовка к сессии</span>
+                      )}
                     </div>
                   </div>
-                  <div className="run-ring">
-                    <svg viewBox="0 0 88 88" width="88" height="88">
-                      <circle className="ring-bg" cx="44" cy="44" r="38" />
-                      <circle
-                        className="ring-fg"
-                        cx="44"
-                        cy="44"
-                        r="38"
-                        strokeDasharray={2 * Math.PI * 38}
-                        strokeDashoffset={2 * Math.PI * 38 * (1 - phaseProgress / 100)}
-                      />
-                    </svg>
-                    <div className="ring-center">
-                      <div className="ring-pct">
-                        {telemetry ? `${phaseProgress.toFixed(0)}%` : "—"}
+
+                  <div className="ring-wrap">
+                    <div className="ring-eta">
+                      <span>До конца сессии</span>
+                      <b>{running ? remainingEstimate : "—"}</b>
+                      <span>
+                        {telemetry
+                          ? `${telemetry.run_index} из ${telemetry.run_total} прогонов`
+                          : "оценка готовится"}
+                      </span>
+                    </div>
+                    <div
+                      className="ring-box"
+                      title="Общий прогресс бенчмарка по всем выбранным схемам и раундам"
+                    >
+                      <svg viewBox="0 0 76 76" width="82" height="82" aria-hidden="true">
+                        <circle className="ring-bg" cx="38" cy="38" r="32" />
+                        <circle
+                          className="ring-fg"
+                          cx="38"
+                          cy="38"
+                          r="32"
+                          strokeDasharray={2 * Math.PI * 32}
+                          strokeDashoffset={2 * Math.PI * 32 * (1 - sessionProgress / 100)}
+                        />
+                      </svg>
+                      <div className="ring-text">
+                        <b>{sessionProgress < 0.05 ? "<1%" : `${sessionProgress.toFixed(0)}%`}</b>
+                        <small>сессия</small>
                       </div>
-                      <div className="ring-label">{telemetry?.phase ?? "фаза"}</div>
                     </div>
                   </div>
                 </div>
-                <div className="run-grid">
-                  <Panel title="Фазы замера" hint={`по ${duration} с на прогон · фазы повторяются в каждом раунде`}>
-                    <div className="run-phases">
-                      {phasePlan.map((p) => {
-                        const active = telemetry?.phase === p.name;
-                        const done =
-                          telemetry != null &&
-                          phaseIndex(phasePlan, telemetry.phase) > phaseIndex(phasePlan, p.name);
-                        const pct = active ? phaseProgress : done ? 100 : 0;
-                        return (
-                          <div
-                            key={p.name}
-                            className={`run-phase${active ? " active" : ""}${done ? " done" : ""}`}
-                          >
-                            <div className="rp-head">
-                              <span className="rp-name">{p.name}</span>
-                              <span className="rp-time">
-                                {active
-                                  ? `${phaseProgress.toFixed(0)}%`
-                                  : done
-                                    ? "готово"
-                                    : `${p.seconds} с`}
-                              </span>
-                            </div>
-                            <Progress value={pct} />
+
+                <div className="kpi-strip">
+                  <div className="kpi-card">
+                    <span className="kpi-name">Время тика</span>
+                    <span className="kpi-val">
+                      {telemetry ? tf(telemetry.ms_per_tick, 3) : "—"}
+                      <small>мс</small>
+                    </span>
+                  </div>
+                  <div className="kpi-card">
+                    <span className="kpi-name">Накоплено тиков</span>
+                    <span className="kpi-val">{telemetry ? telemetry.ticks_done : "—"}</span>
+                  </div>
+                  <div
+                    className={`kpi-card${
+                      telemetry?.background_noisy ? " warn-border" : ""
+                    }`}
+                  >
+                    <span className="kpi-name">Фон CPU</span>
+                    <span
+                      className={`kpi-val${
+                        telemetry?.background_noisy ? " warn-txt" : ""
+                      }`}
+                    >
+                      {tf(telemetry?.background_percent, 1)}
+                      <small>{telemetry?.background_noisy ? "загружен" : "%"}</small>
+                    </span>
+                  </div>
+                </div>
+
+                <div className="phases-card">
+                  <div className="ph-head">
+                    <h2 className="ph-title">Фазы замера (по {duration} с на прогон)</h2>
+                    <span className="ph-eta">
+                      Прошло <b>{fmtDuration(elapsed)}</b> · осталось примерно{" "}
+                      <b>{running ? remainingEstimate : "—"}</b>
+                    </span>
+                  </div>
+                  <div className="ph-grid">
+                    {phasePlan.map((p, i) => {
+                      const active = telemetry?.phase === p.name;
+                      const done =
+                        telemetry != null &&
+                        phaseIndex(phasePlan, telemetry.phase) > i;
+                      const pct = active ? phaseProgress : done ? 100 : 0;
+                      return (
+                        <div
+                          key={p.name}
+                          className={`ph-item${active ? " active" : ""}${done ? " done" : ""}`}
+                        >
+                          <div className="phi-top">
+                            <span>
+                              {i + 1}. {p.name}
+                            </span>
+                            <span className="phi-pct">{pct.toFixed(0)}%</span>
                           </div>
-                        );
-                      })}
-                    </div>
-                    {running || telemetry ? (
-                      <div className="hint" style={{ marginTop: 10 }}>
-                        Прошло {fmtDuration(elapsed)} · осталось примерно{" "}
-                        {remainingEstimate}
-                      </div>
-                    ) : null}
-                  </Panel>
-                  <div className="grid2">
-                    <Stat
-                      label="Время тика"
-                      value={telemetry ? tf(telemetry.ms_per_tick, 3) : "—"}
-                      suffix="мс"
-                    />
-                    <Stat label="Тиков" value={telemetry ? `${telemetry.ticks_done}` : "—"} />
-                    <Stat
-                      label="Фон"
-                      value={
-                        telemetry?.background_percent != null
-                          ? tf(telemetry.background_percent, 1)
-                          : "—"
-                      }
-                      suffix={telemetry?.background_noisy ? "загружен" : "%"}
-                    />
+                          <div className="phi-bar">
+                            <i style={{ width: `${pct}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
+
                 {telemetry?.background_noisy && telemetry.background_percent != null ? (
-                  <div className="run-warn">
-                    <b>Фон загружен — {tf(telemetry.background_percent, 1)}% CPU.</b>{" "}
-                    Измерение идёт с посторонней нагрузкой: закройте тяжёлые программы
-                    и повторите тест, иначе результат может быть занижен.
+                  <div className="warn-banner">
+                    <span>
+                      <b>Фон загружен — {tf(telemetry.background_percent, 1)}% CPU.</b> Закройте
+                      ресурсоёмкие программы и повторите замер, иначе результат может быть
+                      занижен.
+                    </span>
                   </div>
                 ) : null}
               </>
             ) : (
               <>
-                <div className="run-grid">
-                  <Panel title="Схемы" hint={`в сравнении · ${selected.size}`}>
-                    <FadeScroll className="run-scroll">
-                      {selSchemes.map((s) => (
-                        <div key={s.guid} className={`run-row${s.active ? " active" : ""}`}>
-                          <span className="run-row-name">
-                            <span className="run-dot" />
-                            {s.name || "Без названия"}
+                <div className="launch-grid">
+                  <div className="summary-card">
+                    <div className="sc-header">
+                      <div className="sc-title-wrap">
+                        <h2 className="sc-title">Очередь тестирования</h2>
+                        <span className="sc-count">
+                          {selected.size} {plural(selected.size, "схема", "схемы", "схем")}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="sc-edit-link"
+                        onClick={() => go("schemes", "back")}
+                      >
+                        Изменить список
+                      </button>
+                    </div>
+                    <div className="part-list">
+                      {selSchemes.map((s, i) => (
+                        <div className="part-item" key={s.guid}>
+                          <span className="pi-name">
+                            <span className="pi-num">#{i + 1}</span>
+                            <span className="pi-title">{s.name || "Без названия"}</span>
+                            {s.active ? <span className="badge-active">Активна</span> : null}
                           </span>
-                          <Badge kind={s.active ? "ok" : "plain"}>
-                            {s.active ? "активна" : "участвует"}
-                          </Badge>
+                          <button
+                            type="button"
+                            className="pi-rm"
+                            onClick={() => toggleScheme(s.guid, true)}
+                          >
+                            Убрать
+                          </button>
                         </div>
                       ))}
-                    </FadeScroll>
-                  </Panel>
-                  <Panel title="Параметры">
-                    <div className="run-row">
-                      <span className="run-k">Режим</span>
-                      <Badge kind="accent" big>
-                        {PRESET_SHORT[activePreset]}
-                      </Badge>
-                    </div>
-                    <div className="run-row">
-                      <span className="run-k">Длительность прогона</span>
-                      <b>{duration} с</b>
-                    </div>
-                    <div className="run-row">
-                      <span className="run-k">Разогрев / Охлаждение</span>
-                      <b>
-                        {warmup} с / {cooling} с
-                      </b>
-                    </div>
-                    <div className="run-row">
-                      <span className="run-k">Повторов (раундов)</span>
-                      <b>{reps}</b>
-                    </div>
-                  </Panel>
-                </div>
-                <div className="run-summary">
-                  <div className="grow">
-                    <div className="run-total">
-                      Всего на сессию: <b>{estimate}</b>
-                    </div>
-                    <div className="hint">
-                      {selected.size}{" "}
-                      {plural(selected.size, "схема", "схемы", "схем")} × {reps}{" "}
-                      {plural(reps, "раунд", "раунда", "раундов")}. Фазы:{" "}
-                      {phasePlan.length
-                        ? phasePlan.map((p) => p.name).join(" / ")
-                        : "—"}{" "}
-                      По окончании исходная схема питания восстанавливается автоматически.
                     </div>
                   </div>
-                  <Button
-                    variant="primary"
-                    big
-                    disabled={starting || running || selected.size === 0 || readinessBlocksStart}
-                    title={startBlockedReason}
-                    onClick={() => start(false)}
-                  >
-                    {starting ? "Запуск…" : "Запустить тест"}
-                  </Button>
-                </div>
-                {readiness && !readiness.ok && !running ? (
-                  <div className="ready-warn inset warn">
-                    <div className="ready-title">Окружение не готово к замеру</div>
-                    {readiness.issues.map((t, i) => (
-                      <div key={i} className="ready-item">
-                        {t}
+
+                  <div className="summary-card">
+                    <div className="sc-header">
+                      <div className="sc-title-wrap">
+                        <h2 className="sc-title">Параметры и готовность</h2>
+                        <span className="sc-count">{phasePlan.length} фазы нагрузки</span>
                       </div>
-                    ))}
+                      <button
+                        type="button"
+                        className="sc-edit-link"
+                        onClick={() => go("mode", "back")}
+                      >
+                        Настроить
+                      </button>
+                    </div>
+                    <div className="kv-table">
+                      <div className="kv-row">
+                        <span className="kv-k">Режим</span>
+                        <span className="kv-v kv-pill">
+                          {activePreset === "quick" ? "Скрининг" : PRESET_SHORT[activePreset]}
+                          {activePreset !== "quick" ? ` (${reps} раундов)` : ""}
+                        </span>
+                      </div>
+                      <div className="kv-row">
+                        <span className="kv-k">Тайминги прогона</span>
+                        <span className="kv-v">
+                          {duration} с замер · {warmup} с разогрев · {cooling} с охл.
+                        </span>
+                      </div>
+                      <div className="kv-row">
+                        <span className="kv-k">Всего прогонов</span>
+                        <span className="kv-v">
+                          {selected.size * reps} ({selected.size} схем × {reps})
+                        </span>
+                      </div>
+                      <div className="kv-row">
+                        <span className="kv-k">Фазы нагрузки</span>
+                        <span className="kv-v kv-phases">
+                          {phasePlan.length ? phasePlan.map((p) => p.name).join(" · ") : "—"}
+                        </span>
+                      </div>
+                      <div className="kv-row">
+                        <span className="kv-k">Фоновая нагрузка CPU</span>
+                        {bgSample == null ? (
+                          <span className="kv-pill">измеряется…</span>
+                        ) : bgSample > backgroundThreshold ? (
+                          <span className="kv-status-bad">
+                            ● {tf(bgSample, 1)}% (выше порога {tf(backgroundThreshold, 1)}%)
+                          </span>
+                        ) : (
+                          <span className="kv-status-ok">
+                            ● {tf(bgSample, 1)}% (в норме ≤ {tf(backgroundThreshold, 1)}%)
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {readiness && !readiness.ok ? (
+                  <div className="warn-banner ready-warn">
+                    <span>
+                      <b>Окружение не готово к замеру.</b> {readiness.issues.join(" ")}
+                    </span>
                   </div>
                 ) : null}
                 {finished ? (
-                  <Glass className="inset">
-                    <div className="card-title">Тест завершён</div>
-                    <div className="hint">{finishMsg || "сессия завершена — можно начать новую"}</div>
-                  </Glass>
+                  <div className="warn-banner ok-banner">
+                    <span>
+                      <b>Тест завершён.</b> {finishMsg || "сессия завершена — можно начать новую"}
+                    </span>
+                  </div>
                 ) : null}
+
+                <div className="launch-cta-bar">
+                  <div>
+                    <div className="lcb-title">
+                      Расчётное время сессии: <b>около {estimate}</b>
+                    </div>
+                    <div className="lcb-sub">
+                      {selSchemes.some((s) => s.active)
+                        ? `Активная схема «${selSchemes.find((s) => s.active)?.name ?? ""}» протестируется первой и автоматически восстановится после завершения.`
+                        : "Исходная схема питания восстановится автоматически после завершения."}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-launch-main"
+                    disabled={starting || selected.size === 0 || readinessBlocksStart}
+                    title={startBlockedReason}
+                    onClick={() => start(false)}
+                  >
+                    {starting ? "Запуск…" : "▶ Запустить тест"}
+                  </button>
+                </div>
               </>
             )
           ) : null}

@@ -413,9 +413,23 @@ pub fn build_report(sessions: &[SessionJson]) -> String {
     )
 }
 
-/// Компактный HTML-отчёт по одной сессии: вердикт, рекомендация и сравнение
-/// схем — без «лишней» информации (без сырых прогонов и bootstrap-вероятностей).
+/// Компактный HTML-отчёт по одной сессии — то, что приложение показывает и
+/// сохраняет по умолчанию.
+///
+/// Формат собран в [`crate::report_compact`]: вердикт, три ориентира, одна
+/// таблица схем с поиском/фильтром/сортировкой и три карточки диагностики на
+/// токенах темы Graphite, где «хорошее» белое, а не зелёное.
 pub fn build_session_report(s: &SessionJson) -> String {
+    crate::report_compact::build(s)
+}
+
+/// Развёрнутый отчёт по одной сессии: те же данные, но отдельными длинными
+/// разделами (категории, таблица фаз, условия замера, фон, фоновый журнал).
+///
+/// Основной формат приложения — [`build_session_report`]. Этот оставлен для
+/// разбора результата: когда нужно посмотреть всё сразу, а не прокручивать
+/// один экран.
+pub fn build_session_report_verbose(s: &SessionJson) -> String {
     let start = session_started_at_ns(s).unwrap_or(0);
     let stamp = date_time_stamp(start);
     let rec = &s.recommendation;
@@ -1797,7 +1811,7 @@ mod tests {
         );
         // В отчёте по одной сессии счётчик на титуле обязан называть их
         // отдельно, иначе «допущено» читается как «измерено и прошло».
-        let session_html = build_session_report(&s);
+        let session_html = build_session_report_verbose(&s);
         assert!(
             session_html.contains("без замеров: 1"),
             "счётчик на титуле должен отдельно считать неизмеренные схемы"
@@ -1897,7 +1911,7 @@ mod tests {
             .collect();
         s.recommendation.recommended_scheme = Some("LEAD".into());
 
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(html.ends_with("</body></html>"));
         // Все 120 схем на месте: ничего не потеряно при генерации.
         assert_eq!(html.matches("data-name=").count(), 120, "потерялись строки");
@@ -1979,7 +1993,7 @@ mod tests {
     /// приложения он выглядел «синим». Тест сверяет ключевые токены напрямую.
     #[test]
     fn report_palette_matches_app_graphite_theme() {
-        let html = build_session_report(&sample_session("AAA", 500.0));
+        let html = build_session_report_verbose(&sample_session("AAA", 500.0));
         for token in [
             "--bg-0:#0F0F0F",
             "--bg-1:#1B1B1B",
@@ -2013,7 +2027,7 @@ mod tests {
         let mut s = sample_session("AAA", 500.0);
         let run = stored_run_with_background("aaa", "chrome.exe", 7);
         s.schemes[0].per_run = vec![run];
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(
             html.contains("Фоновая нагрузка"),
             "в отчёте нет секции фона"
@@ -2030,7 +2044,7 @@ mod tests {
         let mut run = stored_run_with_background("aaa", "chrome.exe", 0);
         run.background[0].correlated_spike_windows = 0;
         s.schemes[0].per_run = vec![run];
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(
             !html.contains("Фоновая нагрузка"),
             "секция фона показана без единого совпадения"
@@ -2107,7 +2121,7 @@ mod tests {
             // AVG почти такой же (в пределах 2 %), зато лучший P1 и стабильность.
             scheme_with("STEADY", 590.0, 200.0, 98.0),
         ];
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(html.contains("Категории схем"), "нет раздела категорий");
         assert!(
             html.contains("Самое высокое AVG"),
@@ -2143,7 +2157,7 @@ mod tests {
             scheme_with("MID", 500.0, 150.0, 99.0),
             scheme_with("P1BEST", 480.0, 220.0, 90.0),
         ];
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         let section = html
             .split("Самое стабильное")
             .nth(1)
@@ -2171,7 +2185,7 @@ mod tests {
         twin.background[0].path = r"C:\Users\test\svc.exe".to_string();
         run.background.push(twin.background[0].clone());
         s.schemes[0].per_run = vec![run];
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(html.contains("svc.exe"), "процесс пропал из отчёта");
         assert!(
             !html.contains("Program Files"),
@@ -2232,7 +2246,7 @@ mod tests {
                 b
             },
         ];
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         let section = html
             .split("Метрики по фазам")
             .nth(1)
@@ -2291,7 +2305,7 @@ mod tests {
         s.schemes = (0..120)
             .map(|i| scheme_with(&format!("S{i}"), 500.0 - f64::from(i), 100.0, 90.0))
             .collect();
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(
             !html.contains("more.checked"),
             "кнопка снова читает checked у <button>"
@@ -2346,7 +2360,7 @@ mod tests {
             "фон на загруженной машине: до 90 % CPU (пиковое, 95-й перцентиль прогона)".to_string(),
             "замечено снижение частоты: AAA (1 фаз)".to_string(),
         ];
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(
             html.contains("Предупреждения замера"),
             "в отчёте нет раздела предупреждений"
@@ -2364,7 +2378,7 @@ mod tests {
         );
         // Событие с экранируемыми символами не должно ломать разметку.
         s.warnings = vec!["<script>alert(1)</script>".to_string()];
-        let html2 = build_session_report(&s);
+        let html2 = build_session_report_verbose(&s);
         assert!(
             !html2.contains("<script>alert(1)</script>"),
             "предупреждение не экранировано"
@@ -2405,7 +2419,7 @@ mod tests {
             frequency_drop_percent: 6.0,
             frequency_mhz: 4400.0,
         }];
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(
             html.contains("замечено снижение частоты"),
             "снижение частоты не попало в условия замера"
@@ -2432,7 +2446,7 @@ mod tests {
             s.schemes[0].per_run.clone(),
         )
         .phases;
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(html.contains("Метрики по фазам"), "нет таблицы фаз");
     }
 
@@ -2473,7 +2487,7 @@ mod tests {
                 frequency_mhz: 5200.0,
             });
         }
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         // Считаем `colspan` внутри самого раздела фаз: таблица печатается в
         // отчёте дважды (сводка и приложение), и общий подсчёт дал бы 8 даже
         // при правильной шапке из четырёх групп.
@@ -2508,7 +2522,7 @@ mod tests {
         run.background_cpu_p50 = 12.0;
         run.background_sample_seconds = 20;
         s.schemes[0].per_run = vec![run];
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(html.contains("Условия замера"), "нет секции условий");
         assert!(html.contains("44"), "не показан пик фоновой нагрузки");
     }
@@ -2519,7 +2533,7 @@ mod tests {
     fn screening_session_is_labelled_as_such() {
         let mut s = sample_session("AAA", 500.0);
         s.screening = true;
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(html.contains("Скрининг"), "скрининг не помечен в отчёте");
     }
 
@@ -2571,7 +2585,7 @@ mod tests {
                 sch
             })
             .collect();
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
 
         // Автономность: только встроенные стили и скрипт, никаких ссылок наружу.
         for pattern in ["<link ", "src=\"http", "href=\"http", "@import"] {
@@ -2613,7 +2627,7 @@ mod tests {
         sch.name = Some("План \"><script>alert(1)</script>".into());
         s.schemes.push(sch);
         s.recommendation.recommended_scheme = Some("LEAD".into());
-        let html = build_session_report(&s);
+        let html = build_session_report_verbose(&s);
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("&lt;script&gt;"));
     }

@@ -14,6 +14,7 @@ pub mod leader;
 pub mod quarantine;
 pub mod recovery;
 pub mod report;
+pub mod report_compact;
 pub mod result;
 pub mod score;
 pub mod session;

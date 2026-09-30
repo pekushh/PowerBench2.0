@@ -107,15 +107,20 @@ fn session_report_is_deterministic() {
         "повторный прогон обязан дать побайтово тот же HTML"
     );
     let html = first.as_str();
-    // Золотые маркеры: рекомендация, лидер со счётчиком тик/с, перевес и имя плана.
+    // Золотые маркеры компактного формата: вердикт, рекомендованная схема,
+    // её медиана, перевес в вердикте и имя плана в таблице.
+    assert!(html.contains("ВЕРДИКТ БЕНЧМАРКА"));
     assert!(html.contains("Подтверждено"));
-    assert!(html.contains("РЕКОМЕНДАЦИЯ"));
+    assert!(html.contains("Рекомендуем: «План AAA»"));
+    assert!(html.contains("РЕКОМЕНДУЕТСЯ"));
     assert!(html.contains("500.0"));
-    assert!(html.contains("12.50%"));
     assert!(html.contains("План AAA"));
+    assert!(html.contains("План runner"));
     assert!(html.ends_with("</body></html>"));
 }
 
+/// Перевес обязан попадать в документ: в компактном отчёте он попадает в
+/// дельту лидера относительно опорной схемы.
 #[test]
 fn session_report_is_sensitive_to_input() {
     let base = build_session_report(&snapshot_session("BBB", 500.0, 12.5));

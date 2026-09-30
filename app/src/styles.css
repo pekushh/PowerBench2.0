@@ -2,7 +2,7 @@
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-cyrillic.woff2) format("woff2-variations");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-latin-ext.woff2) format("woff2-variations");unicode-range:U+0100-02AF,U+0304,U+0308,U+0329,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-latin.woff2) format("woff2-variations");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
-:root{--bg-0: #0F0F0F;--bg-1: #1B1B1B;--bg-2: #2B2B2B;--bg-3: #303030;--line-1: #f3f3f31c;--line-2: #f3f3f338;--fg: #F3F3F3;--fg-dim: #ECECEC;--fg-mute: #7E7E7E;--accent: #FDFDFD;--ok: #6fd0a0;--warn: #e4b46f;--err: #e57979;--info: #5aa2f2;--okline: #6fd0a06b;--warnline: #e4b46f6b;--errline: #e579796b;--radius: 18px;--ease: cubic-bezier(.22, 1, .36, 1);color-scheme:dark}
+:root{--bg-0: #0F0F0F;--bg-1: #1B1B1B;--bg-2: #2B2B2B;--bg-3: #303030;--line-1: #f3f3f31c;--line-2: #f3f3f338;--fg: #F3F3F3;--fg-dim: #ECECEC;--fg-mute: #7E7E7E;--accent: #FDFDFD;--ok: #6fd0a0;--warn: #e4b46f;--err: #e57979;--info: #5aa2f2;--okline: #6fd0a06b;--warnline: #e4b46f6b;--errline: #e579796b;--okbg: #6fd0a01f;--warnbg: #e4b46f1f;--errbg: #e579791f;--radius: 18px;--ease: cubic-bezier(.22, 1, .36, 1);color-scheme:dark}
 [data-theme=Ocean]{--accent: #58c7ee;--info: #4ab3e2;--bg-0: #0b1319;--bg-1: #0e1720}
 [data-theme=Violet]{--accent: #b8acff;--info: #8d8ffc;--bg-0: #110f1b;--bg-1: #141223}
 [data-mode=Light]{--bg-0: #eef1f6;--bg-1: #f3f5fa;--bg-2: #ffffff;--bg-3: #e8ebf2;--line-1: #10141f14;--line-2: #10141f2e;--fg: #15181f;--fg-dim: #4c5563;--fg-mute: #7b8496;color-scheme:light}
@@ -940,7 +940,10 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 .modal.session-modal .modal-title{font-size:16px;font-weight:700;min-width:0}
 .modal.session-modal .modal-close{width:30px;height:30px;border-radius:8px;border:1px solid var(--line-1);background:var(--bg-2);color:var(--fg-dim);font-size:15px;flex:0 0 auto}
 .modal.session-modal .modal-close:hover{border-color:var(--line-2);background:var(--bg-3);color:var(--fg)}
-.modal.session-modal .modal-body{padding:16px 20px;display:flex;flex-direction:column;gap:12px;flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.modal.session-modal .modal-body{padding:12px 18px;display:flex;flex-direction:column;gap:10px;flex:1 1 auto;min-height:0;overflow-y:hidden;overscroll-behavior:contain}
+/* На низком окне шапка, блок лидера и обе таблицы не помещаются, и без
+   прокрутки тела часть содержимого становилась недоступна. */
+@media (max-height:720px){.modal.session-modal .modal-body{overflow-y:auto}}
 .modal.session-modal .modal-foot{padding:0;border-top:1px solid var(--line-1);background:var(--bg-1);flex:0 0 auto}
 
 /* Заголовок и состав машины в одну строку */
@@ -948,25 +951,26 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 .sm-hw-meta{font-size:12px;font-weight:400;color:var(--fg-mute);font-variant-numeric:tabular-nums;line-height:1.4}
 
 /* Блок лидера и четыре метрики в один ряд */
-.leader-hero{background:var(--bg-1);border:1px solid var(--line-1);border-radius:13px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;flex:0 0 auto}
-.lh-left{min-width:220px;flex:1 1 auto}
-.lh-eyebrow{display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap}
-.badge-leader{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:5px;background:color-mix(in srgb,var(--ok) 12%,transparent);color:var(--ok);border:1px solid var(--okline)}
-.badge-pill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;background:var(--bg-2);color:var(--fg-dim);border:1px solid var(--line-1);white-space:nowrap}
+.leader-hero{background:var(--bg-1);border:1px solid var(--line-1);border-radius:13px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:nowrap;flex:0 0 auto}
+.lh-left{min-width:0;flex:1 1 auto;overflow:hidden}
+.lh-eyebrow{display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:nowrap;overflow:hidden}
+.badge-leader{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:5px;background:var(--okbg);color:var(--ok);border:1px solid var(--okline);white-space:nowrap;flex:0 0 auto}
+.badge-pill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;background:var(--bg-2);color:var(--fg-dim);border:1px solid var(--line-1);white-space:nowrap;flex:0 0 auto}
 .badge-pill.level{color:var(--fg);cursor:help}
 .lh-name{font-size:20px;font-weight:800;color:var(--ok);letter-spacing:-.3px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.lh-metrics{display:grid;grid-template-columns:repeat(4,auto);gap:8px}
+.lh-metrics{display:grid;grid-template-columns:repeat(4,auto);gap:8px;flex:0 0 auto}
 .m-box{background:var(--bg-0);border:1px solid var(--line-1);border-radius:9px;padding:7px 12px;min-width:105px}
 .m-box small{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--fg-mute);margin-bottom:2px;white-space:nowrap}
 .m-box b{font-size:15px;font-weight:750;color:var(--fg);font-variant-numeric:tabular-nums}
 .m-box b.green{color:var(--ok)}
 .m-box span{font-size:11px;color:var(--fg-mute);margin-left:3px}
 
-/* Компактная полоса предупреждений в одну строку */
-.alerts-strip{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:0 0 auto}
-.alert-chip{flex:1 1 260px;display:flex;align-items:baseline;gap:8px;padding:7px 12px;border-radius:9px;background:color-mix(in srgb,var(--warn) 12%,transparent);border:1px solid var(--warnline);font-size:12px;color:var(--fg-dim);min-width:0}
-.alert-chip b{color:var(--warn);white-space:nowrap}
-.alert-chip span{min-width:0}
+/* Компактная полоса предупреждений: плашки в одну строку каждая, сетка
+   вместо flex — иначе жирный заголовок и текст вставали двумя колонками и
+   текст переносился на четыре строки. */
+.alerts-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px;flex:0 0 auto}
+.alert-chip{display:block;padding:7px 12px;border-radius:9px;background:var(--warnbg);border:1px solid var(--warnline);font-size:12px;line-height:1.35;color:var(--fg-dim);min-width:0}
+.alert-chip b{color:var(--warn);margin-right:4px}
 
 /* Карточки секций с компактной шапкой */
 .section-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:12px;overflow:hidden;flex:0 0 auto}
@@ -976,9 +980,9 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 
 /* Таблица фаз */
 .phases-tbl{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-.phases-tbl th{text-align:right;font-size:11px;font-weight:600;color:var(--fg-mute);padding:6px 14px;border-bottom:1px solid var(--line-1);white-space:nowrap}
+.phases-tbl th{text-align:right;font-size:11px;font-weight:600;color:var(--fg-mute);padding:5px 12px;border-bottom:1px solid var(--line-1);white-space:nowrap}
 .phases-tbl th:first-child{text-align:left}
-.phases-tbl td{text-align:right;padding:7px 14px;font-size:12.5px;border-bottom:1px solid rgba(255,255,255,.04)}
+.phases-tbl td{text-align:right;padding:5px 12px;font-size:12.5px;border-bottom:1px solid rgba(255,255,255,.04)}
 .phases-tbl tr:last-child td{border-bottom:0}
 .phases-tbl td:first-child{text-align:left;font-weight:600;color:var(--fg)}
 .phases-tbl td b{font-weight:700}
@@ -987,8 +991,13 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 .schemes-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:8px 14px;border-bottom:1px solid var(--line-1);background:rgba(255,255,255,.015)}
 .st-left{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
 .st-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.mini-tabs{display:inline-flex;background:var(--bg-0);border:1px solid var(--line-1);border-radius:8px;padding:2px;gap:2px}
-.mini-tabs .mtab{font-size:11.5px;padding:3px 9px;border-radius:6px}
+.mini-tabs{display:inline-flex;background:var(--bg-0);border:1px solid var(--line-1);border-radius:9px;padding:3px;gap:2px}
+.mini-tabs .mtab{font-size:11.5px;padding:4px 10px;border-radius:6px}
+/* Фильтр «Скрыть без замеров» — тот же переключатель, что и вкладки
+   «С замерами / Все в сессии», поэтому состояния у них одно. */
+.hide-empty{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--fg-mute);white-space:nowrap;cursor:pointer;user-select:none}
+.hide-empty input{accent-color:var(--ok);width:13px;height:13px;margin:0;cursor:pointer}
+.hide-empty:hover{color:var(--fg-dim)}
 .mini-search{background:var(--bg-0);color:var(--fg);border:1px solid var(--line-1);border-radius:7px;padding:4px 10px;font:inherit;font-size:12px;width:195px;height:auto}
 .mini-search:focus{outline:none;border-color:var(--line-2)}
 

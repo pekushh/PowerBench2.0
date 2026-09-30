@@ -690,8 +690,10 @@ async function copyText(value: string, what: string): Promise<void> {
 function hwMeta(s: SessionJson, row: HistoryRow | null): string {
   const id = s.identity;
   const cpu = (id.cpu_brand || id.cpu_identifier || "процессор неизвестен").trim();
-  const parts = [cpu];
-  if (id.logical_cpus > 0) parts.push(`(${id.logical_cpus} ${plural(id.logical_cpus, "ядро", "ядра", "ядер")})`);
+  // Число ядер — часть названия процессора, а не отдельный пункт: через `·`
+  // строка выходила «Процессор · (6 ядер)».
+  const cores = id.logical_cpus > 0 ? ` (${id.logical_cpus} ${plural(id.logical_cpus, "ядро", "ядра", "ядер")})` : "";
+  const parts = [`${cpu}${cores}`];
   if (id.memory_gib > 0) parts.push(`${id.memory_gib.toFixed(0)} ГБ ОЗУ`);
   if (id.os_build) parts.push(`ОС ${id.os_build}`);
   const date = row ? sessionDate(row) : "";
@@ -858,13 +860,20 @@ function SessionDetail({
       text: "для расчёта доверительного интервала нужно от 3 прогонов.",
     });
   }
-  if (bgP95 != null && bgP95 > 15) {
+  // Отформатированный чип про фон CPU идёт первым, а следом бэкенд присылает
+  // ту же фактическую строку («фон на загруженной машине: до 55 % CPU…»).
+  // Показывали оба — полоса из трёх плашек говорила одно и то же дважды.
+  // Порог тот же, что и у бэкенда (`BACKGROUND_P95_NOTE_PERCENT`): иначе при
+  // 18 % показывался бы наш чип без его предупреждения, а при 22 % — наоборот.
+  const showBgChip = bgP95 != null && bgP95 > 20;
+  if (showBgChip) {
     alerts.push({
       title: `Фон до ${bgP95.toFixed(0)} % CPU:`,
       text: "95-й перцентиль фоновой нагрузки выше порога.",
     });
   }
   for (const w of s.warnings) {
+    if (showBgChip && /фон/i.test(w) && /%/i.test(w)) continue;
     const cut = w.indexOf(": ");
     alerts.push(
       cut > 0 && cut < 46
@@ -893,23 +902,27 @@ function SessionDetail({
       <section className="leader-hero">
         <div className="lh-left">
           <div className="lh-eyebrow">
-            <span className="badge-leader">
+            <span className="badge-leader" title={trustTitle}>
               {tie ? "★ Ничья" : leader ? "★ Лидер сессии" : "★ Лидер не определён"}
             </span>
             <span className="badge-pill">
               {modeName} · {s.rounds_completed}/{s.rounds_planned} раунд
             </span>
             {probs ? (
+              // Вердикт убрали из отдельного бейджа: у скрининга он совпадал с
+              // режимом, и рядом стояли два одинаковых «Скрининг». Остался
+              // здесь, в подсказке, вместе с вероятностями.
               <span
                 className="badge-pill"
-                title={`P(лучший)=${f1(probs[0], 2)} · P(перевес>1%)=${f1(probs[2], 2)}`}
+                title={`Вердикт: ${rec.level_label ?? rec.level}. ${
+                  probs
+                    ? `P(лучший)=${f1(probs[0], 2)} · P(перевес>1%)=${f1(probs[2], 2)}`
+                    : ""
+                }`}
               >
                 Уверенность {Math.round(Math.min(1, Math.max(0, probs[0])) * 100)}%
               </span>
             ) : null}
-            <span className="badge-pill level" title={trustTitle}>
-              {rec.level_label ?? rec.level}
-            </span>
           </div>
           <h3 className="lh-name">{leaderName}</h3>
         </div>
@@ -944,7 +957,7 @@ function SessionDetail({
           {alerts.map((a, i) => (
             <div className="alert-chip" key={i}>
               <b>{a.title}</b>
-              <span>{a.text}</span>
+              {a.text}
             </div>
           ))}
         </div>
@@ -1025,6 +1038,16 @@ function SessionDetail({
             ) : null}
           </div>
           <div className="st-right">
+            {hasEmpty ? (
+              <label className="hide-empty" title="Схемы без прогонов при ранней остановке">
+                <input
+                  type="checkbox"
+                  checked={tblFilter === "tested"}
+                  onChange={(e) => setTblFilter(e.target.checked ? "tested" : "all")}
+                />
+                Скрыть без замеров
+              </label>
+            ) : null}
             <div className="mini-tabs">
               <button
                 type="button"

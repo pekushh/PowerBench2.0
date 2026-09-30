@@ -6,16 +6,22 @@ import { commands, type SchemeRow, type SettingsDto } from "../api";
 import { Badge, Button, Modal } from "../components/ui";
 import { ExportIcon, PlusIcon, RestoreIcon } from "../components/icons";
 import SchemeTiles from "../components/SchemeTiles";
+import { useCascade } from "../components/useCascade";
 import { pushToast, useSession } from "../store";
 
-export default function SchemesPage() {
+export default function SchemesPage({ active = true }: { active?: boolean }) {
   const [schemes, setSchemes] = useState<SchemeRow[]>([]);
   const [settings, setSettings] = useState<SettingsDto | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
+  // `null` — права ещё не проверены. Пока так, плашку не рисуем: иначе на
+  // миллисекунду вспыхивало «требуются права администратора», а потом список
+  // схем появлялся, и экран дёргался дважды.
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [exportTarget, setExportTarget] = useState<string | null>(null);
   const [askRestore, setAskRestore] = useState(false);
   const [busy, setBusy] = useState(false);
   const { running } = useSession();
+  const rootRef = useCascade<HTMLDivElement>(active);
+  const admin = isAdmin === true;
 
   const refresh = () => {
     commands.listSchemes().then(setSchemes).catch((e) => pushToast("err", String(e)));
@@ -109,7 +115,7 @@ export default function SchemesPage() {
   }, [schemes]);
 
   return (
-    <div className="page schemes-page">
+      <div className="page schemes-page" ref={rootRef}>
       <div className="page-head">
         <h1>Схемы питания</h1>
         {/* Сводка в строке заголовка: отдельной строкой она отодвигала поиск
@@ -129,8 +135,8 @@ export default function SchemesPage() {
           <button
             type="button"
             className="act-primary"
-            disabled={busy || !isAdmin}
-            title={isAdmin ? "Импортировать схему питания из файла .pow" : "Требуются права администратора"}
+            disabled={busy || !admin}
+            title={admin ? "Импортировать схему питания из файла .pow" : "Требуются права администратора"}
             onClick={() => void importScheme()}
           >
             <PlusIcon />
@@ -139,8 +145,8 @@ export default function SchemesPage() {
           <button
             type="button"
             className="act-secondary"
-            disabled={busy || !isAdmin}
-            title={isAdmin ? "Восстановить стандартные схемы Windows" : "Требуются права администратора"}
+            disabled={busy || !admin}
+            title={admin ? "Восстановить стандартные схемы Windows" : "Требуются права администратора"}
             onClick={() => setAskRestore(true)}
           >
             <RestoreIcon />
@@ -148,7 +154,7 @@ export default function SchemesPage() {
           </button>
         </div>
       </div>
-      {!isAdmin ? (
+      {isAdmin === false ? (
         <div className="hint" style={{ marginBottom: 4 }}>
           {/* Без точки: это короткая метка-подсказка, а не предложение. */}
           <Badge kind="warn">Требуется запуск от имени администратора</Badge>
@@ -173,7 +179,7 @@ export default function SchemesPage() {
       <SchemeTiles
         schemes={schemes}
         settings={settings}
-        isAdmin={isAdmin}
+        isAdmin={admin}
         // Во время замера переключение и удаление схем запрещены: смена схемы
         // посреди сессии портит результат. Раньше здесь стояло `false`, и
         // плитки оставались активными даже во время работающего бенчмарка.

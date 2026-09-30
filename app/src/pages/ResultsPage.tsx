@@ -20,6 +20,7 @@ import {
 } from "../components/icons";
 import { pushToast } from "../store";
 import { usePill } from "../components/usePill";
+import { useCascade, usePopOnFilter } from "../components/useCascade";
 
 type SortKey = "started" | "level" | "margin" | "stability";
 
@@ -133,7 +134,7 @@ function sessionDate(r: HistoryRow): string {
   return "Дата неизвестна";
 }
 
-export default function ResultsPage() {
+export default function ResultsPage({ active = true }: { active?: boolean }) {
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [sort, setSort] = useState<SortKey>("started");
   const [mode, setMode] = useState<"all" | "screening" | "full">("all");
@@ -173,6 +174,10 @@ export default function ResultsPage() {
   );
   const busy = useRef(false);
   const reportBusy = useRef(false);
+  const rootRef = useCascade<HTMLDivElement>(active);
+  // «Оживление» списка после паузы в наборе: на каждый символ перерисовывать
+  // анимацию нельзя, список мигает.
+  const popRef = usePopOnFilter<HTMLDivElement>(`${query}|${mode}|${sort}`);
 
   const refresh = useCallback(() => {
     commands.historyList().then(setRows).catch((e) => pushToast("err", String(e)));
@@ -409,7 +414,7 @@ export default function ResultsPage() {
   }, [sorted, mode, query, schemeNames]);
 
   return (
-    <div className="page fill results-page">
+    <div className="page fill results-page" ref={rootRef}>
       <div className="page-head">
         <h1>Результаты</h1>
         {/* Счётчик живёт в строке заголовка: отдельной строкой он занимал
@@ -546,7 +551,7 @@ export default function ResultsPage() {
             : "Подходящих сессий не найдено"}
         </div>
       ) : (
-        <FadeScroll className="session-list fill-list">
+        <FadeScroll className="session-list fill-list" innerRef={popRef}>
           {shown.map((r) => (
             <article
               key={r.file_name}

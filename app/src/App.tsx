@@ -104,6 +104,18 @@ export default function App() {
     return () => mq.removeEventListener("change", onChange);
   }, [appearance, sessionRunning]);
 
+  // Шапка экрана: та же схема, что и у каскадов, — класс снимается и
+  // возвращается через кадр, иначе анимация страницы играет один раз при
+  // монтировании: «Бенчмарк» не размонтируется при переходе на другие
+  // вкладки, и возвращаться на него приходилось бы в «мёртвый» экран.
+  useEffect(() => {
+    const host = document.querySelector<HTMLElement>(".page-host.on");
+    if (!host) return;
+    host.classList.remove("pb-host-in");
+    const raf = requestAnimationFrame(() => host.classList.add("pb-host-in"));
+    return () => cancelAnimationFrame(raf);
+  }, [page]);
+
   const toggleCollapse = useCallback(() => {
     // Не пишем IPC внутри апдейтера состояния: React вызывает его дважды
     // (StrictMode) и может вызвать во время чужого обновления. Прочитанное
@@ -189,26 +201,26 @@ export default function App() {
               висели в DOM, скрытые `display:none`, и каждая держала свои
               IPC-вызовы, подписки и таймеры всё время работы приложения. */}
           <div className={`page-host${page === "test" ? " on" : ""}`}>
-            <BenchmarkPage />
+            <BenchmarkPage active={page === "test"} />
           </div>
           {page === "schemes" ? (
             <div className="page-host on">
-              <SchemesPage />
+              <SchemesPage active />
             </div>
           ) : null}
           {page === "results" ? (
             <div className="page-host on">
-              <ResultsPage />
+              <ResultsPage active />
             </div>
           ) : null}
           {page === "log" ? (
             <div className="page-host on">
-              <LogPage />
+              <LogPage active />
             </div>
           ) : null}
           {page === "settings" ? (
             <div className="page-host on">
-              <SettingsPage onAppearance={onAppearance} />
+              <SettingsPage onAppearance={onAppearance} active />
             </div>
           ) : null}
         </main>

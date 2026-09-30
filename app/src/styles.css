@@ -67,12 +67,11 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .sidebar.collapsed .nav-glyph svg{width:18px;height:18px}
 .main{flex:1;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding:var(--sp-4) var(--sp-5) var(--sp-7);display:flex;flex-direction:column}
 .page-host{display:none}
-.page-host.on{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;animation:var(--motion-page) var(--ease) both}
-.page-host.on .page>*{animation:var(--motion-rise) var(--ease) backwards}
-.page-host.on .page>*:nth-child(2){animation-delay:50ms}
-.page-host.on .page>*:nth-child(3){animation-delay:.1s}
-.page-host.on .page>*:nth-child(4){animation-delay:.15s}
-.page-host.on .page>*:nth-child(n+5){animation-delay:.2s}
+.page-host.on{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
+/* Появление страницы перезапускается классом: без него анимация играла один
+   раз при монтировании, и возврат на «Бенчмарк» (единственная вкладка, которая
+   не размонтируется) был бы без анимации. */
+.page-host.on.pb-host-in{animation:var(--motion-page) var(--ease) both}
 /* `min-height:100%`, а не `calc(100vh - 122px)`: магическое число не совпадало с
    реальной высотой шапки, и короткая страница выходила за край окна. */
 /* `width:100%` обязателен. `.page` — flex-элемент колоночного flex-контейнера
@@ -315,11 +314,7 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 
 /* Список истории — единственный прокручиваемый элемент на странице: раньше стоял
    `max-height:436px`, и при большом числе сессий появлялись две полосы. */
-.results-list{display:flex;flex-direction:column;gap:var(--sp-2);flex:1 1 auto;min-height:0;max-height:none;overflow-y:auto}
 
-
-.results-list>*{animation:var(--motion-rise) var(--ease) backwards}
-.results-list>*:nth-child(n+3){animation-delay:40ms}
 @media (max-width: 560px){
 }
 /* --- ╨Т╨╛╤Б╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╤А╨╕ ╤А╨╡╨║╨╛╨╜╤Б╤В╤А╤Г╨║╤Ж╨╕╨╕: ╤Г╨▓╨╡╨┤╨╛╨╝╨╗╨╡╨╜╨╕╤П, ╤Б╨┐╨╕╨╜╨╜╨╡╤А╤Л num-in, ╤Г╨╖╨║╨╕╨╡ ╤Н╨║╤А╨░╨╜╤Л, ╨┐╨╡╤А╤Д ╤Б╨┐╨╕╤Б╨║╨░ --- */
@@ -660,11 +655,6 @@ html.bench-running .pick-tile{
 
 .empty-card{background:var(--bg-1);border:1px dashed var(--line-2);border-radius:14px;padding:36px 20px;text-align:center;color:var(--fg-mute);font-size:var(--fs-body)}
 
-.schemes-grid>*{animation:var(--motion-rise) var(--ease) backwards}
-.schemes-grid>*:nth-child(2){animation-delay:30ms}
-.schemes-grid>*:nth-child(3){animation-delay:60ms}
-.schemes-grid>*:nth-child(4){animation-delay:90ms}
-.schemes-grid>*:nth-child(n+5){animation-delay:.12s}
 .schemes-grid.list-mode>*{animation:none}
 
 @media (max-width:920px){
@@ -723,9 +713,6 @@ html.bench-running .pick-tile{
 .btn-del svg{width:15px;height:15px}
 .btn-del:hover{color:var(--err);background:color-mix(in srgb,var(--err) 12%,transparent);border-color:color-mix(in srgb,var(--err) 42%,transparent)}
 
-.session-list>*{animation:var(--motion-rise) var(--ease) backwards}
-.session-list>*:nth-child(2){animation-delay:30ms}
-.session-list>*:nth-child(n+3){animation-delay:60ms}
 
 @media (max-width:780px){
 .results-page{height:auto;min-height:0}
@@ -1257,3 +1244,71 @@ html[data-motion="off"] *::after{
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:1ms!important;animation-iteration-count:1!important;transition-duration:1ms!important}
 }
+/* ===== Каскады появления =====
+   Анимация живёт на классе `.pb-cascade` и перезапускается хуком
+   `useCascade` при каждом открытии экрана: без этого анимация играла один раз
+   при монтировании, и при возврате на вкладку экран выходил «мёртвым», причём
+   назад выглядел иначе, чем вперёд.
+
+   Каскад ограничен 14 элементами: на длинных списках (111 схем, сотни строк
+   журнала) одновременная анимация всех карточек сама по себе подтормаживает
+   интерфейс, поэтому дальше элементы появляются без задержки. */
+.pb-cascade>*{animation:pb-fade-up var(--t-3) var(--e-out) backwards;animation-delay:calc(var(--i, 0) * var(--pb-stagger))}
+.pb-cascade>*:nth-child(n+15){animation:none}
+.pb-cascade.list-cascade>*{animation:pb-pop-in 260ms var(--e-out) backwards;animation-delay:calc(var(--i, 0) * 22ms)}
+.pb-cascade.list-cascade>*:nth-child(n+13){animation:none}
+/* Строка, чьи данные изменились: короткая вспышка без прыжка габаритов. */
+.pb-flash{background-color:rgba(255,255,255,.10)}
+/* Каскад строк внутри списков. Прямые дети страницы уже оживают каскадом
+   `.pb-cascade > *`, а строки списков лежат глубже и разворачиваются отдельно:
+   ограничение 12 строк, иначе на 111 схемах или сотнях строк журнала
+   одновременная анимация сама подтормаживает интерфейс. */
+.pb-cascade .schemes-grid>*,
+.pb-cascade .pick-grid>*,
+.pb-cascade .session-list>*,
+.pb-cascade .log-list>*,
+.pb-cascade .part-list>*,
+.pb-cascade .ph-grid>*,
+.pb-cascade .kpi-strip>*,
+.pb-cascade .mode-grid>*,
+.pb-cascade .launch-grid>*,
+.pb-cascade .kv-table>*,
+.pb-cascade .schemes-tbl tbody>tr,
+.pb-cascade .phases-tbl tbody>tr,
+.pb-cascade .set-sec>*{
+  animation:pb-pop-in 260ms var(--e-out) backwards;
+  animation-delay:calc(var(--i, 0) * 22ms)
+}
+.pb-cascade .schemes-grid>*:nth-child(n+13),
+.pb-cascade .pick-grid>*:nth-child(n+13),
+.pb-cascade .session-list>*:nth-child(n+13),
+.pb-cascade .log-list>*:nth-child(n+13),
+.pb-cascade .part-list>*:nth-child(n+13),
+.pb-cascade .ph-grid>*:nth-child(n+13),
+.pb-cascade .kpi-strip>*:nth-child(n+13),
+.pb-cascade .mode-grid>*:nth-child(n+13),
+.pb-cascade .launch-grid>*:nth-child(n+13),
+.pb-cascade .kv-table>*:nth-child(n+13),
+.pb-cascade .schemes-tbl tbody>tr:nth-child(n+13),
+.pb-cascade .phases-tbl tbody>tr:nth-child(n+13),
+.pb-cascade .set-sec>*:nth-child(n+13){animation:none}
+
+/* Поиск: список «оживает» после паузы в наборе, а не мигает на каждый
+   символ. Класс вешает хук `usePopOnFilter` через 180 мс. */
+.pb-pop-list>*{animation:pb-pop-in 240ms var(--e-out) backwards;animation-delay:calc(var(--i, 0) * 18ms)}
+.pb-pop-list>*:nth-child(n+11){animation:none}
+/* ===== Плавность на «Схемах» =====
+   Каскад ограничен 12 карточками, а задержки заданы одной формулой, а не
+   `nth-child`: на списке в 111 схем старые правила навешивали анимацию на
+   каждую строку, и первый кадр после открытия страницы рисовал больше ста
+   анимаций сразу. */
+.schemes-grid>*,.pick-grid>*{will-change:auto}
+
+/* Список не перерисовывается целиком при наведении и переключении выбора:
+   карточки мемоизированы, а spotlight теперь один обработчик на документ. */
+.scheme-card{contain:layout style}
+.pick-card{contain:layout style}
+
+/* Показываем, что страница готова, только после первых данных: до этого
+   список пуст, и каскад играл бы вхолостую по пустой сетке. */
+.schemes-block.is-loading .schemes-grid{visibility:hidden}

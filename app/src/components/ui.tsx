@@ -56,40 +56,78 @@ export function useScrollFade<T extends HTMLElement>() {
  * внутри обработчика, а не один раз при монтировании — иначе подписка
  * осталась бы активной на всю сессию.
  */
+/**
+ * Мягкий свет за курсором (spotlight). Без ре-рендеров: координаты пишутся
+ * напрямую в CSS-переменные через rAF.
+ *
+ * Один обработчик на весь документ, а не по одному на каждую карточку.
+ * Раньше `pointermove` висел на каждом `.spot`: на экране «Схемы» их больше
+ * ста, и одно движение мыши запускало сто вызовов `getBoundingClientRect()`
+ * (принудительный layout) и сто записей в стиль — отсюда лаг при движении
+ * указателя. Теперь событие делегируется: на каждое движение обновляется
+ * ровно одна карточка под курсором.
+ *
+ * Во время замера подсветка выключена (класс `bench-running` на `<html>`), и
+ * обработчик движения мыши не делает ничего: иначе каждое движение мыши во
+ * время бенчмарка планировало бы кадр с записью в DOM. Проверка классов идёт
+ * внутри обработчика, а не один раз при монтировании — иначе подписка
+ * осталась бы активной на всю сессию.
+ */
+let spotlightInstalled = false;
+
+/** Карточка, подсвеченная в прошлом кадре: с неё снимаем свет. */
+let spotlightLit: HTMLElement | null = null;
+
+function spotlightOff(): void {
+  if (spotlightLit) {
+    spotlightLit.classList.remove("spot-on");
+    spotlightLit = null;
+  }
+}
+
+function installSpotlight(): void {
+  if (spotlightInstalled) return;
+  spotlightInstalled = true;
+  let raf = 0;
+  const off = () =>
+    document.documentElement.classList.contains("reduce-motion") ||
+    document.documentElement.classList.contains("bench-running");
+  document.addEventListener(
+    "pointermove",
+    (e) => {
+      const el = (e.target as HTMLElement | null)?.closest?.(".spot");
+      if (el !== spotlightLit) spotlightOff();
+      if (!el) return;
+      if (off()) return;
+      spotlightLit = el as HTMLElement;
+      if (raf !== 0) return;
+      const x = e.clientX;
+      const y = e.clientY;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const node = spotlightLit;
+        if (!node || !node.isConnected) return;
+        const r = node.getBoundingClientRect();
+        node.style.setProperty("--mx", `${x - r.left}px`);
+        node.style.setProperty("--my", `${y - r.top}px`);
+        node.classList.add("spot-on");
+      });
+    },
+    { passive: true },
+  );
+  // Уход указателя с окна и потеря фокуса тоже гасят свет: иначе он «залипал»
+  // на последней карточке.
+  document.addEventListener("pointerleave", spotlightOff);
+  window.addEventListener("blur", spotlightOff);
+}
+
 export function useSpotlight<T extends HTMLElement>() {
   const ref = useRef<T>(null);
   useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const off = () =>
-      document.documentElement.classList.contains("reduce-motion") ||
-      document.documentElement.classList.contains("bench-running");
-    let raf = 0;
-    const onMove = (e: PointerEvent) => {
-      if (off()) {
-        el.classList.remove("spot-on");
-        return;
-      }
-      cancelAnimationFrame(raf);
-      const r = el.getBoundingClientRect();
-      const x = e.clientX - r.left;
-      const y = e.clientY - r.top;
-      raf = requestAnimationFrame(() => {
-        el.style.setProperty("--mx", `${x}px`);
-        el.style.setProperty("--my", `${y}px`);
-        el.classList.add("spot-on");
-      });
-    };
-    const onLeave = () => {
-      cancelAnimationFrame(raf);
-      el.classList.remove("spot-on");
-    };
-    el.addEventListener("pointermove", onMove, { passive: true });
-    el.addEventListener("pointerleave", onLeave);
+    installSpotlight();
+    // Если карточка ушла с экрана, а на ней горел свет — снимаем.
     return () => {
-      cancelAnimationFrame(raf);
-      el.removeEventListener("pointermove", onMove);
-      el.removeEventListener("pointerleave", onLeave);
+      if (ref.current && spotlightLit === ref.current) spotlightOff();
     };
   }, []);
   return ref;
@@ -119,14 +157,25 @@ export function Spot({
 export function FadeScroll({
   className = "",
   children,
+  innerRef,
   ...rest
-}: React.HTMLAttributes<HTMLDivElement>) {
+}: React.HTMLAttributes<HTMLDivElement> & {
+  /** Ref на сам прокручиваемый блок: нужен хукам, которые вешают классы
+   *  анимации прямо на контейнер (например, «оживление» после фильтра). */
+  innerRef?: React.RefObject<HTMLDivElement>;
+}) {
   const { ref, top, bottom } = useScrollFade<HTMLDivElement>();
   const cls = [className, top ? "fade-top" : "", bottom ? "fade-bottom" : ""]
     .filter(Boolean)
     .join(" ");
+  // Свой ref и переданный должны указывать на один узел, поэтому внешний
+  // подменяет внутренний.
+  const setRef = (node: HTMLDivElement | null) => {
+    (ref as { current: HTMLDivElement | null }).current = node;
+    if (innerRef) (innerRef as { current: HTMLDivElement | null }).current = node;
+  };
   return (
-    <div ref={ref} className={cls} {...rest}>
+    <div ref={setRef} className={cls} {...rest}>
       {children}
     </div>
   );

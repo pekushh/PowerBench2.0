@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import { commands, type SettingsDto } from "../api";
 import { Button, Glass, Seg, Switch } from "../components/ui";
+import { useCascade } from "../components/useCascade";
 import { FolderIcon, MotionIcon, ShieldIcon, SocketIcon, ThemeIcon } from "../components/icons";
 import { pushToast } from "../store";
 
@@ -33,8 +34,9 @@ const QUICK_TAGS: { label: string; text: string }[] = [
   { label: "Фикс. частота", text: "Фикс. частота CPU" },
 ];
 
-export default function SettingsPage({ onAppearance }: { onAppearance: (s: SettingsDto) => void }) {
+export default function SettingsPage({ onAppearance, active = true }: { onAppearance: (s: SettingsDto) => void; active?: boolean }) {
   const [st, setSt] = useState<SettingsDto | null>(null);
+  const rootRef = useCascade<HTMLDivElement>(active);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [adm, setAdm] = useState<boolean | null>(null);
   const [ac, setAc] = useState<boolean | null>(null);
@@ -121,7 +123,7 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
   };
 
   return (
-    <div className="page tight set-page">
+    <div className="page tight set-page" ref={rootRef}>
       <div className="page-head">
         <h1>Настройки</h1>
         <div className="actions">

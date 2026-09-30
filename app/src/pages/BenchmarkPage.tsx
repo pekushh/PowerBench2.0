@@ -16,6 +16,7 @@ import {
 } from "../api";
 import { Button, Glass, Spot } from "../components/ui";
 import { GearIcon } from "../components/icons";
+import { useCascade } from "../components/useCascade";
 import { pushToast, setRunning, useSession } from "../store";
 import { SchemePicker, filterEligible, sortSchemes } from "../components/SchemeTiles";
 
@@ -136,7 +137,7 @@ function phaseIndex(plan: PhasePlanRow[], name: string | undefined): number {
   return plan.findIndex((p) => p.name === name);
 }
 
-export default function BenchmarkPage() {
+export default function BenchmarkPage({ active = true }: { active?: boolean }) {
   const { running } = useSession();
   const [stage, setStage] = useState<Stage>("mode");
   const [dir, setDir] = useState<"fwd" | "back">("fwd");
@@ -161,6 +162,10 @@ export default function BenchmarkPage() {
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryMsg | null>(null);
   const [starting, setStarting] = useState(false);
+  // Каскад появления перезапускается при каждом открытии вкладки, а не один
+  // раз при монтировании: страницы смонтированы все сразу и переключаются
+  // классом, поэтому анимация иначе играла бы только в первый раз.
+  const rootRef = useCascade<HTMLDivElement>(active);
   // Событие `test-finished` может прийти раньше ответа команды запуска: поток
   // сессии падает ещё до того, как команда вернёт pid. Флаг нужен, чтобы
   // оптимистичное `running = true` не залипло навсегда.
@@ -639,7 +644,7 @@ export default function BenchmarkPage() {
   };
 
   return (
-    <div className="page benchmark-view">
+    <div className="page benchmark-view" ref={rootRef}>
       {/* Единая шапка: заголовок, степпер и кнопки навигации. */}
       <div className="wizard-header">
         <div className="wh-left">

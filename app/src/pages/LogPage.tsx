@@ -10,6 +10,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { commands, onLog, type LoggerEntry } from "../api";
 import { SearchIcon } from "../components/icons";
 import { usePill } from "../components/usePill";
+import { useCascade } from "../components/useCascade";
 import { pushToast } from "../store";
 
 /** Четыре уровня журнала плюс «все». */
@@ -57,7 +58,7 @@ function timeOf(ts: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-export default function LogPage() {
+export default function LogPage({ active = true }: { active?: boolean }) {
   const [entries, setEntries] = useState<LogRow[] | null>(null);
   const [live, setLive] = useState<LogRow[]>([]);
   const [query, setQuery] = useState("");
@@ -66,6 +67,7 @@ export default function LogPage() {
   // По умолчанию скрываем: отчёт заведомо уходит вовне (в чат, в issues), а
   // логин и путь `C:\Users\…` для разбора ошибки ничего не дают.
   const [redact, setRedact] = useState(true);
+  const rootRef = useCascade<HTMLDivElement>(active);
   const [copied, setCopied] = useState(false);
   const nextKey = useRef(0);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -221,7 +223,7 @@ export default function LogPage() {
       : `Показано ${shown.length} из ${all.length} записей`;
 
   return (
-    <div className="page fill logs-page">
+    <div className="page fill logs-page" ref={rootRef}>
       <div className="page-head">
         <h1>Логи</h1>
         <div className="actions">

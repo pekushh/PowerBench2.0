@@ -23,6 +23,7 @@ import {
 import { Button, Modal, Spot } from "./ui";
 import { pushToast } from "../store";
 import { usePill } from "./usePill";
+import { usePopOnFilter } from "./useCascade";
 
 type Filter = "all" | "fav" | "excluded" | "dup";
 
@@ -124,6 +125,7 @@ export function SchemePicker({
     return m;
   }, [quarantine]);
   const pickerFilterPill = usePill(filter, [schemes.length, favs.size, excluded.size]);
+  const pickerPopRef = usePopOnFilter<HTMLDivElement>(query + filter);
 
   const copies = useMemo(() => copyMark(schemes), [schemes]);
 
@@ -317,7 +319,7 @@ export function SchemePicker({
           </div>
         </div>
       ) : (
-        <div className="pick-grid">
+        <div className="pick-grid" ref={pickerPopRef}>
           {visible.map((s) => {
             const key = s.guid.toLowerCase();
             const isFav = favs.has(key);
@@ -486,6 +488,7 @@ export default function SchemeTiles({
   );
   const pageFilterPill = usePill(filter, [schemes.length, favs.size, excluded.size]);
   const viewPill = usePill(view);
+  const pagePopRef = usePopOnFilter<HTMLDivElement>(query + filter);
   const copies = useMemo(() => copyMark(schemes), [schemes]);
 
   const counts = useMemo(
@@ -587,7 +590,9 @@ export default function SchemeTiles({
   ];
 
   return (
-    <div className="schemes-block">
+      <div
+        className={`schemes-block${schemes.length === 0 ? " is-loading" : ""}`}
+      >
       <div className="schemes-toolbar">
         <div className="toolbar-left">
           <div className="search-box sch-search">
@@ -665,7 +670,7 @@ export default function SchemeTiles({
                   : "Нет схем для отображения."}
         </div>
       ) : (
-        <div className={`schemes-grid${view === "list" ? " list-mode" : ""}`}>
+        <div className={`schemes-grid${view === "list" ? " list-mode" : ""}`} ref={pagePopRef}>
           {visible.map((s) => {
             const isFav = favs.has(s.guid.toLowerCase());
             const isEx = excluded.has(s.guid.toLowerCase());

@@ -170,9 +170,9 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
             <Seg
               label="Тема оформления"
               options={[
-                { value: "Dark", label: "Тёмная", swatch: "dark" },
-                { value: "Light", label: "Светлая", swatch: "light" },
-                { value: "Auto", label: "Авто", swatch: "auto" },
+                { value: "Dark", label: "Тёмная" },
+                { value: "Light", label: "Светлая" },
+                { value: "Auto", label: "Авто" },
               ]}
               // Значение приходит строкой: неизвестное отображаем как «Авто»,
               // иначе `Seg` остался бы без выбранного пункта.
@@ -199,7 +199,6 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
       <section className="set-sec">
         <div className="section-head">
           <h2 className="section-title">Состояние системы</h2>
-          <span className="hint">{readyNote(adm, ac)}</span>
         </div>
         <div className="set-status">
           <StatusCard
@@ -227,14 +226,11 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
           <span className="hint">Необязательно · добавляется в отчёт</span>
         </div>
         <Glass className="bios-card">
-          <div className="bios-top">
-            <span className="bios-label">Разгон, андервольт и память</span>
-            <span className="hint">Укажите изменения, если настройки отличаются от штатных</span>
-          </div>
+          <span className="bios-label">Разгон, андервольт и память</span>
           <textarea
             className="bios-input"
             value={st.cpu_notes}
-            rows={3}
+            rows={2}
             maxLength={500}
             placeholder="Например: PBO +200 МГц, Curve Optimizer −30, SMT выкл, 2×16 ГБ DDR5-6000 CL30"
             onChange={(e) => patch({ cpu_notes: e.target.value })}
@@ -266,21 +262,6 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
       </section>
     </div>
   );
-}
-
-/**
- * Готовность к замеру для подписи секции.
- *
- * Пока признаки не проверены, показывается «Проверяем…»: иначе на первой
- * секунде мелькнуло бы «Готова», а потом сменилось на «Нужны права». Само
- * «Готова» появляется только когда оба условия действительно выполнены —
- * иначе это была бы надпись враньём.
- */
-function readyNote(adm: boolean | null, ac: boolean | null): string {
-  if (adm == null || ac == null) return "Проверяем…";
-  if (!adm) return "Нужны права администратора";
-  if (!ac) return "Подключите питание от сети";
-  return "Готова к проведению замеров";
 }
 
 /**

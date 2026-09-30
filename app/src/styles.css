@@ -475,10 +475,15 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 /* --- Настройки: раскладка «строка настройки» и карточки состояния --------- */
 .set-page{gap:var(--sp-2)}
 .set-sec{display:flex;flex-direction:column;gap:var(--sp-1)}
-.set-sec .section-head{margin-top:var(--sp-2)}
+.set-sec .section-head{margin-top:var(--sp-2);flex-wrap:nowrap;justify-content:space-between;align-items:baseline;gap:var(--sp-3)}
+/* Подпись секции прижата к правому краю и не переносится: на своей строке она
+   расталкивала карточки по вертикали. */
+.set-sec .section-head .hint{margin-left:auto;text-align:right;min-width:0}
 
 /* Кнопка каталога в шапке: приглушённая, с рамкой и значком. */
-.folder-btn{display:inline-flex;align-items:center;gap:7px;padding:0 13px;height:var(--ctrl-h);border-radius:var(--radius-md);border:1px solid var(--line-1);background:var(--bg-1);color:var(--fg-dim);font:inherit;font-size:var(--fs-sm);font-weight:500;cursor:pointer;white-space:nowrap;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+/* Радиус 9px, а не общий `--radius-md` (14px): на кнопке высотой 34px он
+   выглядел овально и совпадал по форме со статус-пилюлями ниже. */
+.folder-btn{display:inline-flex;align-items:center;gap:7px;padding:0 13px;height:var(--ctrl-h);border-radius:9px;border:1px solid var(--line-1);background:var(--bg-1);color:var(--fg-dim);font:inherit;font-size:var(--fs-sm);font-weight:500;cursor:pointer;white-space:nowrap;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
 .folder-btn svg{width:15px;height:15px;color:var(--fg-mute);flex:0 0 auto;transition:color var(--dur) var(--ease)}
 .folder-btn:hover{background:var(--bg-2);border-color:var(--line-2);color:var(--fg)}
 .folder-btn:hover svg{color:var(--fg-dim)}
@@ -495,11 +500,11 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 .set-title{font-size:var(--fs-body);font-weight:600;color:var(--fg)}
 .set-sub{font-size:var(--fs-sm);color:var(--fg-mute);margin-top:1px}
 
-/* Точки-образцы в переключателе темы. */
-.swatch{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 auto}
-.swatch.dark{background:#2B2B2B;border:1.5px solid #999}
-.swatch.light{background:#F3F3F3;border:1.5px solid #999}
-.swatch.auto{background:linear-gradient(135deg,#1B1B1B 50%,#F3F3F3 50%);border:1px solid #888}
+/* Переключатель темы. Значения сняты с общих правил `.seg`: у контейнера был
+   радиус 14px, а у активной кнопки — `calc(14px - 3px)`, и при внутреннем
+   отступе 3px рамка активной кнопки сливалась с рамкой контейнера. */
+.set-page .seg{padding:3px;gap:2px;border-radius:10px}
+.set-page .seg button{border-radius:7px;padding:5px 14px;min-height:0}
 
 /* Карточки состояния: две колонки, значок + текст слева, метка справа. */
 .set-status{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-3)}
@@ -516,15 +521,17 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 
 /* Заметка о железе: поле и быстрые теги. */
 .bios-card{display:flex;flex-direction:column;gap:var(--sp-3);padding:var(--sp-4)}
-.bios-top{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap}
-.bios-label{font-size:var(--fs-body);font-weight:600;color:var(--fg);flex:0 0 auto}
-.bios-top .hint{flex:1 1 260px;min-width:0}
-.bios-input{width:100%;min-height:62px;resize:vertical;background:var(--bg-0);color:var(--fg);border:1px solid var(--line-1);border-radius:var(--radius-md);padding:10px 13px;font:inherit;font-size:var(--fs-body);line-height:1.45;transition:border-color var(--dur) var(--ease)}
+.bios-label{font-size:var(--fs-body);font-weight:600;color:var(--fg)}
+/* Высота фиксирована, растягивание выключено: у поля с двумя строками под
+   плейсхолдером оставалась пустая чёрная полоса. */
+.bios-input{width:100%;height:54px;resize:none;background:var(--bg-0);color:var(--fg);border:1px solid var(--line-1);border-radius:var(--radius-md);padding:8px 13px;font:inherit;font-size:var(--fs-body);line-height:1.45;transition:border-color var(--dur) var(--ease)}
 .bios-input::placeholder{color:var(--fg-mute)}
 .bios-input:focus{outline:none;border-color:var(--line-2)}
 .qt-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
 .qt-label{font-size:var(--fs-meta);color:var(--fg-mute);margin-right:2px}
-.qt-chip{background:var(--bg-2);color:var(--fg-dim);border:1px solid var(--line-1);border-radius:7px;padding:3px 9px;font:inherit;font-size:var(--fs-meta);cursor:pointer;white-space:nowrap;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+/* Радиус меньше, чем у статус-пилюль: при 7px чипы читаются как кнопки, а не
+   как ещё одна плашка состояния. */
+.qt-chip{background:var(--bg-2);color:var(--fg-dim);border:1px solid var(--line-1);border-radius:7px;padding:4px 10px;font:inherit;font-size:var(--fs-meta);cursor:pointer;white-space:nowrap;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
 .qt-chip:hover:not(:disabled){border-color:color-mix(in srgb,var(--ok) 45%,transparent);color:var(--ok);background:color-mix(in srgb,var(--ok) 10%,transparent)}
 .qt-chip:disabled{opacity:.42;cursor:default;text-decoration:line-through}
 .qt-clear{margin-left:auto;background:transparent;border:0;color:var(--fg-mute);font:inherit;font-size:var(--fs-meta);cursor:pointer;padding:3px 4px}
@@ -542,8 +549,6 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 .set-row .seg button{flex:1 1 0;justify-content:center}
 .set-row .switch{align-self:flex-start}
 .status-card{align-items:flex-start;flex-direction:column;gap:var(--sp-2)}
-.bios-top{flex-direction:column;gap:4px}
-.bios-top .hint{flex:1 1 auto}
 .qt-clear{margin-left:0}
 }
 @keyframes toastIn{0%{opacity:0;transform:translateX(16px)}100%{opacity:1;transform:none}}

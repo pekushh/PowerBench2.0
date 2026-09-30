@@ -30,7 +30,7 @@ const QUICK_TAGS: { label: string; text: string }[] = [
   { label: "Curve Optimizer", text: "Curve Optimizer −30" },
   { label: "XMP / EXPO", text: "XMP / EXPO активен" },
   { label: "SMT выкл", text: "SMT отключён" },
-  { label: "Фикс. частота", text: "Фиксированная частота CPU" },
+  { label: "Фикс. частота", text: "Фикс. частота CPU" },
 ];
 
 export default function SettingsPage({ onAppearance }: { onAppearance: (s: SettingsDto) => void }) {
@@ -199,9 +199,7 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
       <section className="set-sec">
         <div className="section-head">
           <h2 className="section-title">Состояние системы</h2>
-          <span className="hint">
-            Схемы сравниваются по средней throughput, худшей секунде (P1) и стабильности.
-          </span>
+          <span className="hint">{readyNote(adm, ac)}</span>
         </div>
         <div className="set-status">
           <StatusCard
@@ -211,7 +209,6 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
             state={adm}
             okLabel="Активно"
             badLabel="Нет прав"
-            unknown="Проверяем…"
           />
           <StatusCard
             icon={<SocketIcon />}
@@ -220,7 +217,6 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
             state={ac}
             okLabel="Подключено"
             badLabel="От батареи"
-            unknown="Проверяем…"
           />
         </div>
       </section>
@@ -232,19 +228,15 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
         </div>
         <Glass className="bios-card">
           <div className="bios-top">
-            <span className="bios-label">Разгон, андерволт и память</span>
-            <span className="hint">
-              Укажите изменения, если настройки отличаются от штатных: программа
-              не может отличить разгон от буста, а на разгоне результат меняется
-              сильнее, чем от схемы питания.
-            </span>
+            <span className="bios-label">Разгон, андервольт и память</span>
+            <span className="hint">Укажите изменения, если настройки отличаются от штатных</span>
           </div>
           <textarea
             className="bios-input"
             value={st.cpu_notes}
             rows={3}
             maxLength={500}
-            placeholder="например: PBO +200 МГц, андерволт −30, отключён SMT, 2×16 ГБ DDR5-6000"
+            placeholder="Например: PBO +200 МГц, Curve Optimizer −30, SMT выкл, 2×16 ГБ DDR5-6000 CL30"
             onChange={(e) => patch({ cpu_notes: e.target.value })}
           />
           <div className="qt-row">
@@ -277,10 +269,25 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
 }
 
 /**
+ * Готовность к замеру для подписи секции.
+ *
+ * Пока признаки не проверены, показывается «Проверяем…»: иначе на первой
+ * секунде мелькнуло бы «Готова», а потом сменилось на «Нужны права». Само
+ * «Готова» появляется только когда оба условия действительно выполнены —
+ * иначе это была бы надпись враньём.
+ */
+function readyNote(adm: boolean | null, ac: boolean | null): string {
+  if (adm == null || ac == null) return "Проверяем…";
+  if (!adm) return "Нужны права администратора";
+  if (!ac) return "Подключите питание от сети";
+  return "Готова к проведению замеров";
+}
+
+/**
  * Карточка состояния: значок, название и метка справа.
  *
- * Пока проверка не вернулась, показывается «Проверяем…» без зелёной метки:
- * иначе на секунду мелькало «Активно» и потом менялось на «Нет прав».
+ * Пока проверка не вернулась, метка показывает многоточие без зелёного цвета:
+ * иначе на секунду мелькало «Активно» и тут же менялось на «Нет прав».
  */
 function StatusCard({
   icon,
@@ -289,7 +296,6 @@ function StatusCard({
   state,
   okLabel,
   badLabel,
-  unknown,
 }: {
   icon: React.ReactNode;
   title: string;
@@ -297,7 +303,6 @@ function StatusCard({
   state: boolean | null;
   okLabel: string;
   badLabel: string;
-  unknown: string;
 }) {
   const tone = state == null ? "wait" : state ? "ok" : "bad";
   return (
@@ -309,7 +314,7 @@ function StatusCard({
           <div className="set-sub">{sub}</div>
         </div>
       </div>
-      <span className="st-badge">{state == null ? unknown : state ? okLabel : badLabel}</span>
+      <span className="st-badge">{state == null ? "…" : state ? okLabel : badLabel}</span>
     </div>
   );
 }

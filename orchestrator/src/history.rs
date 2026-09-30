@@ -464,6 +464,26 @@ fn now_unix_ns() -> u64 {
         .unwrap_or(0)
 }
 
+/// Время изменения файла в наносекундах Unix, 0 если недоступно.
+///
+/// У прерванной сессии метка старта не пишется вовсе, и вместо неё получается
+/// нулевой таймстамп `19700101T000000Z000`. Единственный реальный ориентир
+/// для такой записи — время, когда её файл появился на диске.
+pub fn file_modified_at_ns(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return 0;
+    };
+    let Ok(modified) = meta.modified() else {
+        return 0;
+    };
+    match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => u64::try_from(d.as_nanos()).unwrap_or(0),
+        // Файл записан до 1970 года: системного времени не существует, но
+        // сам факт времени изменения полезнее нуля.
+        Err(e) => u64::try_from(e.duration().as_nanos()).unwrap_or(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +664,23 @@ mod tests {
         assert_eq!(&stamp[..8], "20231114");
         assert_eq!(&stamp[9..15], "221320");
         assert!(stamp.ends_with("Z000"));
+    }
+
+    #[test]
+    fn file_modified_at_ns_reports_written_file_and_zero_for_missing() {
+        let dir = std::env::temp_dir().join("powerbench-history-mtime-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = save_result_in(&sample_session("MTIME01"), &dir).unwrap();
+        // Только что записанный файл: время изменения обязано быть ненулевым,
+        // иначе у прерванной сессии нечем заменить нулевой таймстамп.
+        let mtime = file_modified_at_ns(&saved);
+        assert!(
+            mtime > 0,
+            "время изменения свежезаписанного файла не получено"
+        );
+        assert_eq!(file_modified_at_ns(&dir.join("нет-такого.json")), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

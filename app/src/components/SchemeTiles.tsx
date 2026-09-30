@@ -373,7 +373,6 @@ export default function SchemeTiles({
   exportTarget,
   onSelectExport,
   onChanged,
-  headerMeta,
 }: {
   schemes: SchemeRow[];
   settings: SettingsDto | null;
@@ -382,8 +381,6 @@ export default function SchemeTiles({
   exportTarget?: string | null;
   onSelectExport?: (guid: string | null) => void;
   onChanged: () => void;
-  /** Готовая сводка для шапки страницы («N схем · дубликатов по имени: M»). */
-  headerMeta?: React.ReactNode;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
@@ -422,7 +419,9 @@ export default function SchemeTiles({
         if (filter === "dup" && !copies.has(s.guid)) return false;
         return true;
       })
-      .sort(schemeOrder);
+      // Активная схема идёт первой: её ищут чаще всего, а при афавибной
+      // сортировке она оказывалась в середине списка из сотни строк.
+      .sort((a, b) => Number(b.active) - Number(a.active) || schemeOrder(a, b));
   }, [schemes, query, filter, favs, excluded, copies]);
 
   // Записи настроек выстраиваются в очередь: два быстрых щелчка раньше читали
@@ -499,7 +498,6 @@ export default function SchemeTiles({
 
   return (
     <div className="schemes-block">
-      {headerMeta ? <div className="schemes-meta">{headerMeta}</div> : null}
       <div className="schemes-toolbar">
         <div className="toolbar-left">
           <div className="search-box sch-search">
@@ -583,20 +581,25 @@ export default function SchemeTiles({
                   <span className="sc-name" title={s.name || s.guid}>
                     {s.name || "Без названия"}
                   </span>
-                  {copy && copy.copy > 1 ? (
-                    <span
-                      className="sc-badge dup"
-                      title={`Схем с таким именем: ${copy.of}`}
-                    >
-                      Копия #{copy.copy}/{copy.of}
-                    </span>
-                  ) : null}
-                  {isWin ? (
-                    <span className="sc-badge sys" title="Встроенная схема Windows">
-                      Windows
-                    </span>
-                  ) : null}
-                  {isEx ? <span className="sc-badge ex">исключена</span> : null}
+                  <span className="sc-head-tags">
+                    {copy ? (
+                      <span
+                        // Первая схема группы — нейтральный бейдж, остальные
+                        // подсвечены: без «#1» пара выглядела как одна копия
+                        // с потерянным оригиналом.
+                        className={`sc-badge ${copy.copy > 1 ? "dup" : "orig"}`}
+                        title={`Схем с таким именем: ${copy.of}`}
+                      >
+                        Копия #{copy.copy}/{copy.of}
+                      </span>
+                    ) : null}
+                    {isWin ? (
+                      <span className="sc-badge sys" title="Встроенная схема Windows">
+                        Windows
+                      </span>
+                    ) : null}
+                    {isEx ? <span className="sc-badge ex">исключена</span> : null}
+                  </span>
                 </div>
 
                 <div className="sc-foot">

@@ -2,7 +2,7 @@
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-cyrillic.woff2) format("woff2-variations");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-latin-ext.woff2) format("woff2-variations");unicode-range:U+0100-02AF,U+0304,U+0308,U+0329,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-latin.woff2) format("woff2-variations");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
-:root{--bg-0: #0F0F0F;--bg-1: #1B1B1B;--bg-2: #2B2B2B;--bg-3: #303030;--line-1: #f3f3f31c;--line-2: #f3f3f338;--fg: #F3F3F3;--fg-dim: #ECECEC;--fg-mute: #7E7E7E;--accent: #FDFDFD;--ok: #6fd0a0;--warn: #e4b46f;--err: #e57979;--info: #5aa2f2;--radius: 18px;--ease: cubic-bezier(.22, 1, .36, 1);color-scheme:dark}
+:root{--bg-0: #0F0F0F;--bg-1: #1B1B1B;--bg-2: #2B2B2B;--bg-3: #303030;--line-1: #f3f3f31c;--line-2: #f3f3f338;--fg: #F3F3F3;--fg-dim: #ECECEC;--fg-mute: #7E7E7E;--accent: #FDFDFD;--ok: #6fd0a0;--warn: #e4b46f;--err: #e57979;--info: #5aa2f2;--okline: #6fd0a06b;--warnline: #e4b46f6b;--errline: #e579796b;--radius: 18px;--ease: cubic-bezier(.22, 1, .36, 1);color-scheme:dark}
 [data-theme=Ocean]{--accent: #58c7ee;--info: #4ab3e2;--bg-0: #0b1319;--bg-1: #0e1720}
 [data-theme=Violet]{--accent: #b8acff;--info: #8d8ffc;--bg-0: #110f1b;--bg-1: #141223}
 [data-mode=Light]{--bg-0: #eef1f6;--bg-1: #f3f5fa;--bg-2: #ffffff;--bg-3: #e8ebf2;--line-1: #10141f14;--line-2: #10141f2e;--fg: #15181f;--fg-dim: #4c5563;--fg-mute: #7b8496;color-scheme:light}
@@ -778,8 +778,6 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 .act-secondary:disabled{opacity:.55;cursor:default}
 
 .schemes-block{display:flex;flex-direction:column;gap:var(--sp-3)}
-.schemes-meta{font-size:var(--fs-sm);color:var(--fg-mute);font-variant-numeric:tabular-nums}
-.schemes-meta b{color:var(--fg-dim);font-weight:600}
 .schemes-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .schemes-toolbar .toolbar-left{display:flex;align-items:center;gap:10px;flex:1 1 auto;flex-wrap:wrap;min-width:0}
 .sch-search{flex:1 1 250px;max-width:320px;width:auto}
@@ -832,6 +830,9 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 /* Компактный список: одна колонка для обзора сотни схем. */
 .schemes-grid.list-mode{grid-template-columns:1fr;gap:6px}
 .schemes-grid.list-mode .scheme-card{flex-direction:row;align-items:center;gap:12px;padding:9px 14px}
+/* В компактном списке фиксированная высота заголовка не нужна: там одна
+   строка, и лишние 40px раздували каждую строку списка. */
+.schemes-grid.list-mode .sc-head{min-height:0}
 .schemes-grid.list-mode .sc-head{flex:1 1 auto;align-items:center;justify-content:flex-start;min-width:0}
 .schemes-grid.list-mode .sc-name{-webkit-line-clamp:1}
 .schemes-grid.list-mode .sc-foot{border-top:0;padding-top:0;flex:0 0 auto;gap:14px}
@@ -855,7 +856,6 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 }
 /* ===== Результаты: шапка, панель фильтров, карточки сессий ===== */
 .results-page{gap:var(--sp-3)}
-.results-meta-line{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;flex:0 0 auto}
 
 .results-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;flex:0 0 auto}
 .res-search{flex:1 1 220px;max-width:300px;width:auto}
@@ -923,3 +923,55 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 .mini-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:40;min-width:104px;background:var(--bg-1);border:1px solid var(--line-2);border-radius:9px;padding:4px;box-shadow:var(--shadow-modal)}
 .mini-menu button{display:block;width:100%;text-align:left;padding:6px 9px;border:0;border-radius:6px;background:transparent;color:var(--fg-dim);font:inherit;font-size:var(--fs-sm);cursor:pointer}
 .mini-menu button:hover{background:var(--bg-2);color:var(--fg)}
+/* ===== Правки по «Результатам»: шапка, тулбар, бейджи, кнопка удаления ===== */
+/* Отступ между заголовком и счётчиком в строке шапки. */
+.results-page .page-head{gap:12px}
+/* Счётчик сессий переехал в строку заголовка, поэтому строка-разделитель
+   больше не нужна. */
+.page-head .sub b{color:var(--fg);font-weight:600}
+.results-toolbar{gap:10px}
+.res-search{flex:1 1 260px;min-width:260px;max-width:320px;width:auto}
+
+/* Стрелка формата экспорта смотрит влево (шеврон общего назначения),
+   а в разделительной кнопке нужна вниз. */
+.split-act .caret svg{transform:rotate(-90deg)}
+
+/* Внешняя рамка и рамка активной кнопки сливались в одну линию: отступы
+   внутри блока и скругления развели их. */
+.mode-tabs{padding:3px;border-radius:10px}
+.mtab{border-radius:7px;padding:5px 12px}
+.sort-select{padding-right:28px}
+
+/* Бейдж прерванной сессии вместо зелёного «Лидер» у карточек без
+   результата. */
+.sc-stop-tag{font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent);border:1px solid var(--warnline);padding:1.5px 7px;border-radius:6px;flex:0 0 auto}
+.mode-pill.err{color:var(--err);background:color-mix(in srgb,var(--err) 10%,transparent);border-color:var(--errline);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Кнопка удаления: ровный квадрат с рамкой, а не голый значок. */
+.btn-del{width:34px;height:34px;border-radius:8px;border:1px solid var(--line-1);background:var(--bg-0);color:var(--fg-mute)}
+.btn-del:hover{color:var(--err);background:color-mix(in srgb,var(--err) 12%,transparent);border-color:var(--errline)}
+/* ===== Правки по «Схемам питания»: сводка, поиск, высота заголовков, табы ===== */
+/* Отступ между заголовком и сводкой в строке шапки. */
+.schemes-page .page-head{gap:14px}
+/* Плейсхолдер «Поиск по названию или GUID…» обрезался на «GU»: поле было
+   уже, чем сам текст подсказки. */
+.sch-search{flex:1 1 265px;min-width:265px;max-width:320px}
+
+/* У названий схем разная длина: в одной строке заголовка было две строки, в
+   другой одна, и разделительная линия под названием разъезжалась по высоте
+   между карточками одного ряда. Фиксированная минимальная высота блока
+   заголовка выравнивает подвал с кнопкой «Включить» по всему ряду. */
+.sc-head{min-height:40px;display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.sc-head-tags{display:flex;align-items:center;justify-content:flex-end;gap:4px;flex:0 0 auto;flex-wrap:wrap}
+/* Нейтральный бейдж первой копии: пара «#1/2» и «#2/2» читается целиком. */
+.sc-badge.orig{color:var(--fg-mute);background:rgba(255,255,255,.04);border-color:var(--line-1)}
+
+/* Активная схема закреплена в начале списка и обведена зелёной рамкой. */
+.scheme-card.is-active{border-color:var(--okline)}
+
+/* Контейнер табов и переключателя вида: рамка активной кнопки сливалась с
+   внешней границей блока. */
+.schemes-toolbar .filter-tabs{padding:3px;border-radius:10px}
+.schemes-toolbar .ftab{border-radius:7px}
+.view-switch{padding:3px;border-radius:10px}
+.vbtn{border-radius:7px}

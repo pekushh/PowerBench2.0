@@ -487,6 +487,15 @@ pub struct HistoryRow {
     pub rounds_planned: u32,
     pub rounds_completed: u32,
     pub series: Vec<SeriesPoint>,
+    /// Время изменения файла записи (Unix ns), 0 если недоступно.
+    ///
+    /// У прерванной сессии метка старта не пишется, и `started_label` содержит
+    /// нулевой таймстамп `19700101T000000Z000`. Единственный реальный
+    /// ориентир для такой записи — время появления файла на диске.
+    pub file_modified_at_ns: u64,
+    /// GUID лидера сессии: в файле может не сохраниться имя схемы, а сам GUID
+    /// интерфейс умеет показать как название, если найдёт его в списке схем.
+    pub leader_scheme_guid: String,
 }
 
 /// Лучшая схема сессии для лида строки: рекомендованная, иначе лучшая
@@ -551,6 +560,7 @@ fn history_row(
     let scheme_name = best
         .map(|b| b.name.clone().unwrap_or_else(|| b.scheme_id.clone()))
         .unwrap_or_else(|| "-".to_string());
+    let leader_scheme_guid = best.map(|b| b.scheme_id.clone()).unwrap_or_default();
     let early_stopped = s.early_stop_reason.is_some()
         || (s.rounds_planned > 0 && s.rounds_completed < s.rounds_planned);
     let series = s
@@ -583,6 +593,8 @@ fn history_row(
         rounds_planned: s.rounds_planned,
         rounds_completed: s.rounds_completed,
         series,
+        file_modified_at_ns: history::file_modified_at_ns(&entry.path),
+        leader_scheme_guid,
     }
 }
 
@@ -615,6 +627,8 @@ fn handled_history_rows() -> Result<Vec<HistoryRow>, String> {
                 rounds_planned: 0,
                 rounds_completed: 0,
                 series: Vec::new(),
+                file_modified_at_ns: history::file_modified_at_ns(&entry.path),
+                leader_scheme_guid: String::new(),
             }),
         }
     }

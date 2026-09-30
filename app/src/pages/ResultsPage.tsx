@@ -118,6 +118,35 @@ export function fmtStamp(stamp: string): string {
   return `${pad(local.getDate())}.${pad(local.getMonth() + 1)}.${local.getFullYear()} · ${pad(local.getHours())}:${pad(local.getMinutes())}`;
 }
 
+/** GUID в виде `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`. */
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Unix ns → `ДД.ММ.ГГГГ · ЧЧ:ММ` в локальном времени. */
+function fmtNs(ns: number): string {
+  if (!Number.isFinite(ns) || ns <= 0) return "Дата неизвестна";
+  const d = new Date(ns / 1e6);
+  if (Number.isNaN(d.getTime())) return "Дата неизвестна";
+  const pad = (v: number) => String(v).padStart(2, "0");
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} · ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** Дата сессии: метка старта, иначе время изменения файла на диске.
+ *
+ *  У прерванной сессии метка старта не пишется, и `started_label` содержит
+ *  нулевой таймстамп `19700101T000000Z000` — `fmtStamp` его отбрасывает по
+ *  нижней границе года, и без запасного источника в карточку попадала либо
+ *  сырая метка, либо прочерк. Теперь запасной источник — время изменения
+ *  файла записи.
+ */
+function sessionDate(r: HistoryRow): string {
+  if (r.started_at_ns > 0) {
+    const s = fmtStamp(r.started_label);
+    if (s !== r.started_label) return s;
+  }
+  if (r.file_modified_at_ns > 0) return fmtNs(r.file_modified_at_ns);
+  return "Дата неизвестна";
+}
+
 export default function ResultsPage() {
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [sort, setSort] = useState<SortKey>("started");
@@ -149,6 +178,11 @@ export default function ResultsPage() {
     max_sessions: number;
   } | null>(null);
   const [detail, setDetail] = useState<SessionJson | null>(null);
+  /** GUID → название из списка схем питания: нужно, когда в файле сессии
+   *  сохранился только идентификатор лидера. */
+  const [schemeNames, setSchemeNames] = useState<ReadonlyMap<string, string>>(
+    () => new Map(),
+  );
   const busy = useRef(false);
   const reportBusy = useRef(false);
 
@@ -178,6 +212,20 @@ export default function ResultsPage() {
       unfor.then((f) => f()).catch(() => undefined);
     };
   }, [refresh]);
+
+  useEffect(() => {
+    commands
+      .listSchemes()
+      .then((list) => {
+        const m = new Map<string, string>();
+        for (const s of list) {
+          const name = (s.name || "").trim();
+          if (name) m.set(s.guid.toLowerCase(), name);
+        }
+        setSchemeNames(m);
+      })
+      .catch(() => undefined);
+  }, []);
 
   const sorted = useMemo(() => {
     const arr = [...rows];
@@ -287,24 +335,63 @@ export default function ResultsPage() {
   const modeOf = (r: HistoryRow): "screening" | "full" =>
     r.rounds_completed >= 2 ? "full" : "screening";
 
+  /** Есть ли у сессии итоговый результат. */
+  const hasResult = (r: HistoryRow): boolean =>
+    typeof r.throughput === "number" && Number.isFinite(r.throughput) && r.throughput > 0;
+
+  /** Название схемы сессии.
+   *
+   *  В записи может сохраниться только GUID лидера, и тогда в карточке
+   *  видно `1e600a58-9c04-…` вместо имени. По этому GUID ищем название в
+   *  списке схем питания; если схемы уже нет в системе, показываем GUID
+   *  укороченным — но уже с пометкой, что это идентификатор.
+   */
+  const schemeLabel = (r: HistoryRow): string => {
+    const raw = (r.scheme_name || "").trim();
+    if (raw && raw !== "-" && !GUID_RE.test(raw)) return raw;
+    const guid = r.leader_scheme_guid || (GUID_RE.test(raw) ? raw : "");
+    const known = guid ? schemeNames.get(guid.toLowerCase()) : undefined;
+    if (known) return known;
+    if (guid) return `Схема ${guid.slice(0, 8)}…`;
+    return raw && raw !== "-" ? raw : "Сессия без схемы";
+  };
+
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
     return sorted.filter((r) => {
       if (mode !== "all" && !r.readable) return false;
       if (mode !== "all" && modeOf(r) !== mode) return false;
       if (q) {
-        const hay = `${r.scheme_name} ${r.file_name} ${r.started_label} ${r.level_label}`.toLowerCase();
+        const hay = [
+          schemeLabel(r),
+          r.file_name,
+          r.started_label,
+          sessionDate(r),
+          r.level_label,
+        ]
+          .join(" ")
+          .toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [sorted, mode, query]);
+    // `schemeNames` в зависимостях: подстановка названия приходит позже
+    // списка схем, и без этого отфильтрованный список не пересчитывался.
+  }, [sorted, mode, query, schemeNames]);
 
   return (
     <div className="page fill results-page">
       <div className="page-head">
         <h1>Результаты</h1>
+        {/* Счётчик живёт в строке заголовка: отдельной строкой он занимал
+            высоту и отодвигал тулбар вниз на пустом месте. */}
+        <span className="sub">
+          <b>{rows.length}</b>
+          {stats && stats.max_sessions > 0 ? ` из ${stats.max_sessions}` : ""} сессий
+          {stats ? ` · ${fmtBytes(stats.history_bytes)}` : ""}
+        </span>
         <div className="actions">
+          {lowDisk ? <Badge kind="warn">Место на диске заканчивается</Badge> : null}
           <div className="split-act" ref={fmtRef}>
             <button
               type="button"
@@ -369,15 +456,6 @@ export default function ResultsPage() {
             Обновить
           </button>
         </div>
-      </div>
-
-      <div className="results-meta-line">
-        <span className="schemes-meta">
-          <b>{rows.length}</b>
-          {stats && stats.max_sessions > 0 ? ` из ${stats.max_sessions}` : ""} сессий
-          {stats ? ` · ${fmtBytes(stats.history_bytes)}` : ""}
-        </span>
-        {lowDisk ? <Badge kind="warn">Место на диске заканчивается</Badge> : null}
       </div>
 
       <div className="results-toolbar">
@@ -453,13 +531,19 @@ export default function ResultsPage() {
             >
               <div className="sc-main">
                 <div className="sc-top">
-                  {r.readable ? <span className="sc-winner-tag">Лидер</span> : null}
+                  {hasResult(r) ? (
+                    <span className="sc-winner-tag">Лидер</span>
+                  ) : (
+                    <span className="sc-stop-tag" title="Сессия прервана до получения результата">
+                      Прервана
+                    </span>
+                  )}
                   <span className="sc-title">
-                    {r.readable ? r.scheme_name || "Сессия без схемы" : r.file_name}
+                    {r.readable ? schemeLabel(r) : r.file_name}
                   </span>
                 </div>
                 <div className="sc-sub">
-                  <span>{r.readable ? fmtStamp(r.started_label) : "—"}</span>
+                  <span>{sessionDate(r)}</span>
                   <span className="dot-sep">·</span>
                   <span className="mode-pill">
                     {!r.readable
@@ -469,15 +553,20 @@ export default function ResultsPage() {
                         : "Скрининг"}
                   </span>
                   {r.early_stopped ? <span className="mode-pill warn">ранняя остановка</span> : null}
+                  {!r.readable && r.error ? (
+                    <span className="mode-pill err" title={r.error}>
+                      {r.error}
+                    </span>
+                  ) : null}
                 </div>
               </div>
 
               <div className="sc-metrics">
                 <div className="m-col" title="Медианный throughput лидера">
                   <span className="m-label">Результат</span>
-                  <span className="m-val score">
-                    {f1(r.throughput, 0)}
-                    <small>тик/с</small>
+                  <span className={`m-val${hasResult(r) ? " score" : ""}`}>
+                    {hasResult(r) ? f1(r.throughput, 0) : "—"}
+                    {hasResult(r) ? <small>тик/с</small> : null}
                   </span>
                 </div>
                 <div className="m-col">
@@ -513,7 +602,7 @@ export default function ResultsPage() {
                   type="button"
                   className="btn-del"
                   title="Удалить запись"
-                  aria-label={`Удалить запись ${r.readable ? r.scheme_name || r.plan_guid : r.file_name}`}
+                  aria-label={`Удалить запись ${r.readable ? schemeLabel(r) : r.file_name}`}
                   onClick={(e) => {
                     e.stopPropagation();
                     void deleteRow(r);

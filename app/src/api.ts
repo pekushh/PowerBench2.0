@@ -145,6 +145,12 @@ export interface HistoryRow {
   early_stopped: boolean;
   rounds_planned: number;
   rounds_completed: number;
+  /** Время изменения файла записи (Unix ns), 0 если недоступно. У прерванной
+   *  сессии метка старта нулевая, и дата берётся отсюда. */
+  file_modified_at_ns: number;
+  /** GUID лидера сессии — нужен, чтобы показать название схемы, если в файле
+   *  сохранился только идентификатор. */
+  leader_scheme_guid: string;
 }
 
 /** Статистика прогона в одном диапазоне (зеркало `checkpoint::RunStats`). */

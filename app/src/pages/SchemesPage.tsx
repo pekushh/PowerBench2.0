@@ -109,9 +109,22 @@ export default function SchemesPage() {
   }, [schemes]);
 
   return (
-    <div className="page">
+    <div className="page schemes-page">
       <div className="page-head">
         <h1>Схемы питания</h1>
+        {/* Сводка в строке заголовка: отдельной строкой она отодвигала поиск
+            на лишний отступ сверху. */}
+        <span className="sub">
+          <b>{schemes.length}</b>{" "}
+          {schemes.length % 10 === 1 && schemes.length % 100 !== 11
+            ? "схема"
+            : schemes.length % 10 >= 2 &&
+                schemes.length % 10 <= 4 &&
+                !(schemes.length % 100 >= 12 && schemes.length % 100 <= 14)
+              ? "схемы"
+              : "схем"}{" "}
+          · дубликатов по имени: <b>{dupCount}</b>
+        </span>
         <div className="actions">
           <button
             type="button"
@@ -168,19 +181,6 @@ export default function SchemesPage() {
         exportTarget={exportTarget}
         onSelectExport={setExportTarget}
         onChanged={refresh}
-        headerMeta={
-          <>
-            <b>{schemes.length}</b>{" "}
-            {schemes.length % 10 === 1 && schemes.length % 100 !== 11
-              ? "схема"
-              : schemes.length % 10 >= 2 &&
-                  schemes.length % 10 <= 4 &&
-                  !(schemes.length % 100 >= 12 && schemes.length % 100 <= 14)
-                ? "схемы"
-                : "схем"}{" "}
-            · дубликатов по имени: <b>{dupCount}</b>
-          </>
-        }
       />
       <Modal
         open={askRestore}

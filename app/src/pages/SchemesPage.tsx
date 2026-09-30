@@ -7,7 +7,8 @@ import { Badge, Button, Modal } from "../components/ui";
 import { ExportIcon, PlusIcon, RestoreIcon } from "../components/icons";
 import SchemeTiles from "../components/SchemeTiles";
 import { useCascade } from "../components/useCascade";
-import { pushToast, useSession } from "../store";
+import { pushToast, setSectionDetail, useSession } from "../store";
+import { pluralish } from "../plural";
 
 export default function SchemesPage({ active = true }: { active?: boolean }) {
   const [schemes, setSchemes] = useState<SchemeRow[]>([]);
@@ -30,6 +31,16 @@ export default function SchemesPage({ active = true }: { active?: boolean }) {
   };
 
   useEffect(refresh, []);
+  // Уточнение для шапки: «Схемы питания · 111 схем». Публикует сама страница,
+  // чтобы шапка не делала собственный запрос и не показывала другое число.
+  useEffect(() => {
+    setSectionDetail(
+      schemes.length > 0
+        ? `${schemes.length} ${pluralish(schemes.length, "схема", "схемы", "схем")}`
+        : "",
+    );
+    return () => setSectionDetail("");
+  }, [schemes.length]);
   // После сессии список схем мог измениться (схема восстановлена, карантин
   // обновился) — перечитываем, чтобы страница не показывала устаревшее.
   useEffect(refresh, [running]);

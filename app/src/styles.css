@@ -35,7 +35,7 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .titlebar-btn.narrow{min-width:36px}
 .titlebar .split{width:1px;height:20px;background:var(--line-2);margin:0 6px}
 .body{flex:1;display:flex;min-height:0;gap:10px}
-.sidebar{flex:0 0 200px;display:flex;flex-direction:column;padding:12px 10px;gap:4px;background:var(--bg-1);border:1px solid var(--line-1);border-top:0;border-radius:0 0 var(--radius-lg) var(--radius-lg);transition:flex-basis var(--dur) var(--ease),width var(--dur) var(--ease);overflow:hidden}
+.sidebar{position:relative;flex:0 0 200px;display:flex;flex-direction:column;padding:12px 10px;gap:4px;background:var(--bg-1);border:1px solid var(--line-1);border-top:0;border-radius:0 0 var(--radius-lg) var(--radius-lg);transition:flex-basis var(--t-3) var(--e-out),width var(--t-3) var(--e-out);overflow:hidden}
 .sidebar.collapsed{flex-basis:64px}
 .sidebar-nav{display:flex;flex-direction:column;gap:4px}
 .sidebar-foot{margin-top:auto;display:flex;flex-direction:column;gap:4px;border-top:1px solid var(--line-1);padding-top:8px}
@@ -43,9 +43,9 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 /* Активный пункт: мягкий фон и белая иконка. Полоса-акцент убрана — при
    ширине колонки 200 px она стояла вплотную к краю и выглядела случайной. */
 .nav-item:before{display:none}
-.nav-item:hover{background:var(--bg-2);color:var(--fg)}
-.nav-item:active{transform:scale(.99)}
-.nav-item.active{background:var(--bg-3);color:var(--fg)}
+/* Активный пункт: мягкая заливка и обводка, без рамки вокруг иконки. */
+.nav-item:hover{background:rgba(255,255,255,.035);color:var(--fg-dim)}
+.nav-item.active{background:rgba(255,255,255,.06);border-color:var(--line-2);color:var(--fg)}
 .nav-item.active .nav-glyph{color:var(--accent)}
 .nav-glyph{flex:0 0 auto;display:grid;place-items:center;width:22px;height:22px;color:var(--fg-mute)}
 .nav-glyph svg{width:20px;height:20px}
@@ -1312,3 +1312,45 @@ html[data-motion="off"] *::after{
 /* Показываем, что страница готова, только после первых данных: до этого
    список пуст, и каскад играл бы вхолостую по пустой сетке. */
 .schemes-block.is-loading .schemes-grid{visibility:hidden}
+/* ===== Оболочка: меню и шапка по спецификации =====
+   Переезжающая полоска активного пункта не появляется заново, а меняет
+   высоту и позицию за 320 мс пружиной. Сворачивание идёт по ширине с
+   ограничением текста, а не через `display: none`, чтобы кадр не дёргался. */
+.sidebar{transition:width var(--t-3) var(--e-out)}
+.sidebar-nav{position:relative;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.14) transparent;min-height:0}
+.sidebar-nav::-webkit-scrollbar{width:9px}
+.sidebar-nav::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:999px;border:3px solid transparent;background-clip:content-box}
+.sidebar-nav::-webkit-scrollbar-track{background:transparent}
+.sidebar-foot{position:relative;flex:0 0 auto}
+.nav-item{position:relative;overflow:hidden;transition:background-color var(--t-2) var(--e-out),border-color var(--t-2) var(--e-out),color var(--t-2) var(--e-out),transform var(--dur-fast) var(--e-out)}
+.nav-item:active{transform:scale(.985)}
+.nav-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;transition:opacity var(--t-2) var(--e-out)}
+.nav-glyph{flex:0 0 auto;display:grid;place-items:center}
+
+/* Полоска активного пункта: 3 px, едет между пунктами. */
+.pb-marker{position:absolute;left:0;top:0;width:3px;border-radius:0 3px 3px 0;background:var(--accent);pointer-events:none;z-index:0;transition:transform var(--t-3) var(--e-spring),height var(--t-3) var(--e-spring),opacity var(--t-2) var(--e-out)}
+.sidebar-nav>*,.sidebar-foot>*{position:relative;z-index:1}
+
+/* Сворачивание: подписи схлопываются шириной, группа и палитра исчезают в
+   конце, пункты становятся квадратами. */
+.sidebar.collapsed .nav-label{opacity:0}
+.sidebar.collapsed .nav-item{width:34px;height:34px;padding:0;justify-content:center}
+.sidebar.collapsed .nav-group-title,.sidebar.collapsed .sidebar-palette{opacity:0;width:0;overflow:hidden;margin:0;padding:0;pointer-events:none}
+
+/* Уходящая вкладка: вниз на 6 px и гаснет. */
+.page-host.leaving{animation:pb-slide-out 150ms var(--e-in-out) both}
+@keyframes pb-slide-out{from{opacity:1;transform:none}to{opacity:0;transform:translate3d(0,6px,0)}}
+
+/* Название раздела в шапке: старое уходит вверх, новое приезжает снизу. */
+.titlebar-section{display:inline-flex;align-items:baseline;gap:8px;min-width:0}
+.titlebar-section.is-in{animation:pb-section-in 120ms var(--e-out) both}
+@keyframes pb-section-in{from{opacity:0;transform:translate3d(0,6px,0)}to{opacity:1;transform:none}}
+.titlebar-section-name{font-size:var(--fs-sm);color:var(--fg-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.titlebar-section-detail{font-size:var(--fs-meta);color:var(--fg-mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* Чипы шапки: «Тихий режим» и железо. */
+.titlebar-chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 9px;border-radius:var(--radius-full);border:1px solid var(--line-1);background:var(--bg-1);color:var(--fg-mute);font-size:var(--fs-meta);white-space:nowrap;transition:background var(--t-3) var(--e-out),border-color var(--t-3) var(--e-out),color var(--t-3) var(--e-out)}
+.titlebar-chip.on{color:var(--ok);background:var(--okbg);border-color:var(--okline);box-shadow:0 0 0 4px rgba(111,208,160,.07)}
+.titlebar-chip .dot-live{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
+.titlebar-chip.on .dot-live{animation:pb-breathe 1.5s var(--e-in-out) infinite}
+.titlebar-btn.close:hover{background:rgba(229,121,121,.92);color:#161616;border-color:transparent}

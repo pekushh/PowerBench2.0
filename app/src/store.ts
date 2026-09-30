@@ -5,9 +5,12 @@ import { useSyncExternalStore } from "react";
 
 export interface SessionState {
   running: boolean;
+  /** Уточнение к названию раздела в шапке: «111 схем», «2 сессии»,
+   *  «идёт замер». Публикует активная страница, читает шапка. */
+  sectionDetail: string;
 }
 
-let state: SessionState = { running: false };
+let state: SessionState = { running: false, sectionDetail: "" };
 const listeners = new Set<() => void>();
 
 function notify() {
@@ -17,6 +20,14 @@ function notify() {
 export function setRunning(running: boolean) {
   if (state.running !== running) {
     state = { ...state, running };
+    notify();
+  }
+}
+
+/** Опубликовать уточнение для шапки. */
+export function setSectionDetail(detail: string) {
+  if (state.sectionDetail !== detail) {
+    state = { ...state, sectionDetail: detail };
     notify();
   }
 }
@@ -55,17 +66,17 @@ function toastNotify() {
   for (const l of toastListeners) l();
 }
 
-export function pushToast(kind: Toast["kind"], text: string) {
+export function pushToast(kind: Toast["kind"], text: string, lifeMs = 6500) {
   const t: Toast = { id: nextId++, kind, text };
   toasts = [...toasts, t];
   toastNotify();
-  // Таймер держим отдельно, чтобы его можно было отменить: `setTimeout` на
-  // каждое уведомление сам по себе небольшой утечкой не был, но на странице
-  // логов уведомления идут пачками, и висящие таймеры держали замыкания.
+  // Живёт недолго, но всё равно через `setTimeout`: состояние живёт вне
+  // React, и `useSyncExternalStore` без такого хука обновляет подписчиков
+  // только при следующем изменении списка.
   setTimeout(() => {
     toasts = toasts.filter((x) => x.id !== t.id);
     toastNotify();
-  }, 6500);
+  }, lifeMs);
 }
 
 export function useToasts(): Toast[] {

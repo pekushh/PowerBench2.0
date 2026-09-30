@@ -18,7 +18,7 @@ import {
   SearchIcon,
   TrashIcon,
 } from "../components/icons";
-import { pushToast } from "../store";
+import { pushToast, setSectionDetail } from "../store";
 import { usePill } from "../components/usePill";
 import { useCascade, usePopOnFilter } from "../components/useCascade";
 
@@ -160,8 +160,15 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
       document.removeEventListener("keydown", esc);
     };
   }, [fmtOpen]);
-  const [stats, setStats] = useState<{
-    free_bytes: number;
+  // Уточнение для шапки: «Результаты · 2 сессии».
+  useEffect(() => {
+    setSectionDetail(
+      rows.length > 0 ? `${rows.length} ${plural(rows.length, "сессия", "сессии", "сессий")}` : "",
+    );
+    return () => setSectionDetail("");
+  }, [rows.length]);
+
+  const [stats, setStats] = useState<{    free_bytes: number;
     history_bytes: number;
     max_sessions: number;
   } | null>(null);

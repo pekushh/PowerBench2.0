@@ -376,6 +376,8 @@ export const commands = {
   logFlush: () => invoke<void>("log_flush"),
   /** Имя файла отчёта по умолчанию, чтобы диалог сохранения был осмысленным. */
   diagnosticsFileName: () => invoke<string>("diagnostics_file_name"),
+  /** Состав машины для чипа в шапке: берётся тот же `identity`, что и в отчёте. */
+  identityInfo: () => invoke<IdentityDto>("identity_info"),
   /**
    * Сохранить отчёт для поддержки: журнал, окружение, идентичность замера,
    * состояние контрольной точки, карантина, настроек и последней сессии.

@@ -11,7 +11,8 @@ import { commands, onLog, type LoggerEntry } from "../api";
 import { SearchIcon } from "../components/icons";
 import { usePill } from "../components/usePill";
 import { useCascade } from "../components/useCascade";
-import { pushToast } from "../store";
+import { pushToast, setSectionDetail } from "../store";
+import { pluralish } from "../plural";
 
 /** Четыре уровня журнала плюс «все». */
 type Level = "all" | "info" | "success" | "warn" | "error";
@@ -335,7 +336,15 @@ export default function LogPage({ active = true }: { active?: boolean }) {
           <div className="log-list" ref={listRef} onScroll={onListScroll}>
             {visible.map((e) => {
               const k = normLevel(e.level);
-              return (
+  // Уточнение для шапки: «Логи · 5000 записей».
+  useEffect(() => {
+    setSectionDetail(
+      all.length > 0 ? `${all.length} ${pluralish(all.length, "запись", "записи", "записей")}` : "",
+    );
+    return () => setSectionDetail("");
+  }, [all.length]);
+
+  return (
                 <div key={e.key} className="log-row" data-level={k}>
                   <span className="l-time">{timeOf(e.ts_ms)}</span>
                   <span className={`l-badge ${k}`}>{LEVEL_BADGE[k] ?? e.level}</span>

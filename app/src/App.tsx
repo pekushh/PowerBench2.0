@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { commands, onTestFinished, type SettingsDto } from "./api";
 import { setRunning, useSession, useToasts, pushToast } from "./store";
 import { useScrollFade } from "./components/ui";
+import { usePill } from "./components/usePill";
+import { useRipple } from "./components/useRipple";
 import TitleBar from "./components/TitleBar";
 import { CubeIcon, GearIcon, HomeIcon, ListIcon, PowerIcon } from "./components/icons";
 import BenchmarkPage from "./pages/BenchmarkPage";
@@ -23,8 +25,23 @@ const NAV: { id: PageId; label: string; icon: React.ReactNode }[] = [
   { id: "log", label: "Логи", icon: <ListIcon /> },
 ];
 
-function resolveMode(mode: string): string {
-  if (mode === "Auto") {
+/** Названия разделов для шапки: они же подпись пункта меню. */
+const SECTION_NAMES: Record<PageId, string> = {
+  test: "Бенчмарк",
+  schemes: "Схемы питания",
+  results: "Результаты",
+  log: "Логи",
+  settings: "Настройки",
+};
+
+/** Короткое имя процессора для чипа в шапке: без длинных хвостов вида
+ *  «AMD Ryzen 5 7500F with Radeon Graphics». */
+function shortCpu(brand: string): string {
+  const first = brand.split(/[,(]/)[0].trim();
+  return first.length > 28 ? `${first.slice(0, 27)}…` : first;
+}
+
+function resolveMode(mode: string): string {  if (mode === "Auto") {
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "Light" : "Dark";
   }
   return mode;
@@ -41,10 +58,20 @@ function applyAppearance(s: SettingsDto) {
 
 export default function App() {
   const [page, setPage] = useState<PageId>("test");
+  // Что на самом деле нарисовано: вкладка меняется с задержкой в 150 мс,
+  // чтобы уходящая успела уехать вниз и погаснуть. Без задержки размонтирование
+  // мгновенное и уход не виден вовсе.
+  const [shown, setShown] = useState<PageId>(page);
+  const [leaving, setLeaving] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [appearance, setAppearance] = useState<SettingsDto | null>(null);
   const toasts = useToasts();
   const { ref: mainRef, top: mainTop, bottom: mainBottom } = useScrollFade<HTMLElement>();
+  // Переезжающие полоски активного пункта: в каждой группе меню своя, по
+  // спецификации они меняют позицию и высоту, а не появляются заново.
+  const navMarker = usePill(page, [], "y");
+  const footMarker = usePill(page, [], "y");
+  useRipple();
   // Подписка на «идёт ли сессия» — единственный источник для отключения
   // анимаций ниже.
   const { running: sessionRunning } = useSession();
@@ -104,6 +131,29 @@ export default function App() {
     return () => mq.removeEventListener("change", onChange);
   }, [appearance, sessionRunning]);
 
+  // Смена вкладки: область возвращается к началу раздела плавно, но при
+  // уменьшенном движении — мгновенно, иначе «плавно» означало бы задержку на
+  // целое поведение.
+  useEffect(() => {
+    const el = mainRef.current;
+    if (!el) return;
+    el.scrollTo({
+      top: 0,
+      behavior: appearance?.reduce_motion ? "auto" : "smooth",
+    });
+  }, [page, appearance?.reduce_motion, mainRef]);
+
+  // Уход вкладки: 150 мс на анимацию, затем размонтирование.
+  useEffect(() => {
+    if (page === shown) return;
+    setLeaving(true);
+    const id = window.setTimeout(() => {
+      setShown(page);
+      setLeaving(false);
+    }, 150);
+    return () => window.clearTimeout(id);
+  }, [page, shown]);
+
   // Шапка экрана: та же схема, что и у каскадов, — класс снимается и
   // возвращается через кадр, иначе анимация страницы играет один раз при
   // монтировании: «Бенчмарк» не размонтируется при переходе на другие
@@ -114,7 +164,7 @@ export default function App() {
     host.classList.remove("pb-host-in");
     const raf = requestAnimationFrame(() => host.classList.add("pb-host-in"));
     return () => cancelAnimationFrame(raf);
-  }, [page]);
+  }, [shown]);
 
   const toggleCollapse = useCallback(() => {
     // Не пишем IPC внутри апдейтера состояния: React вызывает его дважды
@@ -122,6 +172,9 @@ export default function App() {
     // значение настроек забираем явно, а запись делаем в отдельном потоке.
     const next = !collapsed;
     setCollapsed(next);
+    // Тост подтверждает действие: сворачивание необратимо взглядом — пункт
+    // остаётся видимым, но без подписи, и легко забыть про `Ctrl+B`.
+    pushToast("info", next ? "Меню свёрнуто" : "Меню развёрнуто", 1800);
     commands
       .getSettings()
       .then((s) => commands.setSettings({ ...s, sidebar_collapsed: next }))
@@ -132,6 +185,32 @@ export default function App() {
   }, [collapsed]);
 
   const onAppearance = useCallback((s: SettingsDto) => setAppearance(s), []);
+
+  // Название раздела и чип железа в шапке. Уточнение публикует активная
+  // страница: так шапка не делает собственных запросов, а показывает то же
+  // число, что и на экране.
+  const { sectionDetail } = useSession();
+  const sectionName = SECTION_NAMES[page];
+  const [hwChip, setHwChip] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    let alive = true;
+    commands
+      .identityInfo()
+      .then((id) => {
+        if (!alive) return;
+        const cpu = (id.cpu_brand || id.cpu_identifier || "").trim();
+        if (!cpu) return;
+        setHwChip(
+          id.memory_gib > 0
+            ? `${shortCpu(cpu)} · ${id.memory_gib.toFixed(0)} ГБ`
+            : shortCpu(cpu),
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Выключатель моторики в топбаре. Значение пишется в те же настройки, что и
   // тумблер в «Настройках», поэтому оба переключателя всегда согласованы и
@@ -157,15 +236,20 @@ export default function App() {
         onToggleCollapse={toggleCollapse}
         motionOff={appearance?.reduce_motion ?? false}
         onToggleMotion={toggleMotion}
+        section={sectionName}
+        sectionDetail={sectionDetail}
+        hardware={hwChip}
+        quietOn={sessionRunning}
       />
       <div className="body">
         <aside className={`sidebar fade-in ${collapsed ? "collapsed" : ""}`}>
-          <nav className="sidebar-nav">
+          <nav className="sidebar-nav" ref={navMarker.ref}>
             {NAV.map((n) => (
               <button
                 key={n.id}
                 type="button"
                 className={`nav-item ${page === n.id ? "active" : ""}`}
+                data-value={n.id}
                 onClick={() => setPage(n.id)}
                 // Навигация была на `<div onClick>`: с клавиатуры и со
                 // скринридера до неё было не добраться вовсе.
@@ -177,10 +261,11 @@ export default function App() {
               </button>
             ))}
           </nav>
-          <div className="sidebar-foot">
+          <div className="sidebar-foot" ref={footMarker.ref}>
             <button
               type="button"
               className={`nav-item ${page === "settings" ? "active" : ""}`}
+              data-value="settings"
               onClick={() => setPage("settings")}
               aria-current={page === "settings" ? "page" : undefined}
               title={collapsed ? "Настройки" : undefined}
@@ -200,27 +285,27 @@ export default function App() {
               Остальные страницы монтируются по требованию: раньше все пять
               висели в DOM, скрытые `display:none`, и каждая держала свои
               IPC-вызовы, подписки и таймеры всё время работы приложения. */}
-          <div className={`page-host${page === "test" ? " on" : ""}`}>
-            <BenchmarkPage active={page === "test"} />
+          <div className={`page-host${leaving ? " leaving" : ""}`}>
+            <BenchmarkPage active={shown === "test" && !leaving} />
           </div>
-          {page === "schemes" ? (
+          {shown === "schemes" ? (
             <div className="page-host on">
-              <SchemesPage active />
+              <SchemesPage active={!leaving} />
             </div>
           ) : null}
-          {page === "results" ? (
+          {shown === "results" ? (
             <div className="page-host on">
-              <ResultsPage active />
+              <ResultsPage active={!leaving} />
             </div>
           ) : null}
-          {page === "log" ? (
+          {shown === "log" ? (
             <div className="page-host on">
-              <LogPage active />
+              <LogPage active={!leaving} />
             </div>
           ) : null}
-          {page === "settings" ? (
+          {shown === "settings" ? (
             <div className="page-host on">
-              <SettingsPage onAppearance={onAppearance} active />
+              <SettingsPage onAppearance={onAppearance} active={!leaving} />
             </div>
           ) : null}
         </main>

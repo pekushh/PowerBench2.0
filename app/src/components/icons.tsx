@@ -141,6 +141,34 @@ export function MinusCircleIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/** Папка (открыть каталог с отчётами или настройками). */
+export function FolderIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.8} {...props}>
+      <path d="M21 19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4.5l2 3H19a2 2 0 0 1 2 2Z" />
+    </Base>
+  );
+}
+
+/** Солнце (тема оформления). */
+export function ThemeIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" {...props}>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2.6v1.9M12 19.5v1.9M4.9 4.9l1.35 1.35M17.75 17.75l1.35 1.35M2.6 12h1.9M19.5 12h1.9M6.25 17.75l-1.35 1.35M19.1 4.9l-1.35 1.35" />
+    </Base>
+  );
+}
+
+/** Молния (уменьшить движение). */
+export function MotionIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinejoin="round" {...props}>
+      <path d="M13.5 2.5 4 14h7l-.5 7.5L20 10h-7Z" />
+    </Base>
+  );
+}
+
 /** Корзина (удалить). */
 export function TrashIcon(props: SVGProps<SVGSVGElement>) {
   return (

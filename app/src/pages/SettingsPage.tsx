@@ -1,10 +1,14 @@
-// Страница «Настройки»: оформление с живым превью, статус окружения,
-// каталоги данных.
+// Страница «Настройки»: внешний вид, состояние системы, каталоги данных и
+// заметка о железе.
+//
+// Раскладка — три секции с карточками-строками. Каждая настройка занимает
+// строку «слева подпись со значком, справа управление», чтобы на узком окне
+// управление просто переезжало под подпись, а не ломалось о край.
 
 import { useEffect, useRef, useState } from "react";
 import { commands, type SettingsDto } from "../api";
 import { Button, Glass, Seg, Switch } from "../components/ui";
-import { ShieldIcon, SocketIcon } from "../components/icons";
+import { FolderIcon, MotionIcon, ShieldIcon, SocketIcon, ThemeIcon } from "../components/icons";
 import { pushToast } from "../store";
 
 type ModeName = "Dark" | "Light" | "Auto";
@@ -14,9 +18,21 @@ function isMode(v: string): v is ModeName {
   return v === "Dark" || v === "Light" || v === "Auto";
 }
 
-// Ползунки весов и кольцо их распределения убраны вместе с
-// весовым баллом: в отчёте теперь категории по throughput, P1 и
-// стабильности, и настраивать нечего.
+/**
+ * Частые записи в заметку о железе.
+ *
+ * Поле объясняет, что писать, но объяснение в подсказке не помогает в момент,
+ * когда человек вспомнил, что у него включён PBO. Теги дописывают фрагмент в
+ * конец — и заметка остаётся читаемой, как обычный текст в отчёте.
+ */
+const QUICK_TAGS: { label: string; text: string }[] = [
+  { label: "PBO", text: "PBO +200 МГц" },
+  { label: "Curve Optimizer", text: "Curve Optimizer −30" },
+  { label: "XMP / EXPO", text: "XMP / EXPO активен" },
+  { label: "SMT выкл", text: "SMT отключён" },
+  { label: "Фикс. частота", text: "Фиксированная частота CPU" },
+];
+
 export default function SettingsPage({ onAppearance }: { onAppearance: (s: SettingsDto) => void }) {
   const [st, setSt] = useState<SettingsDto | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -45,7 +61,7 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
   if (!st) {
     return (
       <div className="page">
-        <div className="glass inset">
+        <Glass className="inset">
           <div className="card-title">Не удалось прочитать настройки</div>
           <div className="hint">{loadError ?? "Ответ приложения не получен."}</div>
           <div className="row gap-2" style={{ marginTop: 10 }}>
@@ -62,18 +78,18 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
               Повторить
             </Button>
           </div>
-        </div>
+        </Glass>
       </div>
     );
   }
 
-  // Записи настроек выстраиваются в очередь. Без неё каждый слайдер писал
-  // «прочитал → изменил → записал» сам по себе, и два быстрых движения
-  // ползунком затирали друг друга.
+  // Записи настроек выстраиваются в очередь. Без неё каждое действие писало
+  // «прочитал → изменил → записал» само по себе, и два быстрых переключения
+  // затирали друг друга.
   const patch = (p: Partial<SettingsDto>) => {
     setSt((prev) => {
       if (!prev) return prev;
-      // Показываем новое значение сразу (слайдеры должны реагировать), но при
+      // Показываем новое значение сразу (управление должно реагировать), но при
       // ошибке возвращаем старое: иначе экран показывал бы настройки,
       // которых на диске нет.
       const next = { ...prev, ...p };
@@ -93,57 +109,70 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
     });
   };
 
+  const notes = st.cpu_notes.trim();
+  const appendTag = (text: string) => {
+    // Повторное нажатие не должно плодить одинаковые фрагменты: проверяем по
+    // всему тексту, а не по последней части.
+    if (notes.toLowerCase().includes(text.toLowerCase())) {
+      pushToast("okk", `«${text}» уже записано`);
+      return;
+    }
+    patch({ cpu_notes: notes ? `${notes}, ${text}` : text });
+  };
+
   return (
-    <div className="page tight">
+    <div className="page tight set-page">
       <div className="page-head">
         <h1>Настройки</h1>
         <div className="actions">
-          <Button
-            variant="ghost"
+          <button
+            type="button"
+            className="folder-btn"
             disabled={!dataDir}
-            title={dataDir || undefined}
-            onClick={() => dataDir && commands.openFolder(dataDir).catch((e) => pushToast("err", String(e)))}
+            title={dataDir || "Каталог ещё не известен"}
+            onClick={() => {
+              if (dataDir) commands.openFolder(dataDir).catch((e) => pushToast("err", String(e)));
+            }}
           >
+            <FolderIcon />
             Папка результатов
-          </Button>
-          <Button
-            variant="ghost"
+          </button>
+          <button
+            type="button"
+            className="folder-btn"
             disabled={!cfgDir}
-            title={cfgDir || undefined}
-            onClick={() => cfgDir && commands.openFolder(cfgDir).catch((e) => pushToast("err", String(e)))}
+            title={cfgDir || "Каталог ещё не известен"}
+            onClick={() => {
+              if (cfgDir) commands.openFolder(cfgDir).catch((e) => pushToast("err", String(e)));
+            }}
           >
+            <FolderIcon />
             Папка настроек
-          </Button>
+          </button>
         </div>
       </div>
 
-      <div className="section-head">
-        <h2 className="section-title">Внешний вид</h2>
-      </div>
-      <Glass className="appearance-card">
-        <div className="preview-pane">
-          <div className="preview-orb" />
-          <div className="preview-window">
-            <div className="preview-dots">
-              <i />
-              <i />
-              <i />
-            </div>
-            <div className="preview-bar long" />
-            <div className="preview-bar" />
-            <div className="preview-bar" />
-            <div className="preview-bar short" />
-          </div>
+      <section className="set-sec">
+        <div className="section-head">
+          <h2 className="section-title">Внешний вид</h2>
         </div>
-        <div className="appearance-controls">
-          <div className="field">
-            <span className="field-label">Тема</span>
+        <div className="set-group">
+          <div className="set-row">
+            <div className="set-left">
+              <span className="set-icon">
+                <ThemeIcon />
+              </span>
+              <div className="set-text">
+                <div className="set-title">Тема оформления</div>
+                <div className="set-sub">Цветовая палитра окна и генерируемых отчётов</div>
+              </div>
+            </div>
             <Seg
               label="Тема оформления"
               options={[
-                { value: "Dark", label: "Тёмная" },
-                { value: "Light", label: "Светлая" },
-                { value: "Auto", label: "Авто" },
+                { value: "Dark", label: "Тёмная", swatch: "dark" },
+                { value: "Light", label: "Светлая", swatch: "light" },
+                { value: "Auto", label: "Авто", swatch: "auto" },
               ]}
               // Значение приходит строкой: неизвестное отображаем как «Авто»,
               // иначе `Seg` остался бы без выбранного пункта.
@@ -151,64 +180,136 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
               onChange={(v) => patch({ mode: v })}
             />
           </div>
-          <div className="reduce-row">
-            <div>
-              <div className="reduce-title">Уменьшить движение</div>
-              <div className="hint">Мягкие переходы и анимации</div>
+
+          <div className="set-row">
+            <div className="set-left">
+              <span className="set-icon">
+                <MotionIcon />
+              </span>
+              <div className="set-text">
+                <div className="set-title">Уменьшить движение</div>
+                <div className="set-sub">Отключить плавные переходы и анимации интерфейса</div>
+              </div>
             </div>
             <Switch checked={st.reduce_motion} onChange={(v) => patch({ reduce_motion: v })} />
           </div>
         </div>
-      </Glass>
+      </section>
 
-      <div className="section-head">
-        <h2 className="section-title">Состояние системы</h2>
-        <span className="hint">Схемы сравниваются по средней throughput, худшей секунде (P1) и стабильности — настраивать веса не нужно.</span>
-      </div>
-      <Glass className="inset">
-        <div className="donut-chips">
-          {/* Пока проверка не завершена, чип не должен мигать красным:
-              `null` — это «неизвестно», а не «прав нет». */}
-          <span
-            className={`status-chip ${adm == null ? "" : adm ? "is-ok" : "is-bad"}`}
-            title={adm ? "Запуск от имени администратора" : "Нет прав администратора"}
-          >
-            <ShieldIcon />
-            {adm == null ? "…" : adm ? "Администратор" : "Нет прав"}
-          </span>
-          <span
-            className={`status-chip ${ac == null ? "" : ac ? "is-ok" : "is-bad"}`}
-            title={ac ? "Питание от сети" : "Работа от батареи"}
-          >
-            <SocketIcon />
-            {ac == null ? "…" : ac ? "Сеть" : "Батарея"}
+      <section className="set-sec">
+        <div className="section-head">
+          <h2 className="section-title">Состояние системы</h2>
+          <span className="hint">
+            Схемы сравниваются по средней throughput, худшей секунде (P1) и стабильности.
           </span>
         </div>
-      </Glass>
+        <div className="set-status">
+          <StatusCard
+            icon={<ShieldIcon />}
+            title="Права администратора"
+            sub="Доступ к переключению схем питания"
+            state={adm}
+            okLabel="Активно"
+            badLabel="Нет прав"
+            unknown="Проверяем…"
+          />
+          <StatusCard
+            icon={<SocketIcon />}
+            title="Питание от сети"
+            sub="Без ограничений от батареи"
+            state={ac}
+            okLabel="Подключено"
+            badLabel="От батареи"
+            unknown="Проверяем…"
+          />
+        </div>
+      </section>
 
-      <div className="section-head">
-        <h2 className="section-title">Железо и BIOS</h2>
-      </div>
-      <Glass className="inset">
-        <div className="field">
-          <span className="field-label">Разгон, андерволт, отключённые функции</span>
+      <section className="set-sec">
+        <div className="section-head">
+          <h2 className="section-title">Железо и BIOS</h2>
+          <span className="hint">Необязательно · добавляется в отчёт</span>
+        </div>
+        <Glass className="bios-card">
+          <div className="bios-top">
+            <span className="bios-label">Разгон, андерволт и память</span>
+            <span className="hint">
+              Укажите изменения, если настройки отличаются от штатных: программа
+              не может отличить разгон от буста, а на разгоне результат меняется
+              сильнее, чем от схемы питания.
+            </span>
+          </div>
           <textarea
-            className="cpu-notes"
+            className="bios-input"
             value={st.cpu_notes}
             rows={3}
             maxLength={500}
             placeholder="например: PBO +200 МГц, андерволт −30, отключён SMT, 2×16 ГБ DDR5-6000"
             onChange={(e) => patch({ cpu_notes: e.target.value })}
           />
-          <div className="hint">
-            Попадёт в отчёт для поддержки. Заполнять нужно только если что-то
-            меняли: программа не может отличить разгон от штатного буста —
-            Windows показывает одну и ту же цифру в обоих случаях. На разгоне
-            результат меняется сильнее, чем от схемы питания, поэтому без этой
-            заметки сравнивать замеры нельзя.
+          <div className="qt-row">
+            <span className="qt-label">Быстрая вставка:</span>
+            {QUICK_TAGS.map((t) => (
+              <button
+                key={t.text}
+                type="button"
+                className="qt-chip"
+                disabled={notes.toLowerCase().includes(t.text.toLowerCase())}
+                onClick={() => appendTag(t.text)}
+              >
+                + {t.label}
+              </button>
+            ))}
+            {notes ? (
+              <button
+                type="button"
+                className="qt-clear"
+                onClick={() => patch({ cpu_notes: "" })}
+              >
+                Очистить
+              </button>
+            ) : null}
           </div>
+        </Glass>
+      </section>
+    </div>
+  );
+}
+
+/**
+ * Карточка состояния: значок, название и метка справа.
+ *
+ * Пока проверка не вернулась, показывается «Проверяем…» без зелёной метки:
+ * иначе на секунду мелькало «Активно» и потом менялось на «Нет прав».
+ */
+function StatusCard({
+  icon,
+  title,
+  sub,
+  state,
+  okLabel,
+  badLabel,
+  unknown,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  sub: string;
+  state: boolean | null;
+  okLabel: string;
+  badLabel: string;
+  unknown: string;
+}) {
+  const tone = state == null ? "wait" : state ? "ok" : "bad";
+  return (
+    <div className={`status-card is-${tone}`}>
+      <div className="st-left">
+        <span className="st-icon">{icon}</span>
+        <div className="set-text">
+          <div className="set-title">{title}</div>
+          <div className="set-sub">{sub}</div>
         </div>
-      </Glass>
+      </div>
+      <span className="st-badge">{state == null ? unknown : state ? okLabel : badLabel}</span>
     </div>
   );
 }

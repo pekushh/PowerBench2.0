@@ -225,7 +225,7 @@ export function Seg<T extends string>({
   onChange,
   label,
 }: {
-  options: { value: T; label: string }[];
+  options: { value: T; label: string; swatch?: "dark" | "light" | "auto" }[];
   value: T;
   onChange: (v: T) => void;
   /** Доступное имя группы; `aria-pressed` на кнопках безымянной группы
@@ -242,6 +242,10 @@ export function Seg<T extends string>({
           aria-pressed={o.value === value}
           onClick={() => onChange(o.value)}
         >
+          {/* Точка-образец нужна там, где выбирают вид, а не значение: слова
+              «Тёмная» и «Светлая» говорят о режиме, показывают его слабее, чем
+              две точки рядом. */}
+          {o.swatch ? <i className={`swatch ${o.swatch}`} aria-hidden="true" /> : null}
           <span>{o.label}</span>
         </button>
       ))}

@@ -1710,6 +1710,74 @@ mod tests {
         assert!(html.contains("Воркеры: <b>4/6</b>"), "нет числа воркеров");
     }
 
+    /// Каждый `var(--токен)` в стилях объявлен.
+    ///
+    /// Необъявленный пользовательский токен не выдаёт ошибку: правило целиком
+    /// уходит в `initial`. Так `background: … var(--bg)` у `body` молча
+    /// становился прозрачным, и на странице просвечивал белый фон браузера —
+    /// весь тёмный отчёт выглядел белым листом, а тесты были зелёные, потому
+    /// что HTML собирался правильно. Единственный способ это поймать —
+    /// проверить сами объявления.
+    #[test]
+    fn every_css_token_is_declared() {
+        // Объявление — это `--имя` сразу за двоеточием, использование — то же
+        // имя сразу за скобкой. Разбор идёт по `char_indices`: в стилях есть
+        // кириллица в комментариях, и байтовый проход спотыкается о границы.
+        let mut declared: Vec<&str> = Vec::new();
+        let mut used: Vec<&str> = Vec::new();
+        for (i, ch) in CSS.char_indices() {
+            if ch != '-' || !CSS[i..].starts_with("--") {
+                continue;
+            }
+            let rest = &CSS[i + 2..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .unwrap_or(rest.len());
+            if end == 0 {
+                continue;
+            }
+            let name = &CSS[i..i + 2 + end];
+            match rest[end..].chars().next() {
+                // Объявление: `--имя:`.
+                Some(':') => declared.push(name),
+                // Использование: `var(--имя)`.
+                Some(')') => used.push(name),
+                _ => {}
+            }
+        }
+        let missing: Vec<&str> = used
+            .iter()
+            .filter(|n| !declared.contains(n))
+            .copied()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "в стилях используются необъявленные токены: {} — правила с ними \
+             молча откатятся в initial (прозрачный фон вместо тёмного)",
+            missing.join(", ")
+        );
+        assert!(
+            used.len() > 10 && declared.len() > 10,
+            "разбор стилей ничего не нашёл ({} объявлений, {} использований): \
+             тест проходит вхолостую",
+            declared.len(),
+            used.len()
+        );
+    }
+
+    /// Фон страницы задаётся явно и он тёмный.
+    #[test]
+    fn page_background_is_dark_and_declared() {
+        assert!(
+            CSS.contains("background:radial-gradient"),
+            "у body нет фоновой заливки: страница откроется белой"
+        );
+        assert!(
+            CSS.contains("--bg:var(--bg-0)"),
+            "фон страницы не связан с тёмным токеном Graphite"
+        );
+    }
+
     /// Пустая сессия не должна ломать разметку.
     ///
     /// Такого результата в жизни не бывает, но отчёт об отсутствующем замере

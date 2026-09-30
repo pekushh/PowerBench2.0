@@ -11,7 +11,7 @@
   --posbg:rgba(253,253,253,.10);--posline:rgba(253,253,253,.42);
   --warnbg:rgba(228,180,111,.10);--warnline:rgba(228,180,111,.42);
   --errbg:rgba(229,121,121,.10);--errline:rgba(229,121,121,.42);
-  --card:var(--bg-1);--card2:var(--bg-2);--line:var(--line-1);--line2:var(--line-2);
+  --card:var(--bg-1);--bg:var(--bg-0);--card2:var(--bg-2);--line:var(--line-1);--line2:var(--line-2);
   --dim:var(--fg-dim);--mute:var(--fg-mute);
   --shadow:0 30px 70px -30px rgba(0,0,0,.8);
 }

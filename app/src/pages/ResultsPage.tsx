@@ -19,6 +19,7 @@ import {
   TrashIcon,
 } from "../components/icons";
 import { pushToast } from "../store";
+import { usePill } from "../components/usePill";
 
 type SortKey = "started" | "level" | "margin" | "stability";
 
@@ -136,6 +137,7 @@ export default function ResultsPage() {
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [sort, setSort] = useState<SortKey>("started");
   const [mode, setMode] = useState<"all" | "screening" | "full">("all");
+  const modePill = usePill(mode);
   const [query, setQuery] = useState("");
   // Формат экспорта по умолчанию JSON, а CSV берётся из выпадающей части
   // кнопки: раньше формат выбирался в выпадающем списке, и он не помещался
@@ -497,7 +499,12 @@ export default function ResultsPage() {
           />
         </div>
         <div className="toolbar-right">
-          <div className="mode-tabs" role="tablist" aria-label="Режим замера">
+          <div
+            className="mode-tabs pb-pill-host"
+            role="tablist"
+            aria-label="Режим замера"
+            ref={modePill.ref}
+          >
             {(
               [
                 { value: "all", label: "Все" },
@@ -511,6 +518,7 @@ export default function ResultsPage() {
                 role="tab"
                 aria-selected={mode === t.value}
                 className={`mtab${mode === t.value ? " active" : ""}`}
+                data-value={t.value}
                 onClick={() => setMode(t.value)}
               >
                 {t.label}

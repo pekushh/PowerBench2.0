@@ -22,6 +22,7 @@ import {
 } from "./icons";
 import { Button, Modal, Spot } from "./ui";
 import { pushToast } from "../store";
+import { usePill } from "./usePill";
 
 type Filter = "all" | "fav" | "excluded" | "dup";
 
@@ -122,6 +123,7 @@ export function SchemePicker({
     for (const q of quarantine) m.set(q.scheme_id.toLowerCase(), q);
     return m;
   }, [quarantine]);
+  const pickerFilterPill = usePill(filter, [schemes.length, favs.size, excluded.size]);
 
   const copies = useMemo(() => copyMark(schemes), [schemes]);
 
@@ -230,7 +232,12 @@ export function SchemePicker({
               </button>
             ) : null}
           </div>
-          <div className="filter-tabs" role="tablist" aria-label="Фильтр схем">
+          <div
+            className="filter-tabs pb-pill-host"
+            role="tablist"
+            aria-label="Фильтр схем"
+            ref={pickerFilterPill.ref}
+          >
             {(
               [
                 { value: "all", label: "Все", count: schemes.length },
@@ -244,6 +251,7 @@ export function SchemePicker({
                 role="tab"
                 aria-selected={filter === t.value}
                 className={`ftab${filter === t.value ? " active" : ""}`}
+                data-value={t.value}
                 onClick={() => setFilter(t.value)}
               >
                 <span>{t.label}</span>
@@ -476,6 +484,8 @@ export default function SchemeTiles({
     () => new Set((settings?.excluded_schemes ?? []).map((g) => g.toLowerCase())),
     [settings],
   );
+  const pageFilterPill = usePill(filter, [schemes.length, favs.size, excluded.size]);
+  const viewPill = usePill(view);
   const copies = useMemo(() => copyMark(schemes), [schemes]);
 
   const counts = useMemo(
@@ -591,7 +601,12 @@ export default function SchemeTiles({
               aria-label="Поиск схемы питания по названию или GUID"
             />
           </div>
-          <div className="filter-tabs" role="tablist" aria-label="Фильтр схем">
+          <div
+            className="filter-tabs pb-pill-host"
+            role="tablist"
+            aria-label="Фильтр схем"
+            ref={pageFilterPill.ref}
+          >
             {tabs.map((t) => (
               <button
                 key={t.value}
@@ -599,6 +614,7 @@ export default function SchemeTiles({
                 role="tab"
                 aria-selected={filter === t.value}
                 className={`ftab${filter === t.value ? " active" : ""}`}
+                data-value={t.value}
                 onClick={() => setFilter(t.value)}
               >
                 <span>{t.label}</span>
@@ -607,10 +623,16 @@ export default function SchemeTiles({
             ))}
           </div>
         </div>
-        <div className="view-switch" role="group" aria-label="Вид списка">
+        <div
+          className="view-switch pb-pill-host"
+          role="group"
+          aria-label="Вид списка"
+          ref={viewPill.ref}
+        >
           <button
             type="button"
             className={`vbtn${view === "grid" ? " active" : ""}`}
+            data-value="grid"
             title="Сетка карточек"
             aria-pressed={view === "grid"}
             onClick={() => setView("grid")}
@@ -620,6 +642,7 @@ export default function SchemeTiles({
           <button
             type="button"
             className={`vbtn${view === "list" ? " active" : ""}`}
+            data-value="list"
             title="Компактный список"
             aria-pressed={view === "list"}
             onClick={() => setView("list")}

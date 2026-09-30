@@ -11,6 +11,7 @@ import LogPage from "./pages/LogPage";
 import ResultsPage from "./pages/ResultsPage";
 import SchemesPage from "./pages/SchemesPage";
 import SettingsPage from "./pages/SettingsPage";
+import { applyMotion } from "./motion";
 import "./styles.css";
 
 export type PageId = "test" | "schemes" | "results" | "log" | "settings";
@@ -33,7 +34,9 @@ function applyAppearance(s: SettingsDto) {
   const root = document.documentElement;
   root.setAttribute("data-theme", s.theme);
   root.setAttribute("data-mode", resolveMode(s.mode));
-  root.classList.toggle("reduce-motion", s.reduce_motion);
+  // Один выключатель моторики на всё приложение: он же гасит анимации по
+  // системному правилу `html[data-motion="off"]`.
+  applyMotion(s.reduce_motion);
 }
 
 export default function App() {
@@ -118,9 +121,31 @@ export default function App() {
 
   const onAppearance = useCallback((s: SettingsDto) => setAppearance(s), []);
 
+  // Выключатель моторики в топбаре. Значение пишется в те же настройки, что и
+  // тумблер в «Настройках», поэтому оба переключателя всегда согласованы и
+  // выбор переживает перезапуск.
+  const toggleMotion = useCallback(() => {
+    const next = !(appearance?.reduce_motion ?? false);
+    applyMotion(next);
+    setAppearance((cur) => (cur ? { ...cur, reduce_motion: next } : cur));
+    commands
+      .getSettings()
+      .then((s) => commands.setSettings({ ...s, reduce_motion: next }))
+      .catch((e) => {
+        pushToast("err", `Не удалось сохранить настройку анимаций: ${String(e)}`);
+        setAppearance((cur) => (cur ? { ...cur, reduce_motion: !next } : cur));
+        applyMotion(!next);
+      });
+  }, [appearance]);
+
   return (
     <div className="shell">
-      <TitleBar collapsed={collapsed} onToggleCollapse={toggleCollapse} />
+      <TitleBar
+        collapsed={collapsed}
+        onToggleCollapse={toggleCollapse}
+        motionOff={appearance?.reduce_motion ?? false}
+        onToggleMotion={toggleMotion}
+      />
       <div className="body">
         <aside className={`sidebar fade-in ${collapsed ? "collapsed" : ""}`}>
           <nav className="sidebar-nav">

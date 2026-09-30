@@ -9,6 +9,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { commands, onLog, type LoggerEntry } from "../api";
 import { SearchIcon } from "../components/icons";
+import { usePill } from "../components/usePill";
 import { pushToast } from "../store";
 
 /** Четыре уровня журнала плюс «все». */
@@ -117,6 +118,9 @@ export default function LogPage() {
     }
     return c;
   }, [all]);
+  // Пилюля едет под активной вкладкой; пересчёт нужен и при смене счётчиков:
+  // вместе с цифрой меняется ширина кнопки.
+  const levelPill = usePill(level, [counts.all]);
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -257,13 +261,19 @@ export default function LogPage() {
             aria-label="Поиск по тексту записи журнала"
           />
         </div>
-        <div className="filter-tabs" role="tablist" aria-label="Фильтр по уровню">
+        <div
+          className="filter-tabs pb-pill-host"
+          role="tablist"
+          aria-label="Фильтр по уровню"
+          ref={levelPill.ref}
+        >
           <button
             type="button"
             role="tab"
             aria-selected={level === "all"}
             className={`ftab${level === "all" ? " active" : ""}`}
             data-level="all"
+            data-value="all"
             onClick={() => setLevel("all")}
           >
             <span>Все</span>
@@ -277,6 +287,7 @@ export default function LogPage() {
               aria-selected={level === lv}
               className={`ftab${level === lv ? " active" : ""}`}
               data-level={lv}
+              data-value={lv}
               onClick={() => setLevel(lv)}
             >
               <span>{LEVEL_LABEL[lv]}</span>

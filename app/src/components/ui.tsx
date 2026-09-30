@@ -1,6 +1,7 @@
 // Базовые элементы интерфейса (восстановлены из дизайна приложения).
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { usePill } from "./usePill";
 
 /**
  * Ref на прокручиваемый контейнер + признаки «есть что прокрутить» сверху и
@@ -232,13 +233,17 @@ export function Seg<T extends string>({
    *  скринридер читает как «переключатель» без пояснения, что переключают. */
   label?: string;
 }) {
+  // «Пилюля» под активной кнопкой: она сама едет между сегментами, поэтому у
+  // кнопок свой фон не нужен и лёгких ��ерестроений при переключении нет.
+  const { ref } = usePill(value, [options.length]);
   return (
-    <div className="seg" role="group" aria-label={label}>
+    <div className="seg pb-pill-host" role="group" aria-label={label} ref={ref}>
       {options.map((o) => (
         <button
           key={o.value}
           type="button"
-          className={o.value === value ? "on" : ""}
+          data-value={o.value}
+          className={o.value === value ? "on active" : ""}
           aria-pressed={o.value === value}
           onClick={() => onChange(o.value)}
         >

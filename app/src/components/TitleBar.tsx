@@ -1,14 +1,19 @@
 // Верхняя панель безрамочного окна: бренд, сворачивание меню, окно.
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronIcon, CloseIcon, MinusIcon } from "./icons";
+import { ChevronIcon, CloseIcon, MinusIcon, MotionIcon } from "./icons";
 
 export default function TitleBar({
   collapsed,
   onToggleCollapse,
+  motionOff,
+  onToggleMotion,
 }: {
   collapsed: boolean;
   onToggleCollapse: () => void;
+  /** Моторика выключена ручным выбором (гасится системный — отдельно). */
+  motionOff: boolean;
+  onToggleMotion: () => void;
 }) {
   function win() {
     try {
@@ -24,6 +29,17 @@ export default function TitleBar({
         <span>PowerBench</span>
       </div>
       <div className="titlebar-controls">
+        <button
+          type="button"
+          className={`titlebar-btn motion${motionOff ? " off" : ""}`}
+          title={motionOff ? "Включить анимации" : "Отключить анимации"}
+          aria-label={motionOff ? "Включить анимации" : "Отключить анимации"}
+          aria-pressed={motionOff}
+          onClick={onToggleMotion}
+        >
+          <MotionIcon />
+        </button>
+        <span className="split" />
         <button
           type="button"
           className="titlebar-btn narrow"

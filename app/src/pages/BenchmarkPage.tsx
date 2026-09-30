@@ -782,80 +782,83 @@ export default function BenchmarkPage() {
                 </button>
 
                 <div className="adv-body">
-                  <div className="param-grid">
-                    <div className="p-field">
-                      <label htmlFor="pDur">Длительность прогона</label>
-                      <div className="p-input-wrap">
-                        <input
-                          id="pDur"
-                          type="number"
-                          value={duration}
-                          min={16}
-                          max={3600}
-                          onChange={(e) => setDuration(Number(e.target.value) || 0)}
-                        />
-                        <span className="p-unit">с</span>
+                  {/* Обёртка с `overflow: hidden`: без неё `grid-template-rows`
+                      не даёт плавного раскрытия — содержимое вылезает наружу. */}
+                  <div className="adv-clip">
+                      <div className="param-grid">
+                      <div className="p-field">
+                        <label htmlFor="pDur">Длительность прогона</label>
+                        <div className="p-input-wrap">
+                          <input
+                            id="pDur"
+                            type="number"
+                            value={duration}
+                            min={16}
+                            max={3600}
+                            onChange={(e) => setDuration(Number(e.target.value) || 0)}
+                          />
+                          <span className="p-unit">с</span>
+                        </div>
                       </div>
-                    </div>
-                    <div className="p-field">
-                      <label htmlFor="pWarm">Разогрев</label>
-                      <div className="p-input-wrap">
-                        <input
-                          id="pWarm"
-                          type="number"
-                          value={warmup}
-                          min={2}
-                          max={300}
-                          onChange={(e) => setWarmup(Number(e.target.value) || 0)}
-                        />
-                        <span className="p-unit">с</span>
+                      <div className="p-field">
+                        <label htmlFor="pWarm">Разогрев</label>
+                        <div className="p-input-wrap">
+                          <input
+                            id="pWarm"
+                            type="number"
+                            value={warmup}
+                            min={2}
+                            max={300}
+                            onChange={(e) => setWarmup(Number(e.target.value) || 0)}
+                          />
+                          <span className="p-unit">с</span>
+                        </div>
                       </div>
-                    </div>
-                    <div className="p-field">
-                      <label htmlFor="pCool">Охлаждение</label>
-                      <div className="p-input-wrap">
-                        <input
-                          id="pCool"
-                          type="number"
-                          value={cooling}
-                          min={0}
-                          max={120}
-                          onChange={(e) => setCooling(Number(e.target.value) || 0)}
-                        />
-                        <span className="p-unit">с</span>
+                      <div className="p-field">
+                        <label htmlFor="pCool">Охлаждение</label>
+                        <div className="p-input-wrap">
+                          <input
+                            id="pCool"
+                            type="number"
+                            value={cooling}
+                            min={0}
+                            max={120}
+                            onChange={(e) => setCooling(Number(e.target.value) || 0)}
+                          />
+                          <span className="p-unit">с</span>
+                        </div>
                       </div>
-                    </div>
-                    <div className="p-field">
-                      <label htmlFor="pReps">Повторов (раундов)</label>
-                      <div className="p-input-wrap">
-                        <input
-                          id="pReps"
-                          type="number"
-                          value={reps}
-                          min={1}
-                          max={9}
-                          onChange={(e) => setReps(Number(e.target.value) || 1)}
-                        />
-                        <span className="p-unit">раз</span>
+                      <div className="p-field">
+                        <label htmlFor="pReps">Повторов (раундов)</label>
+                        <div className="p-input-wrap">
+                          <input
+                            id="pReps"
+                            type="number"
+                            value={reps}
+                            min={1}
+                            max={9}
+                            onChange={(e) => setReps(Number(e.target.value) || 1)}
+                          />
+                          <span className="p-unit">раз</span>
+                        </div>
                       </div>
-                    </div>
-                    {/* Порог фона — параметр замера, а не оформления, поэтому
-                        он живёт здесь, рядом с остальными числами теста. */}
-                    <div className="p-field">
-                      <label htmlFor="pBg">Порог фоновой нагрузки</label>
-                      <div className="p-input-wrap">
-                        <input
-                          id="pBg"
-                          type="number"
-                          value={backgroundThreshold}
-                          min={0.5}
-                          max={100}
-                          step={0.5}
-                          onChange={(e) => setBackgroundThreshold(Number(e.target.value) || 0.5)}
-                        />
-                        <span className="p-unit">%</span>
+                      {/* Порог фона — параметр замера, а не оформления, поэтому
+                          он живёт здесь, рядом с остальными числами теста. */}
+                      <div className="p-field">
+                        <label htmlFor="pBg">Порог фоновой нагрузки</label>
+                        <div className="p-input-wrap">
+                          <input
+                            id="pBg"
+                            type="number"
+                            value={backgroundThreshold}
+                            min={0.5}
+                            max={100}
+                            step={0.5}
+                            onChange={(e) => setBackgroundThreshold(Number(e.target.value) || 0.5)}
+                          />
+                          <span className="p-unit">%</span>
+                        </div>
                       </div>
-                    </div>
                   </div>
                   <div className="adv-footer">
                     <span>{earlyStopHint(reps)}</span>
@@ -869,6 +872,7 @@ export default function BenchmarkPage() {
                     >
                       Сбросить по умолчанию
                     </button>
+                    </div>
                   </div>
                 </div>
               </div>

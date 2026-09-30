@@ -111,9 +111,7 @@ pub fn load_result(path: &Path) -> Result<SessionJson, String> {
 fn repair_scheme_names(session: &mut SessionJson) {
     for sch in &mut session.schemes {
         if let Some(name) = sch.name.take() {
-            sch.name = Some(
-                powerbench_windows::power::repair_mojibake(&name).unwrap_or(name),
-            );
+            sch.name = Some(powerbench_windows::power::repair_mojibake(&name).unwrap_or(name));
         }
         for run in &mut sch.per_run {
             if let Some(name) = run.scheme_name.take() {

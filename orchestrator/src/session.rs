@@ -479,7 +479,9 @@ enum WatchdogVerdict {
     Hung,
     UserCancelled,
     /// Машина не пашет, а ползёт: замер продолжать бессмысленно.
-    Collapsed { ticks_per_sec: u64 },
+    Collapsed {
+        ticks_per_sec: u64,
+    },
 }
 
 /// Доля мгновенного темпа, ниже которой фаза считается проваленной.
@@ -789,9 +791,14 @@ fn run_measured_phase(
 #[derive(Debug, Clone, PartialEq)]
 enum PhaseFailure {
     Engine(RunError),
-    Hung { phase: String },
+    Hung {
+        phase: String,
+    },
     /// Машина ползёт: замер остановлен досрочно, схема бракуется.
-    Collapsed { phase: String, ticks_per_sec: u64 },
+    Collapsed {
+        phase: String,
+        ticks_per_sec: u64,
+    },
     UserCancelled,
     LoadDidNotStop,
 }
@@ -936,7 +943,10 @@ pub fn run_session(
     // Делается здесь, а не только в интерфейсе, чтобы правило действовало и
     // для CLI, и для продолжения из чекпоинта.
     let plan = {
-        let active = schemes_list.iter().find(|s| s.active).map(|s| s.guid.as_str());
+        let active = schemes_list
+            .iter()
+            .find(|s| s.active)
+            .map(|s| s.guid.as_str());
         let ordered = canonical_scheme_order(&plan.scheme_ids, active);
         if ordered != plan.scheme_ids {
             note(
@@ -1020,6 +1030,27 @@ pub fn run_session(
         },
     );
 
+    // Гарантия ОС, которая не зависит от пути выхода.
+    //
+    // Маркер и исходная схема снимались только в ветках, которые явно до этого
+    // доходили. Ошибка сохранения (`?`), ошибка движка или паника в потоке
+    // сессии оставляли маркер на диске, и следующий запуск честно, но неверно
+    // отправлял нормальную схему в карантин с причиной «процесс убили».
+    // Теперь оба восстановления висят на Drop и срабатывают всегда.
+    //
+    // Важно, что guard создаётся ДО `run_session_loop`: сам цикл применяет
+    // тестовую схему и пишет маркер прогона. Созданные после вызова они
+    // существовали бы только к моменту возврата, и паника внутри цикла
+    // разворачивала бы стек мимо них — тестовая схема осталась бы активной,
+    // а маркер на диске — нетронутым. Ровно то состояние, из-за которого
+    // следующий запуск карантинит исправную схему как HardFreeze.
+    let _os_guard = OsRestoreGuard {
+        original: checkpoint.original_scheme_guid.clone(),
+        driver,
+        restored: Arc::new(AtomicBool::new(checkpoint.original_restored)),
+    };
+    let _marker_guard = TestingMarkerGuard;
+
     // Основной цикл раундов (признак возврата — «остановлено пользователем»).
     let loop_result = run_session_loop(
         engine,
@@ -1033,20 +1064,6 @@ pub fn run_session(
         &observer,
         baseline.as_ref(),
     );
-
-    // Гарантия ОС, которая не зависит от пути выхода.
-    //
-    // Маркер и исходная схема снимались только в ветках, которые явно до этого
-    // доходили. Ошибка сохранения (`?`), ошибка движка или паника в потоке
-    // сессии оставляли маркер на диске, и следующий запуск честно, но неверно
-    // отправлял нормальную схему в карантин с причиной «процесс убили».
-    // Теперь оба восстановления висят на Drop и срабатывают всегда.
-    let _os_guard = OsRestoreGuard {
-        original: checkpoint.original_scheme_guid.clone(),
-        driver,
-        restored: Arc::new(AtomicBool::new(checkpoint.original_restored)),
-    };
-    let _marker_guard = TestingMarkerGuard;
 
     // и при успехе, и при ошибке/отмене.
     let restore_result =
@@ -1191,9 +1208,7 @@ fn run_session_loop(
             // как подозрение на жёсткое зависание ПК.
             if let Err(e) = write_testing_marker(&TestingMarker {
                 scheme_id: scheme_id.clone(),
-                scheme_name: name_map
-                    .get(&scheme_id.to_ascii_lowercase())
-                    .cloned(),
+                scheme_name: name_map.get(&scheme_id.to_ascii_lowercase()).cloned(),
                 plan_guid: plan.plan_guid.clone(),
                 started_at_ns: now_unix_ns(),
             }) {
@@ -1301,7 +1316,9 @@ fn run_session_loop(
                         "нет прогресса более {} секунд (зависание на разогреве)",
                         WATCHDOG_NO_PROGRESS_SECS
                     );
-                    checkpoint.rejections.insert(scheme_id.clone(), reason.clone());
+                    checkpoint
+                        .rejections
+                        .insert(scheme_id.clone(), reason.clone());
                     store.save(checkpoint).map_err(SessionError::Persist)?;
                     // Зависание на разогреве — сразу в карантин.
                     quarantine_scheme(
@@ -1478,7 +1495,9 @@ fn run_session_loop(
                             "нет прогресса более {} секунд (фаза «{phase}»)",
                             WATCHDOG_NO_PROGRESS_SECS
                         );
-                        checkpoint.rejections.insert(scheme_id.clone(), reason.clone());
+                        checkpoint
+                            .rejections
+                            .insert(scheme_id.clone(), reason.clone());
                         store.save(checkpoint).map_err(SessionError::Persist)?;
                         // Зависание фазы — сразу в карантин.
                         quarantine_scheme(
@@ -1514,7 +1533,9 @@ fn run_session_loop(
                                 reason: reason.clone(),
                             },
                         );
-                        checkpoint.rejections.insert(scheme_id.clone(), reason.clone());
+                        checkpoint
+                            .rejections
+                            .insert(scheme_id.clone(), reason.clone());
                         store.save(checkpoint).map_err(SessionError::Persist)?;
                         quarantine_scheme(
                             &scheme_id,
@@ -1584,7 +1605,8 @@ fn run_session_loop(
             // попадала в неё случайно, а постоянная внешняя нагрузка (VPN,
             // синхронизация) либо не попадала вовсе, либо обрушивала «чистоту»
             // в ноль. Теперь у прогона есть собственные p50/p95.
-            let background_cpu = background_cpu_stats(&map_snapshot, run_started_secs, run_ended_secs);
+            let background_cpu =
+                background_cpu_stats(&map_snapshot, run_started_secs, run_ended_secs);
 
             let run_outcome = Some(RunData {
                 key: key.clone(),
@@ -1804,11 +1826,7 @@ fn quarantine_scheme(
 
 /// Медиана массива (копия сортируется). Пустой массив — 0.0.
 fn median_of(values: &[f64]) -> f64 {
-    let mut valid: Vec<f64> = values
-        .iter()
-        .copied()
-        .filter(|v| v.is_finite())
-        .collect();
+    let mut valid: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
     if valid.is_empty() {
         return 0.0;
     }
@@ -1932,7 +1950,10 @@ fn phase_collapse_reason(
             let label = Phase::from_index(ph.phase_index)
                 .map(|p| p.label())
                 .unwrap_or("неизвестная");
-            if worst.as_ref().is_none_or(|(share, _)| own / leader < *share) {
+            if worst
+                .as_ref()
+                .is_none_or(|(share, _)| own / leader < *share)
+            {
                 worst = Some((
                     own / leader,
                     format!(
@@ -1958,7 +1979,11 @@ fn checksum_phase_hint(runs: &[&StoredRun]) -> String {
     };
     for idx in 0..first.first_tick_checksums.len() {
         let head = first.first_tick_checksums[idx];
-        if runs.iter().skip(1).any(|r| r.first_tick_checksums[idx] != head) {
+        if runs
+            .iter()
+            .skip(1)
+            .any(|r| r.first_tick_checksums[idx] != head)
+        {
             let label = Phase::from_index(idx as u8)
                 .map(|p| p.label())
                 .unwrap_or("неизвестная");
@@ -2031,7 +2056,7 @@ fn quarantine_post_session(
         if let Some(spread) =
             unstable_spread(run_medians, MIN_RUNS_FOR_JUDGMENT, UNSTABLE_MAD_LIMIT)
         {
-        if let Some(entry) = quarantine_scheme(
+            if let Some(entry) = quarantine_scheme(
                 &id,
                 name_map,
                 QuarantineKind::Unstable,
@@ -2052,7 +2077,7 @@ fn quarantine_post_session(
         // лидера той же фазы. Ловится с одного прогона, потому что сравнение
         // одновременное, и медленная машина сокращается из обеих сторон.
         if let Some(reason) = phase_collapse_reason(checkpoint, &id, &typical_p1_by_phase) {
-        if let Some(entry) = quarantine_scheme(
+            if let Some(entry) = quarantine_scheme(
                 &id,
                 name_map,
                 QuarantineKind::Degraded,
@@ -2069,7 +2094,7 @@ fn quarantine_post_session(
         // режиме «Быстро» раунд ровно один, и без этого правила заведомо
         // сломанная схема проходила замер наравне с рабочей.
         if catastrophic_share(own_median, best_median) {
-        if let Some(entry) = quarantine_scheme(
+            if let Some(entry) = quarantine_scheme(
                 &id,
                 name_map,
                 QuarantineKind::Degraded,
@@ -2089,7 +2114,7 @@ fn quarantine_post_session(
         #[allow(clippy::collapsible_if)]
         if run_medians.len() >= DEGRADED_MIN_RUNS {
             if degraded_share(own_median, best_median, DEGRADED_SHARE_LIMIT) {
-        if let Some(entry) = quarantine_scheme(
+                if let Some(entry) = quarantine_scheme(
                     &id,
                     name_map,
                     QuarantineKind::Degraded,
@@ -2100,9 +2125,9 @@ fn quarantine_post_session(
                     plan_guid,
                     observer,
                     events,
-            ) {
-                written.push(entry);
-            }
+                ) {
+                    written.push(entry);
+                }
             }
         }
     }
@@ -2286,6 +2311,129 @@ fn build_aggregation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Драйвер, запоминающий переключения схемы.
+    struct RecordingDriver {
+        active: Mutex<String>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingDriver {
+        fn new(initial: &str) -> Self {
+            Self {
+                active: Mutex::new(initial.to_string()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SchemeDriver for RecordingDriver {
+        fn list_schemes(&self) -> Result<Vec<PowerScheme>, String> {
+            let active = self
+                .active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            Ok(vec![PowerScheme {
+                guid: active,
+                name: "Схема".into(),
+                active: true,
+            }])
+        }
+
+        fn set_active(&self, guid: &str) -> Result<(), String> {
+            *self.active.lock().unwrap_or_else(|e| e.into_inner()) = guid.to_string();
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(guid.to_string());
+            Ok(())
+        }
+
+        fn ac_power_online(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        fn is_admin(&self) -> bool {
+            true
+        }
+    }
+
+    /// Паника в сессии возвращает исходную схему питания.
+    ///
+    /// Раньше guard создавался после `run_session_loop`, и паника внутри цикла
+    /// разворачивала стек мимо него: тестовая схема оставалась активной до
+    /// перезапуска приложения, а маркер прогона — на диске, и следующий запуск
+    /// отправлял исправную схему в карантин как HardFreeze.
+    #[test]
+    fn os_restore_guard_returns_scheme_on_panic() {
+        let driver = RecordingDriver::new("original-guid");
+        let restored = Arc::new(AtomicBool::new(false));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = OsRestoreGuard {
+                original: Some("original-guid".to_string()),
+                driver: &driver,
+                restored: Arc::clone(&restored),
+            };
+            panic!("движок упал посреди фазы");
+        }));
+        assert!(outcome.is_err(), "паника должна дойти до catch_unwind");
+        assert_eq!(
+            *driver.active.lock().unwrap(),
+            "original-guid",
+            "после паники активной осталась тестовая схема"
+        );
+        assert_eq!(driver.calls.lock().unwrap().len(), 1);
+    }
+
+    /// Штатно восстановленная схема повторно не переключается.
+    #[test]
+    fn os_restore_guard_is_silent_after_restore() {
+        let driver = RecordingDriver::new("original-guid");
+        let restored = Arc::new(AtomicBool::new(true));
+        drop(OsRestoreGuard {
+            original: Some("original-guid".to_string()),
+            driver: &driver,
+            restored: Arc::clone(&restored),
+        });
+        assert!(
+            driver.calls.lock().unwrap().is_empty(),
+            "после штатного восстановления схему переключили заново"
+        );
+    }
+
+    /// Guard создаётся до вызова цикла, а не после.
+    ///
+    /// Порядок объявления в `run_session` — часть контракта: только guard,
+    /// живущий на Drop, спасает при панике. Проверяется по исходнику, потому
+    /// что воспроизвести панику именно в этой точке без настоящего движка
+    /// нельзя, а регресс здесь молчаливый: код компилируется и работает, пока
+    /// не случится именно то, ради чего guard и написан.
+    #[test]
+    fn restore_guards_are_created_before_the_session_loop() {
+        let src = include_str!("session.rs");
+        let start = src
+            .find("pub fn run_session(")
+            .expect("не найдена run_session");
+        let body = &src[start..];
+        let guards = body
+            .find("let _os_guard = OsRestoreGuard {")
+            .expect("OsRestoreGuard не создан в run_session");
+        let marker = body
+            .find("let _marker_guard = TestingMarkerGuard;")
+            .expect("TestingMarkerGuard не создан в run_session");
+        let loop_call = body
+            .find("let loop_result = run_session_loop(")
+            .expect("вызов run_session_loop не найден");
+        assert!(
+            guards < loop_call,
+            "OsRestoreGuard создан после вызова цикла: паника развернёт стек мимо него"
+        );
+        assert!(
+            marker < loop_call,
+            "TestingMarkerGuard создан после вызова цикла: маркер останется на диске"
+        );
+    }
 
     /// Медленно ≠ сломано: пока разгон не закончился, низкий темп нормален.
     #[test]

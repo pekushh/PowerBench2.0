@@ -530,21 +530,21 @@ mod descriptor_tests {
     fn all_profiles() -> Vec<ProfileParams> {
         crate::config::ALL_PROFILES
             .into_iter()
-        .flat_map(|p| {
-            let base = profile_params(p);
-            // Все делители числа воркеров по умолчанию, плюс сам делитель:
-            // так проверяются и «родные», и уменьшенные пулы.
-            let div = base.worker_jobs;
-            (1..=MAXIMUM_JOBS.min(div))
-                .filter(move |j| div.is_multiple_of(*j))
-                .map(move |jobs| ProfileParams {
-                    main_entity_updates: base.main_entity_updates,
-                    visibility_probes: base.visibility_probes,
-                    animation_items: base.animation_items,
-                    worker_jobs: jobs,
-                })
-        })
-        .collect()
+            .flat_map(|p| {
+                let base = profile_params(p);
+                // Все делители числа воркеров по умолчанию, плюс сам делитель:
+                // так проверяются и «родные», и уменьшенные пулы.
+                let div = base.worker_jobs;
+                (1..=MAXIMUM_JOBS.min(div))
+                    .filter(move |j| div.is_multiple_of(*j))
+                    .map(move |jobs| ProfileParams {
+                        main_entity_updates: base.main_entity_updates,
+                        visibility_probes: base.visibility_probes,
+                        animation_items: base.animation_items,
+                        worker_jobs: jobs,
+                    })
+            })
+            .collect()
     }
 
     /// Инвариант `RawShared`: ни один индекс анимации не принадлежит двум

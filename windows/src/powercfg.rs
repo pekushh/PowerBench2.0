@@ -109,7 +109,9 @@ pub fn parse_scheme_line(line: &str) -> Option<PowerScheme> {
 /// `powercfg.exe` выполнялся бы с этими правами. Используем системный путь.
 fn powercfg_path() -> std::path::PathBuf {
     let sys = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-    std::path::PathBuf::from(sys).join("System32").join("powercfg.exe")
+    std::path::PathBuf::from(sys)
+        .join("System32")
+        .join("powercfg.exe")
 }
 
 /// Флаг `CREATE_NO_WINDOW` из `winbase.h`.
@@ -284,6 +286,34 @@ pub fn duplicate(guid: &str) -> Result<String, PowerCfgError> {
                 "в выводе powercfg не найден GUID новой схемы",
             )
         })
+}
+
+/// Экспортировать схему в файл `.pow`.
+///
+/// `powercfg /export` при ошибке иногда возвращает код 0, не создав файл
+/// (например, когда каталог назначения недоступен для записи). Поэтому
+/// результат проверяется по самому файлу: иначе интерфейс сообщал бы «схема
+/// экспортирована», а на диске ничего не было бы.
+pub fn export(guid: &str, path: &Path) -> Result<(), PowerCfgError> {
+    let g = guid.trim();
+    if g.is_empty() {
+        return Err(PowerCfgError::new("export", "не указан GUID схемы"));
+    }
+    let arg = path
+        .to_str()
+        .ok_or_else(|| PowerCfgError::new("export", "путь к .pow имеет неверную кодировку"))?;
+    run_powercfg("export", &["/export", g, arg])?;
+    match std::fs::metadata(path) {
+        Ok(m) if m.len() > 0 => Ok(()),
+        Ok(_) => Err(PowerCfgError::new(
+            "export",
+            "файл .pow создан, но пуст — вероятно, powercfg не смог записать схему",
+        )),
+        Err(e) => Err(PowerCfgError::new(
+            "export",
+            format!("файл .pow не создан: {e}"),
+        )),
+    }
 }
 
 /// Удалить схему по GUID.

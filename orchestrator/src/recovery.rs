@@ -64,7 +64,8 @@ pub fn recover_interrupted_session(driver: &dyn SchemeDriver) -> RecoveryOutcome
     // Виновная схема уходит в карантин, маркер стирается.
     let freeze_note = match crate::quarantine::load_testing_marker() {
         Some(marker) => {
-            let reason = "прогон не завершился (убийство процесса, зависание ПК или ребут во время замера)";
+            let reason =
+                "прогон не завершился (убийство процесса, зависание ПК или ребут во время замера)";
             let _ = crate::quarantine::quarantine_add(
                 &marker.scheme_id,
                 marker.scheme_name.as_deref(),

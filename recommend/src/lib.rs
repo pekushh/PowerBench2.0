@@ -266,8 +266,7 @@ pub fn recommend(items: &[SchemeAggregate], expected_runs: usize) -> Recommendat
             level: EvidenceLevel::Preliminary,
             recommended_scheme: Some(sorted[0].scheme_id.clone()),
             runner_up_scheme: None,
-            reason: "мало данных: единственная допущенная схема, сравнивать не с чем"
-                .to_string(),
+            reason: "мало данных: единственная допущенная схема, сравнивать не с чем".to_string(),
             three_probabilities: None,
             expected_margin_percent: None,
             bootstrap_mode: None,

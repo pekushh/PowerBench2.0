@@ -272,7 +272,10 @@ fn late_worker_report_does_not_corrupt_next_batch() {
     let b = engine
         .run_phase(Phase::Heavy, RunTarget::Ticks(64))
         .unwrap();
-    assert_eq!(a.run_checksum, b.run_checksum, "гонка отчётов испортила батч");
+    assert_eq!(
+        a.run_checksum, b.run_checksum,
+        "гонка отчётов испортила батч"
+    );
     assert_eq!(a.first_tick_checksum, b.first_tick_checksum);
 }
 

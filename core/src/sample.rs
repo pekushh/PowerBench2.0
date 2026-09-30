@@ -92,18 +92,18 @@ pub fn capacity_for(phase: Phase, duration_secs: u64) -> usize {
     }
 }
 
-    /// Ёмкость буфера, достаточная для `ticks` тиков (для прогонов по числу тиков).
-    pub fn capacity_for_ticks(phase: Phase, ticks: u64) -> usize {
-        if ticks == 0 {
-            return MIN_SAMPLE_CAPACITY;
-        }
-        let ticks = ticks.min(MAX_SAMPLE_CAPACITY as u64);
-        let seconds = ticks.div_ceil(ESTIMATED_MAX_TICKS_PER_SEC).max(1);
-        let c = capacity_for(phase, seconds);
-        // Гарантия: capacity >= ticks (за счёт оценки сверху 32000/+1 секунды).
-        debug_assert!(c as u64 >= ticks);
-        c
+/// Ёмкость буфера, достаточная для `ticks` тиков (для прогонов по числу тиков).
+pub fn capacity_for_ticks(phase: Phase, ticks: u64) -> usize {
+    if ticks == 0 {
+        return MIN_SAMPLE_CAPACITY;
     }
+    let ticks = ticks.min(MAX_SAMPLE_CAPACITY as u64);
+    let seconds = ticks.div_ceil(ESTIMATED_MAX_TICKS_PER_SEC).max(1);
+    let c = capacity_for(phase, seconds);
+    // Гарантия: capacity >= ticks (за счёт оценки сверху 32000/+1 секунды).
+    debug_assert!(c as u64 >= ticks);
+    c
+}
 
 #[cfg(test)]
 mod tests {
@@ -140,7 +140,6 @@ mod tests {
         let c = capacity_for_ticks(Phase::Response, u64::MAX);
         assert!(c <= MAX_SAMPLE_CAPACITY);
     }
-
 
     #[test]
     fn capacity_for_ticks_is_sufficient() {

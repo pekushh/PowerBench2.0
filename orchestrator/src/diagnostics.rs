@@ -165,11 +165,11 @@ mod tests {
     #[test]
     fn real_powercfg_is_reachable_for_the_readiness_check() {
         match powerbench_windows::powercfg::list_schemes() {
-            Ok(list) => assert!(
-                !list.is_empty(),
-                "powercfg вернул пустой список схем"
+            Ok(list) => assert!(!list.is_empty(), "powercfg вернул пустой список схем"),
+            Err(e) => panic!(
+                "проверка готовности не смогла опросить powercfg: {}",
+                e.message
             ),
-            Err(e) => panic!("проверка готовности не смогла опросить powercfg: {}", e.message),
         }
     }
 }

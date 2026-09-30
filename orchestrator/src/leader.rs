@@ -48,9 +48,7 @@ pub const LEADER_CV_LIMIT_PERCENT: f64 = 5.0;
 pub fn robust_leader(schemes: &[SchemeJson]) -> Option<RobustLeader> {
     let mut admitted: Vec<&SchemeJson> = schemes
         .iter()
-        .filter(|s| {
-            !s.rejected && s.median_throughput.is_finite() && s.median_throughput > 0.0
-        })
+        .filter(|s| !s.rejected && s.median_throughput.is_finite() && s.median_throughput > 0.0)
         .collect();
     if admitted.is_empty() {
         return None;
@@ -59,16 +57,15 @@ pub fn robust_leader(schemes: &[SchemeJson]) -> Option<RobustLeader> {
         b.median_throughput
             .total_cmp(&a.median_throughput)
             .then_with(|| {
-                b.mean_average_throughput.total_cmp(&a.mean_average_throughput)
+                b.mean_average_throughput
+                    .total_cmp(&a.mean_average_throughput)
             })
     });
     let win = admitted[0];
     let mut flags = Vec::new();
 
     if win.runs < 2 {
-        flags.push(
-            "у лидера менее 2 прогонов — перевес недостоверен, нужны повторы".to_string(),
-        );
+        flags.push("у лидера менее 2 прогонов — перевес недостоверен, нужны повторы".to_string());
     }
     if win.mean_average_throughput.is_finite() && win.mean_average_throughput > 0.0 {
         let div = (win.mean_average_throughput - win.median_throughput).abs()
@@ -83,8 +80,7 @@ pub fn robust_leader(schemes: &[SchemeJson]) -> Option<RobustLeader> {
     if admitted.len() > 1 {
         let runner = admitted[1];
         if runner.median_throughput > 0.0 {
-            let gap = (win.median_throughput - runner.median_throughput)
-                / runner.median_throughput
+            let gap = (win.median_throughput - runner.median_throughput) / runner.median_throughput
                 * 100.0;
             if gap < NOISE_GAP_LIMIT_PERCENT {
                 flags.push(

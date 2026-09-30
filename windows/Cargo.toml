@@ -23,5 +23,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_Globalization",
     "Win32_UI_Shell",
     "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 sysinfo = "0.30"

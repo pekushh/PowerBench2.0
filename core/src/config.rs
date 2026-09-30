@@ -247,7 +247,10 @@ pub const FINALIZE_TICK_ROTATE: u32 = 17;
 pub fn config_payload() -> String {
     use std::fmt::Write as _;
     let mut s = String::with_capacity(320);
-    let _ = write!(s, "GamingCpuV1|{SEED:016X}|{ENTITY_CAPACITY}|{RESPONSE_SUPERCYCLE}");
+    let _ = write!(
+        s,
+        "GamingCpuV1|{SEED:016X}|{ENTITY_CAPACITY}|{RESPONSE_SUPERCYCLE}"
+    );
     for p in ALL_PROFILES {
         let params = profile_params(p);
         let _ = write!(
@@ -367,13 +370,17 @@ mod tests {
         // Профиль «Частичная» тоже обязан попасть в payload: без него прогоны
         // разных фаз смешивались бы при неизменном config_hash.
         assert!(
-            payload.contains(&format!("{},{}", {
-                let p = profile_params(Profile::Partial);
-                p.main_entity_updates
-            }, {
-                let p = profile_params(Profile::Partial);
-                p.worker_jobs
-            })),
+            payload.contains(&format!(
+                "{},{}",
+                {
+                    let p = profile_params(Profile::Partial);
+                    p.main_entity_updates
+                },
+                {
+                    let p = profile_params(Profile::Partial);
+                    p.worker_jobs
+                }
+            )),
             "payload не содержит параметров профиля «Частичная»"
         );
     }

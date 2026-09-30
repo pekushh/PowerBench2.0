@@ -405,7 +405,10 @@ mod tests {
     #[test]
     fn unstable_spread_needs_enough_runs() {
         // Разброс огромный, но прогонов мало — не браковать.
-        assert_eq!(unstable_spread(&[100.0, 300.0], 3, UNSTABLE_MAD_LIMIT), None);
+        assert_eq!(
+            unstable_spread(&[100.0, 300.0], 3, UNSTABLE_MAD_LIMIT),
+            None
+        );
         assert_eq!(unstable_spread(&[100.0], 3, UNSTABLE_MAD_LIMIT), None);
         // Стабильная схема — не браковать.
         assert_eq!(

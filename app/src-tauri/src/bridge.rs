@@ -137,7 +137,7 @@ fn build_plan(req: &TestRequestDto) -> Result<SessionConfig, String> {
 
 // --- Команды ---
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_schemes() -> Result<Vec<SchemeRow>, String> {
     powercfg::list_schemes()
         .map(|s| scheme_rows(&s))
@@ -155,7 +155,7 @@ pub fn ac_power_online() -> Result<bool, String> {
 }
 
 /// Действия со схемой питания.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scheme_action(
     action: String,
     guid: Option<String>,
@@ -173,6 +173,16 @@ pub fn scheme_action(
         "delete" => {
             let g = guid.ok_or_else(|| "delete требует guid".to_string())?;
             powercfg::delete(&g).map(|_| None).map_err(|e| e.message)
+        }
+        // Кнопка «Экспорт .pow» была в интерфейсе с самого начала, но действия
+        // в мосте не было: кнопка всегда падала с «неизвестное действие
+        // export». Схему нельзя было выгрузить и унести на другую машину.
+        "export" => {
+            let g = guid.ok_or_else(|| "export требует guid".to_string())?;
+            let p = path.ok_or_else(|| "export требует путь к .pow".to_string())?;
+            powercfg::export(&g, std::path::Path::new(&p))
+                .map(|_| Some(p))
+                .map_err(|e| e.message)
         }
         "import" => {
             let p = path.ok_or_else(|| "import требует путь к .pow".to_string())?;
@@ -228,7 +238,7 @@ fn settings_to_dto(s: &AppSettings) -> SettingsDto {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_settings() -> SettingsDto {
     settings_to_dto(&AppSettings::load())
 }
@@ -239,7 +249,7 @@ pub fn get_settings() -> SettingsDto {
 /// команды Tauri выполняются на пуле потоков, поэтому «прочитать DTO → дописать
 /// своё → записать» без блокировки теряло параллельные изменения (например,
 /// отметку «избранное» для схемы, поставленную другим вызовом).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_settings(settings: SettingsDto) -> Result<(), String> {
     let mut s = settings;
     // Значения приходят из интерфейса, поэтому проверяем их до записи: ноль в
@@ -308,14 +318,14 @@ impl CheckpointDto {
 /// `Err` означает «файл есть, но не читается». Раньше такой случай выглядел
 /// как «сессии нет», и интерфейс предлагал начать заново, не предупредив,
 /// что отработанные раунды не восстановимы.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn checkpoint_status() -> Result<Option<CheckpointDto>, String> {
     load_checkpoint()
         .map_err(|e| format!("контрольная точка не читается: {e}"))
         .map(|opt| opt.as_ref().map(CheckpointDto::from_cp))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn identity_info() -> Result<serde_json::Value, String> {
     let mut engine = Engine::new(None);
     engine
@@ -324,7 +334,7 @@ pub fn identity_info() -> Result<serde_json::Value, String> {
     serde_json::to_value(runner::identity_of(&engine)).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_test(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -404,7 +414,7 @@ fn discard_stale_checkpoint(app: &tauri::AppHandle, state: &AppState) {
 }
 
 /// Забыть прерванную сессию: вернуть исходную схему и удалить точку.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn checkpoint_discard(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -611,12 +621,12 @@ fn handled_history_rows() -> Result<Vec<HistoryRow>, String> {
     Ok(rows)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn history_list() -> Result<Vec<HistoryRow>, String> {
     handled_history_rows()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn history_open(plan_guid: String) -> Result<SessionJson, String> {
     let entries = list_results().map_err(|e| format!("не удалось прочитать историю: {e}"))?;
     let mut last_error = String::new();
@@ -647,7 +657,7 @@ pub fn history_open(plan_guid: String) -> Result<SessionJson, String> {
 
 /// Экспорт одной записи или всей истории в выбранный пользователем каталог.
 /// Возвращает пути записанных файлов.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn history_export_to(
     plan_guid: String,
     format: String,
@@ -708,7 +718,7 @@ pub fn history_export_to(
 }
 
 /// Сводный HTML-отчёт по всей истории в выбранный каталог.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn history_report(out_dir: String) -> Result<String, String> {
     let dir = std::path::PathBuf::from(&out_dir);
     std::fs::create_dir_all(&dir)
@@ -730,7 +740,7 @@ pub fn history_report(out_dir: String) -> Result<String, String> {
 }
 
 /// Список схем в карантине (браковка: зависания, нестабильность, деградация).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn quarantine_list() -> Vec<QuarantineEntry> {
     quarantine::load_quarantine()
 }
@@ -839,7 +849,7 @@ pub fn test_presets() -> Vec<PresetDto> {
 }
 
 /// Вернуть схему из карантина в бенчмарк. `Ok(true)` — запись была и удалена.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn quarantine_clear(scheme_id: String) -> Result<bool, String> {
     quarantine::quarantine_remove(&scheme_id)
         .map_err(|e| format!("не удалось убрать из карантина: {e}"))
@@ -847,14 +857,14 @@ pub fn quarantine_clear(scheme_id: String) -> Result<bool, String> {
 
 /// HTML-отчёт по одной сессии (сохраняется рядом с результатами и
 /// открывается в браузере по умолчанию).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn session_report(plan_guid: String) -> Result<String, String> {
     let s = find_session(&plan_guid)?;
     crate::runner::write_session_report_strict(&s)
 }
 
 /// Удалить запись истории по имени файла.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn history_delete(file_name: String) -> Result<(), String> {
     if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
         return Err("недопустимое имя файла".to_string());
@@ -880,7 +890,7 @@ pub struct StorageStats {
     pub max_sessions: u32,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn storage_stats() -> StorageStats {
     let dir = history::results_dir();
     let free_bytes = disk::free_space_bytes(&dir).unwrap_or(0);
@@ -933,7 +943,7 @@ pub fn appsettings_path() -> String {
 }
 
 /// Журнал событий приложения (команда `log_history`).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn log_history(state: tauri::State<'_, AppState>) -> Vec<crate::logger::LogEntry> {
     state.log.snapshot()
 }
@@ -968,7 +978,7 @@ pub struct DiagnosticsSaved {
 /// состояние контрольной точки, карантина, настроек и последней сессии.
 /// Смысл в том, чтобы по одному файлу было видно и что произошло, и в каком
 /// окружении, — без доступа к машине пользователя.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_diagnostics(
     state: tauri::State<'_, AppState>,
     path: String,
@@ -1021,7 +1031,7 @@ pub struct Readiness {
     pub issues: Vec<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn system_ready(requested_schemes: Option<u32>) -> Readiness {
     // Единая реализация — в orchestrator::diagnostics (там же юнит-тесты).
     let report = powerbench_orchestrator::diagnostics::system_ready(

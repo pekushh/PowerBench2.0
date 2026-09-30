@@ -66,7 +66,32 @@ fn rand_u64() -> u64 {
     z ^ (z >> 31)
 }
 
+/// Завершение перед выходом из приложения.
+///
+/// Два выхода должны быть одинаковыми. Раньше выход через трей вызывал
+/// `app.exit(0)` напрямую и пропускал этот шаг: процесс завершался, не дожидаясь
+/// фоновой сессии, а журнал оставался без последних строк. Сессия при этом
+/// могла остаться с применённой тестовой схемой питания.
+fn shutdown(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        runner::join(&state.runner);
+        // Журнал пишется фоновым потоком: без явного сброса последние строки
+        // остались бы только в памяти.
+        state.log.flush();
+    }
+}
+
 fn main() {
+    // Второй экземпляр выходит сразу, ДО восстановления после прерывания.
+    // Иначе он записал бы поверх чужого маркера прогона и карантинил
+    // исправную схему, а потом ещё и переключил питание поверх идущего замера.
+    let _instance = match powerbench_windows::instance::SingleInstance::acquire() {
+        Some(g) => g,
+        None => {
+            powerbench_windows::instance::show_already_running();
+            return;
+        }
+    };
     // Если прошлая сессия была прервана (kill/падение), исходная схема могла
     // остаться переключённой — восстанавливаем до старта интерфейса.
     {
@@ -106,7 +131,10 @@ fn main() {
                         let _ = w.set_focus();
                     }
                 }
-                "quit" => app.exit(0),
+                "quit" => {
+                    shutdown(app);
+                    app.exit(0);
+                }
                 _ => {}
             });
             app.manage(TrayState(std::sync::Mutex::new(Some(tray_icon))));
@@ -152,13 +180,7 @@ fn main() {
             if let tauri::WindowEvent::Destroyed = event {
                 // Ждём завершения фоновой сессии: контрольная точка и
                 // восстановление схемы должны успеть сохраниться.
-                use tauri::Manager;
-                if let Some(state) = window.app_handle().try_state::<AppState>() {
-                    runner::join(&state.runner);
-                    // Журнал пишется фоновым потоком: без явного сброса
-                    // последние строки остались бы только в памяти.
-                    state.log.flush();
-                }
+                shutdown(window.app_handle());
             }
         })
         .run(tauri::generate_context!())

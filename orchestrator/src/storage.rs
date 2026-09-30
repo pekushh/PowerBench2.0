@@ -231,7 +231,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
     fn tmp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("powerbench-atomicio-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -294,12 +293,12 @@ mod tests {
                 std::thread::spawn(move || {
                     for _ in 0..10 {
                         update_file(&path, |cur| {
-                            let mut list: Vec<String> =
-                                String::from_utf8_lossy(cur).is_empty().then(Vec::new).unwrap_or_else(
-                                    || {
-                                        serde_json::from_slice::<Vec<String>>(cur).unwrap_or_default()
-                                    },
-                                );
+                            let mut list: Vec<String> = String::from_utf8_lossy(cur)
+                                .is_empty()
+                                .then(Vec::new)
+                                .unwrap_or_else(|| {
+                                    serde_json::from_slice::<Vec<String>>(cur).unwrap_or_default()
+                                });
                             list.push(format!("w{i}"));
                             serde_json::to_vec(&list).unwrap()
                         })
@@ -311,8 +310,7 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
-        let list: Vec<String> =
-            read_json(path.as_path()).expect("файл читается как список");
+        let list: Vec<String> = read_json(path.as_path()).expect("файл читается как список");
         assert_eq!(list.len(), 80, "правки потеряны: {}", list.len());
         let _ = std::fs::remove_dir_all(&dir);
     }

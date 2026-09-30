@@ -419,11 +419,7 @@ impl PhaseSummaryJson {
 
 /// `NaN`/`inf` → `0.0`; конечные значения проходят без изменений.
 fn finite_or_zero(v: f64) -> f64 {
-    if v.is_finite() {
-        v
-    } else {
-        0.0
-    }
+    if v.is_finite() { v } else { 0.0 }
 }
 
 /// Рекомендация в результате.

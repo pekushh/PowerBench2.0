@@ -4,9 +4,7 @@
 //! [`estimate_run_seconds`] и [`format_estimate`], которыми пользуются и
 //! оркестратор, и интерфейс, поэтому оценка времени не расходится с фактом.
 
-use crate::session::{
-    BACKGROUND_ATTEMPTS, BACKGROUND_MEASURE_MS, BACKGROUND_RETRY_PAUSE_MS,
-};
+use crate::session::{BACKGROUND_ATTEMPTS, BACKGROUND_MEASURE_MS, BACKGROUND_RETRY_PAUSE_MS};
 
 /// Пресет «Быстрый»: длительность 30 с, разогрев 3 с, охлаждение 3 с, 1 повтор.
 ///
@@ -115,9 +113,8 @@ pub const DEFAULT_COOLING_SECS: u64 = 5;
 pub const PHASES_PER_RUN: u64 = 4;
 /// Оценка времени проверки фоновой нагрузки: одна попытка, а при шуме —
 /// до трёх с паузами между ними.
-pub const BACKGROUND_CHECK_SECS: f64 =
-    BACKGROUND_MEASURE_MS as f64 / 1000.0
-        + (BACKGROUND_ATTEMPTS as f64 - 1.0) * BACKGROUND_RETRY_PAUSE_MS as f64 / 1000.0;
+pub const BACKGROUND_CHECK_SECS: f64 = BACKGROUND_MEASURE_MS as f64 / 1000.0
+    + (BACKGROUND_ATTEMPTS as f64 - 1.0) * BACKGROUND_RETRY_PAUSE_MS as f64 / 1000.0;
 
 /// Оценка полного времени сессии в секундах.
 ///
@@ -370,7 +367,9 @@ mod tests {
     /// фона и охлаждение — иначе она систематически занижена.
     #[test]
     fn estimate_covers_every_stage() {
-        let per_run = 30.0 + 6.0 + PAUSE_AFTER_SCHEME_SECS as f64
+        let per_run = 30.0
+            + 6.0
+            + PAUSE_AFTER_SCHEME_SECS as f64
             + STABILIZATION_SECS as f64 * PHASES_PER_RUN as f64
             + BACKGROUND_CHECK_SECS;
         // Охлаждение идёт после каждого прогона, кроме последнего в плане:
@@ -417,10 +416,7 @@ mod tests {
             "активная схема не перенесена в начало"
         );
         // Регистр GUID игнорируется.
-        assert_eq!(
-            canonical_scheme_order(&ids, Some("A")),
-            vec!["a", "b", "c"]
-        );
+        assert_eq!(canonical_scheme_order(&ids, Some("A")), vec!["a", "b", "c"]);
         // Активной среди выбранных нет — порядок не трогаем.
         assert_eq!(canonical_scheme_order(&ids, Some("zzz")), ids);
         assert_eq!(canonical_scheme_order(&ids, None), ids);

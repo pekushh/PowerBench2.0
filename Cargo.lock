@@ -2387,7 +2387,7 @@ dependencies = [
 
 [[package]]
 name = "powerbench-app"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "powerbench-core",
  "powerbench-metrics",
@@ -2403,7 +2403,7 @@ dependencies = [
 
 [[package]]
 name = "powerbench-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "powerbench-core",
  "powerbench-metrics",
@@ -2417,21 +2417,21 @@ dependencies = [
 
 [[package]]
 name = "powerbench-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "powerbench-metrics"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "powerbench-orchestrator"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "csv",
  "powerbench-core",
@@ -2445,14 +2445,14 @@ dependencies = [
 
 [[package]]
 name = "powerbench-recommend"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "powerbench-metrics",
 ]
 
 [[package]]
 name = "powerbench-windows"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",

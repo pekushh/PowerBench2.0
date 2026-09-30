@@ -1381,11 +1381,7 @@ fn conditions_section(s: &SessionJson) -> String {
         }
         out.push_str("</ul>");
     }
-    if out.is_empty() {
-        String::new()
-    } else {
-        out
-    }
+    if out.is_empty() { String::new() } else { out }
 }
 
 fn name_of(sch: &crate::result::SchemeJson) -> String {
@@ -1425,11 +1421,7 @@ fn categories_section(s: &SessionJson) -> String {
     let top_stable = measured.iter().copied().reduce(|a, b| {
         let ka = (a.median_p1_throughput, a.median_consistency_percent);
         let kb = (b.median_p1_throughput, b.median_consistency_percent);
-        if kb > ka {
-            b
-        } else {
-            a
-        }
+        if kb > ka { b } else { a }
     });
 
     // Рекомендация: среди схем с высоким AVG берём самую стабильную.
@@ -1441,11 +1433,7 @@ fn categories_section(s: &SessionJson) -> String {
         .reduce(|a, b| {
             let ka = (a.median_p1_throughput, a.median_consistency_percent);
             let kb = (b.median_p1_throughput, b.median_consistency_percent);
-            if kb > ka {
-                b
-            } else {
-                a
-            }
+            if kb > ka { b } else { a }
         })
         .or(top_stable);
 
@@ -1695,7 +1683,7 @@ fn now_unix_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::{save_result_in, RESULTS_DIR_NAME};
+    use crate::history::{RESULTS_DIR_NAME, save_result_in};
     use crate::result::{IdentityJson, RecommendationJson, SchemeJson};
 
     fn sample_session(id: &str, median: f64) -> SessionJson {

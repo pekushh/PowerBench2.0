@@ -223,6 +223,14 @@ export default function LogPage({ active = true }: { active?: boolean }) {
         `для более старых уточните фильтр или поиск`
       : `Показано ${shown.length} из ${all.length} записей`;
 
+  // Уточнение для шапки: «Логи · 5000 записей».
+  useEffect(() => {
+    setSectionDetail(
+      all.length > 0 ? `${all.length} ${pluralish(all.length, "запись", "записи", "записей")}` : "",
+    );
+    return () => setSectionDetail("");
+  }, [all.length]);
+
   return (
     <div className="page fill logs-page" ref={rootRef}>
       <div className="page-head">
@@ -336,14 +344,6 @@ export default function LogPage({ active = true }: { active?: boolean }) {
           <div className="log-list" ref={listRef} onScroll={onListScroll}>
             {visible.map((e) => {
               const k = normLevel(e.level);
-  // Уточнение для шапки: «Логи · 5000 записей».
-  useEffect(() => {
-    setSectionDetail(
-      all.length > 0 ? `${all.length} ${pluralish(all.length, "запись", "записи", "записей")}` : "",
-    );
-    return () => setSectionDetail("");
-  }, [all.length]);
-
   return (
                 <div key={e.key} className="log-row" data-level={k}>
                   <span className="l-time">{timeOf(e.ts_ms)}</span>

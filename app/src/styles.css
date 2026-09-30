@@ -1336,8 +1336,6 @@ html[data-motion="off"] *::after{
    Из правила подъёма пунктов она исключена: иначе `position: relative`
    перебивал `position: absolute`, и полоска становилась обычным элементом
    списка — от этого всё меню съезжало вниз на её высоту. */
-.pb-marker{position:absolute;left:0;top:0;width:3px;border-radius:0 3px 3px 0;background:var(--accent);pointer-events:none;z-index:2;transition:transform var(--t-3) var(--e-spring),height var(--t-3) var(--e-spring),opacity var(--t-2) var(--e-out)}
-.sidebar-nav>*:not(.pb-marker),.sidebar-foot>*:not(.pb-marker){position:relative;z-index:1}
 
 /* Сворачивание: подписи схлопываются шириной, группа и палитра исчезают в
    конце. Пунктов меню с подписями групп и палитрой в приложении пока нет,
@@ -1429,3 +1427,38 @@ html[data-motion="off"] *::after{
 /* Полоса прокрутки не должна наезжать на иконки пунктов. */
 .sidebar-nav{padding-right:4px}
 .sidebar.collapsed .sidebar-nav{padding-right:0}
+/* ===== Рельса: геометрия по замерам в пикселях =====
+   Иконка была смещена влево на 11 px: пункт центрировался, но подпись в
+   свёрнутом виде ещё занимала место и отжимала иконку. Теперь подпись убрана
+   полностью, квадрат строго 38×38 и центрирован, иконки единого размера. */
+.sidebar{transition:flex-basis var(--t-3) var(--e-out),width var(--t-3) var(--e-out)}
+.sidebar.collapsed{padding:10px 8px}
+.sidebar.collapsed .nav-item{width:38px;height:38px;margin:0 auto;padding:0;display:grid;place-items:center;gap:0;border-radius:10px}
+/* Подпись в свёрнутом виде убирается, а не сжимается: сжатая подпись
+   оставалась в потоке и сдвигала иконку влево. Скругление и ширина панели
+   анимируются, поэтому кадр не дёргается. */
+.sidebar.collapsed .nav-label,.sidebar.collapsed .nav-glyph+.nav-label{display:none}
+.sidebar.collapsed .nav-glyph{width:16px;height:16px}
+/* Единая оптическая масса иконок: 16 px и одна обводка во всех пунктах. */
+.nav-glyph svg{width:16px;height:16px}
+.nav-glyph{display:grid;place-items:center}
+.sidebar.collapsed .nav-item.active{background:rgba(255,255,255,.06);border-color:var(--line-2);color:var(--fg)}
+
+/* Индикатор отодвинут от края окна на 4 px: у самого края его срезало
+   пополам, и он читался как случайный штрих на границе. */
+.pb-nav-ind{left:4px}
+/* ===== Аккордеон «Параметры теста» и состояние режима =====
+   Заголовок плашки находится вне сворачиваемого контейнера, а у самой
+   плашки минимальная высота: при смене ширины меню содержимое переставало
+   влезать и заголовок срезался по `overflow: hidden`. */
+.adv-toggle{min-height:46px;display:flex;align-items:center}
+.adv-body{min-height:0}
+.adv-wrap{min-height:0}
+
+/* Подпись о состоянии режима — слева, под карточками: по центру она
+   читалась как строка без хозяина. */
+.mode-caption{margin-top:10px;font-size:11.5px;color:var(--fg-mute);font-variant-numeric:tabular-nums}
+.center-hint{text-align:center}
+
+/* Бейдж ручной правки на выбранной карточке. */
+.mc-tag.edited{color:var(--warn);background:var(--warnbg);border-color:var(--warnline)}

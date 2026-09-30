@@ -37,6 +37,7 @@ export function useNavIndicator(
     const place = () => {
       frame = 0;
       const item = sidebar.querySelector<HTMLElement>(".nav-item.active");
+      const list = sidebar.querySelector<HTMLElement>(".sidebar-nav");
       if (!item) {
         bar.classList.remove("is-on");
         bar.style.height = "0px";
@@ -44,10 +45,18 @@ export function useNavIndicator(
       }
       const s = sidebar.getBoundingClientRect();
       const i = item.getBoundingClientRect();
+      // Пункт уехал за прокруткой — индикатор гасится, иначе он висит
+      // посреди пустоты. «Настройки» живут в закреплённом подвале, и без
+      // этой проверки полоска появлялась бы в стороне от активного пункта.
+      let inView = true;
+      if (list && list.scrollHeight > list.clientHeight + 1) {
+        const l = list.getBoundingClientRect();
+        inView = i.top >= l.top - 1 && i.bottom <= l.bottom + 1;
+      }
       if (instantRef.current) bar.classList.add("is-instant");
       bar.style.height = `${i.height}px`;
       bar.style.transform = `translateY(${i.top - s.top + sidebar.scrollTop}px)`;
-      bar.classList.add("is-on");
+      bar.classList.toggle("is-on", inView);
       if (instantRef.current) {
         instantRef.current = false;
         // Два кадра: первый гасит переход, второй возвращает его, иначе
@@ -79,12 +88,17 @@ export function useNavIndicator(
       if (e.propertyName === "flex-basis" || e.propertyName === "width") schedule(true);
     };
     sidebar.addEventListener("transitionend", onWidthEnd);
+    // Прокрутка списка пунктов двигает активный пункт относительно сайдбара.
+    const list = sidebar.querySelector<HTMLElement>(".sidebar-nav");
+    const onScroll = () => schedule(true);
+    list?.addEventListener("scroll", onScroll, { passive: true });
     const ro = new ResizeObserver(() => schedule(true));
     ro.observe(sidebar);
     return () => {
       if (frame !== 0) cancelAnimationFrame(frame);
       window.removeEventListener("resize", onResize);
       sidebar.removeEventListener("transitionend", onWidthEnd);
+      list?.removeEventListener("scroll", onScroll);
       ro.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

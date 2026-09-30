@@ -184,13 +184,14 @@ export function GaugeIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-/** Вилка — «Схемы питания»: речь о схемах, а не о выключении. */
+/** Вилка — «Схемы питания»: речь о схемах, а не о выключении. Чаша шире
+ *  прежней, иначе глиф был заметно уже соседей по оптической массе. */
 export function PlugIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <path d="M9 3v5M15 3v5" />
-      <path d="M6.5 8h11v2.5a5.5 5.5 0 0 1-11 0z" />
-      <path d="M12 16v5" />
+      <path d="M8.5 3v5.5M15.5 3v5.5" />
+      <path d="M5.5 8.5h13v2.2a6.5 6.5 0 0 1-13 0z" />
+      <path d="M12 17.2V21" />
     </Base>
   );
 }
@@ -205,11 +206,13 @@ export function BarsIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-/** Строки журнала — «Логи». Документ уже занят шестерёнкой настроек. */
+/** Строки журнала — «Логи». Размах строк подобран под остальные иконки: у
+ *  трёх коротких линий оптическая высота получалась заметно меньше, и пункт
+ *  выглядел легче остальных. */
 export function LogLinesIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" {...props}>
-      <path d="M4 6h16M4 11h16M4 16h10" />
+      <path d="M4 6.5h16M4 12h16M4 17.5h11" />
     </Base>
   );
 }

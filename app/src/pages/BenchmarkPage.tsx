@@ -171,19 +171,22 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
   // раз при монтировании: страницы смонтированы все сразу и переключаются
   // классом, поэтому анимация иначе играла бы только в первый раз.
   const rootRef = useCascade<HTMLDivElement>(active);
-  // Состояние для крошки в шапке: идёт ли замер, какая фаза и сколько схем в
-  // очереди. Название раздела в шапке не дублируется — оно и так крупно
-  // написано на странице.
+  // Режим для крошки держим отдельно от остальной строки: он меняется
+  // независимо от замера и схем.
+  const [modeDetail, setModeDetail] = useState("");
   useEffect(() => {
+    // Состояние для крошки в шапке: идёт ли замер, какая фаза и сколько схем в
+    // очереди. Название раздела в шапке не дублируется — оно и так крупно
+    // написано на странице.
     const tail =
       selected.size > 0
         ? `${selected.size} ${plural(selected.size, "схема", "схемы", "схем")}`
         : "";
     const phase = running && telemetry?.phase ? `фаза «${telemetry.phase}»` : "";
     const head = running ? "Идёт замер" : "Замер не запущен";
-    setSectionDetail([head, phase, tail].filter(Boolean).join(" · "));
+    setSectionDetail([head, phase, tail, modeDetail].filter(Boolean).join(" · "));
     return () => setSectionDetail("");
-  }, [running, selected.size, telemetry?.phase]);
+  }, [running, selected.size, telemetry?.phase, modeDetail]);
   // Событие `test-finished` может прийти раньше ответа команды запуска: поток
   // сессии падает ещё до того, как команда вернёт pid. Флаг нужен, чтобы
   // оптимистичное `running = true` не залипло навсегда.
@@ -298,8 +301,25 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
       : sameParams(current, presets.detailed)
         ? "detailed"
         : "custom";
+  // Параметры правлены руками: выбран пресет, но числа от него отличаются.
+  // Раньше это отображалось только строкой под карточками, а сами карточки
+  // продолжали показывать цифры пресета — расхождение с сводкой выглядело как
+  // ошибка в расчёте.
+  const edited =
+    activePreset !== "custom" && !!presets && !sameParams(current, presets[activePreset]);
 
-  // Проверка готовности не декоративная: она перечисляет ровно те условия,
+  // Правка параметров меняет то, что пойдёт в замер, — об этом стоит сказать
+  // в шапке, а не только под карточками режима.
+  useEffect(() => {
+    const mode =
+      activePreset === "custom" || edited
+        ? "параметры изменены вручную"
+        : activePreset === "quick"
+          ? "режим: быстрый"
+          : "режим: детальный";
+    setModeDetail(mode);
+  }, [activePreset, edited]);
+
   // при которых заведомо не получится замер (нет прав, нет сети, недоступен
   // powercfg, мало места). Показывать баннер и давать кнопку — значит
   // отправлять пользователя в заведомо падающую сессию.
@@ -729,7 +749,13 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                 {(Object.keys(PRESETS) as ("quick" | "detailed")[]).map((key) => {
                   const def = PRESETS[key];
                   const open = preset === key;
-                  const p = presets?.[key];
+                  const presetParams = presets?.[key];
+                  // У выбранной карточки — фактически применяемые значения, у
+                  // остальных — цифры их пресетов. Иначе после ручной правки
+                  // карточка и сводка показывали разные числа.
+                  const shownParams =
+                    open && presetParams ? current : (presetParams ?? null);
+                  const editedHere = open && edited;
                   return (
                     <Spot
                       key={key}
@@ -753,6 +779,7 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                           <div className="mc-title-row">
                             <h2 className="mc-title">{def.title}</h2>
                             <span className="mc-tag">{key === "quick" ? "Скрининг" : "Рекомендуется"}</span>
+                            {editedHere ? <span className="mc-tag edited">изменено вручную</span> : null}
                           </div>
                           <p className="mc-desc">{def.desc}</p>
                         </div>
@@ -773,27 +800,56 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                       <div className="mc-stats">
                         <div className="mc-pill">
                           <small>Повторов</small>
-                          <b>{p ? `${p.reps} ${plural(p.reps, "раунд", "раунда", "раундов")}` : "—"}</b>
+                          <b>
+                            {shownParams
+                              ? `${shownParams.reps} ${plural(shownParams.reps, "раунд", "раунда", "раундов")}`
+                              : "—"}
+                          </b>
                         </div>
                         <div className="mc-pill">
                           <small>Прогон / Разогрев</small>
-                          <b>{p ? `${p.duration} с / ${p.warmup} с` : "—"}</b>
+                          <b>
+                            {shownParams
+                              ? `${shownParams.duration} с / ${shownParams.warmup} с`
+                              : "—"}
+                          </b>
                         </div>
                         <div className="mc-pill time">
                           <small>Одна схема</small>
                           {/* Оценка приходит с префиксом «около», из-за чего
                               значение переносилось на две строки и ряд
                               плашек становился неровным. */}
-                          <b>{presetEstimates[key] ? shortEstimate(presetEstimates[key]) : "—"}</b>
+                          <b>
+                            {open
+                              ? oneScheme
+                                ? shortEstimate(oneScheme)
+                                : "—"
+                              : presetEstimates[key]
+                                ? shortEstimate(presetEstimates[key])
+                                : "—"}
+                          </b>
                         </div>
                       </div>
                     </Spot>
                   );
                 })}
               </div>
-              {activePreset === "custom" ? (
-                <div className="hint center-hint">
-                  Режим: {PRESET_SHORT.custom} — параметры изменены вручную
+              {/* Строка о состоянии режима привязана к карточкам: по центру
+                  она читалась как подпись без хозяина. Цифры в ней берутся из
+                  тех же значений, что и в сводке параметров. */}
+              {activePreset === "custom" || edited ? (
+                <div className="mode-caption">
+                  {activePreset === "custom" ? "Режим: пользовательские параметры" : `Параметры изменены вручную`}
+                  {" · "}
+                  {reps} {plural(reps, "раунд", "раунда", "раундов")}, {duration} с /{" "}
+                  {warmup} с
+                </div>
+              ) : null}
+              {selected.size > 0 ? (
+                <div className="mode-caption">
+                  Будет замерено {selected.size}{" "}
+                  {plural(selected.size, "схема", "схемы", "схем")} · оценочно{" "}
+                  {estimate === "—" ? "—" : estimate}
                 </div>
               ) : null}
 

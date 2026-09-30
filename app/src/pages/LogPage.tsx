@@ -1,25 +1,23 @@
 // Страница «Логи»: фильтруемый журнал запуска, ошибок и событий сессий.
+//
+// Раскладка сверху вниз: заголовок с кнопкой выгрузки, один ряд фильтров
+// (поиск и уровни со счётчиками в одном месте), затем журнал на всю оставшуюся
+// высоту. Раньше фильтры и счётчики стояли в двух рядах плюс отдельная строка
+// с длинным пояснением — четыре полосы интерфейса на одну функцию.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { commands, onLog, type LoggerEntry } from "../api";
-import { Badge, Button, FadeScroll, Panel, Seg } from "../components/ui";
 import { SearchIcon } from "../components/icons";
 import { pushToast } from "../store";
 
+/** Четыре уровня журнала плюс «все». */
 type Level = "all" | "info" | "success" | "warn" | "error";
 
 /** Сколько строк держим в «живом» буфере: больше уже не прочитать глазом. */
 const LIVE_CAP = 200;
 /** Сколько записей реально рисуем: журнал хранит тысячи, DOM — нет. */
 const RENDER_CAP = 1000;
-
-const LEVEL_SHORT: Record<string, string> = {
-  info: "инфо",
-  success: "успех",
-  warn: "внимание",
-  error: "ошибка",
-};
 
 const LEVEL_LABEL: Record<Level, string> = {
   all: "Все",
@@ -29,14 +27,22 @@ const LEVEL_LABEL: Record<Level, string> = {
   error: "Ошибки",
 };
 
-const LEVEL_OPTIONS: Level[] = ["all", "info", "success", "warn", "error"];
+/** Уровни, для которых вкладка показывает свой счётчик. */
+const LEVEL_TABS: Exclude<Level, "all">[] = ["info", "success", "warn", "error"];
+
+/** Плашка уровня в строке журнала: заглавными, как в макете. */
+const LEVEL_BADGE: Record<string, string> = {
+  info: "Инфо",
+  success: "Успех",
+  warn: "Внимание",
+  error: "Ошибка",
+};
 
 /** Привести уровень из журнала к одному из четырёх отображаемых. */
 function normLevel(raw: string): string {
   if (raw === "warning" || raw === "warn") return "warn";
   if (raw === "err" || raw === "error") return "error";
   if (raw === "ok" || raw === "success") return "success";
-  if (raw === "info" || raw === "") return "info";
   return "info";
 }
 
@@ -50,16 +56,6 @@ function timeOf(ts: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-/** Русские склонения: 1 участник / 2 участника / 5 участников. */
-function plural(n: number, one: string, few: string, many: string): string {
-  const a = Math.abs(n) % 100;
-  const b = a % 10;
-  if (a > 10 && a < 20) return many;
-  if (b > 1 && b < 5) return few;
-  if (b === 1) return one;
-  return many;
-}
-
 export default function LogPage() {
   const [entries, setEntries] = useState<LogRow[] | null>(null);
   const [live, setLive] = useState<LogRow[]>([]);
@@ -69,7 +65,10 @@ export default function LogPage() {
   // По умолчанию скрываем: отчёт заведомо уходит вовне (в чат, в issues), а
   // логин и путь `C:\Users\…` для разбора ошибки ничего не дают.
   const [redact, setRedact] = useState(true);
+  const [copied, setCopied] = useState(false);
   const nextKey = useRef(0);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const copyTimer = useRef<number | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -78,9 +77,7 @@ export default function LogPage() {
       .then((rows) => {
         if (!alive) return;
         nextKey.current = rows.length;
-        setEntries(
-          rows.map((e, i) => ({ ...e, key: `h${i}` })),
-        );
+        setEntries(rows.map((e, i) => ({ ...e, key: `h${i}` })));
       })
       .catch(() => {
         if (alive) setEntries([]);
@@ -92,6 +89,7 @@ export default function LogPage() {
     return () => {
       alive = false;
       un.then((f) => f()).catch(() => undefined);
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
     };
   }, []);
 
@@ -158,99 +156,152 @@ export default function LogPage() {
     }
   };
 
+  // Копирование видимых строк: в буфер обмена попадает ровно то, что человек
+  // видит на экране, — с теми же фильтром и поиском.
+  const copyVisible = async () => {
+    const text = visible
+      .map((e) => {
+        const k = normLevel(e.level);
+        return `${timeOf(e.ts_ms)} [${LEVEL_BADGE[k] ?? e.level}] ${e.text}`;
+      })
+      .join("\n");
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopied(false), 1200);
+    } catch (e) {
+      pushToast("err", String(e));
+    }
+  };
+
+  const meta =
+    hidden > 0
+      ? `Показаны последние ${visible.length} из ${shown.length} записей · ` +
+        `для более старых уточните фильтр или поиск`
+      : `Показано ${shown.length} из ${all.length} записей`;
+
   return (
-    <div className="page fill">
+    <div className="page fill logs-page">
       <div className="page-head">
         <h1>Логи</h1>
+        <div className="actions">
+          <div
+            className="support-bar"
+            title="В отчёт войдут журнал, конфигурация, состояние контрольной точки, карантин и последняя сессия"
+          >
+            <label className="privacy-toggle">
+              <input
+                type="checkbox"
+                checked={redact}
+                onChange={(e) => setRedact(e.target.checked)}
+              />
+              <span>Скрыть имя ПК и пути профиля</span>
+            </label>
+            <button
+              type="button"
+              className="export-btn"
+              onClick={() => void saveReport()}
+              disabled={saving}
+              title="Сохранить один файл: журнал, окружение, состояние данных и последнюю сессию"
+            >
+              {saving ? "Готовлю отчёт…" : "Сохранить отчёт для поддержки"}
+            </button>
+          </div>
+        </div>
       </div>
-      <div className="wizard-toolbar">
+
+      <div className="log-controls">
         <div className="search-box log-search">
           <SearchIcon />
           <input
             className="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Поиск по тексту…"
+            placeholder="Поиск по тексту лога…"
             aria-label="Поиск по тексту записи журнала"
           />
         </div>
-        <Seg
-          options={LEVEL_OPTIONS.map((v) => ({ value: v, label: LEVEL_LABEL[v] }))}
-          value={level}
-          onChange={setLevel}
-        />
-        <div className="spacer" />
-        <div className="log-counts">
-          <Badge kind="plain">{counts.all} всего</Badge>
-          <Badge kind="ok">{counts.success} успех</Badge>
-          <Badge kind="plain">{counts.info} инфо</Badge>
-          <Badge kind="warn">{counts.warn} вним.</Badge>
-          <Badge kind="danger">{counts.error} ошиб.</Badge>
+        <div className="filter-tabs" role="tablist" aria-label="Фильтр по уровню">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={level === "all"}
+            className={`ftab${level === "all" ? " active" : ""}`}
+            data-level="all"
+            onClick={() => setLevel("all")}
+          >
+            <span>Все</span>
+            <span className="cnt">{counts.all}</span>
+          </button>
+          {LEVEL_TABS.map((lv) => (
+            <button
+              key={lv}
+              type="button"
+              role="tab"
+              aria-selected={level === lv}
+              className={`ftab${level === lv ? " active" : ""}`}
+              data-level={lv}
+              onClick={() => setLevel(lv)}
+            >
+              <span>{LEVEL_LABEL[lv]}</span>
+              <span className="cnt">{counts[lv]}</span>
+            </button>
+          ))}
         </div>
       </div>
-      <div className="wizard-toolbar">
-        <Button
-          variant="primary"
-          onClick={saveReport}
-          disabled={saving}
-          title="Сохранить один файл: журнал, окружение, состояние данных и последнюю сессию"
-        >
-          {saving ? "Готовлю отчёт…" : "Сохранить отчёт для поддержки"}
-        </Button>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={redact}
-            onChange={(e) => setRedact(e.target.checked)}
-          />
-          <span>Скрыть имя пользователя и путь к профилю</span>
-        </label>
-        <div className="hint">
-          В отчёте: журнал, окружение, идентичность замера, состояние
-          контрольной точки, карантина и настроек, последняя сессия и список
-          найденных проблем. Собирайте его сразу после ошибки.
+
+      <div className="log-card">
+        <div className="log-card-head">
+          <span className="log-meta">{meta}</span>
+          <div className="log-tools">
+            <button
+              type="button"
+              className="tool-btn"
+              onClick={() => void copyVisible()}
+              disabled={visible.length === 0}
+            >
+              {copied ? "Скопировано" : "Копировать видимые"}
+            </button>
+            <button
+              type="button"
+              className="tool-btn"
+              onClick={() => {
+                const el = listRef.current;
+                if (el) el.scrollTop = el.scrollHeight;
+              }}
+            >
+              В конец ↓
+            </button>
+          </div>
         </div>
+
+        {entries === null ? (
+          <div className="log-list">
+            <div className="empty-state">Загрузка журнала…</div>
+          </div>
+        ) : visible.length === 0 ? (
+          <div className="empty-state">
+            {all.length === 0
+              ? "Журнал пуст. Здесь появятся события тестов и ошибки приложения."
+              : "Записей по выбранному фильтру не найдено"}
+          </div>
+        ) : (
+          <div className="log-list" ref={listRef}>
+            {visible.map((e) => {
+              const k = normLevel(e.level);
+              return (
+                <div key={e.key} className="log-row" data-level={k}>
+                  <span className="l-time">{timeOf(e.ts_ms)}</span>
+                  <span className={`l-badge ${k}`}>{LEVEL_BADGE[k] ?? e.level}</span>
+                  <span className="l-msg">{e.text}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
-      <Panel
-        title="Журнал"
-        hint={
-          entries === null
-            ? undefined
-            : `показано ${visible.length} из ${shown.length} ${plural(
-                shown.length,
-                "записи",
-                "записей",
-                "записей",
-              )} по текущему фильтру`
-        }
-        className="fill-grow"
-      >
-        <FadeScroll className="log log-box">
-          {entries === null ? (
-            <div className="muted">Загрузка журнала…</div>
-          ) : visible.length === 0 ? (
-            <div className="muted">
-              {all.length === 0
-                ? "Журнал пуст. Здесь появятся события тестов и ошибки приложения."
-                : "Ни одна запись не подходит под фильтр."}
-            </div>
-          ) : (
-            visible.map((e) => (
-              <div key={e.key} className={`log-line ${normLevel(e.level)}`}>
-                <span className="ts">{timeOf(e.ts_ms)}</span>
-                <span className="lv">{LEVEL_SHORT[normLevel(e.level)] ?? e.level}</span>
-                <span className="tx">{e.text}</span>
-              </div>
-            ))
-          )}
-        </FadeScroll>
-      </Panel>
-      {hidden > 0 ? (
-        <div className="hint" style={{ marginTop: 8 }}>
-          Ещё {hidden} {plural(hidden, "запись", "записи", "записей")} выше не показаны —
-          сузьте фильтр или поиск.
-        </div>
-      ) : null}
     </div>
   );
 }

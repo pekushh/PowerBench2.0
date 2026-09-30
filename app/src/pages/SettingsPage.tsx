@@ -223,10 +223,12 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
       <section className="set-sec">
         <div className="section-head">
           <h2 className="section-title">Железо и BIOS</h2>
-          <span className="hint">Необязательно · добавляется в отчёт</span>
         </div>
         <Glass className="bios-card">
-          <span className="bios-label">Разгон, андервольт и память</span>
+          <div className="bios-top">
+            <span className="bios-label">Разгон, андервольт и память</span>
+            <span className="hint">Необязательно · добавляется в отчёт</span>
+          </div>
           <textarea
             className="bios-input"
             value={st.cpu_notes}

@@ -112,9 +112,6 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .sub{font-size:var(--fs-xs);color:var(--fg-mute);line-height:var(--lh-body)}
 .num{font-variant-numeric:tabular-nums}
 .stat-suffix{font-size:var(--fs-sm);color:var(--fg-mute);font-weight:500}
-/* Журнал: высоту задаёт родитель `.fill-grow`, магический `calc(100vh - 210px)`
-   больше не нужен. */
-.log-box{flex:1 1 auto;min-height:0;overflow-y:auto;padding-right:var(--sp-2)}
 .row{display:flex;align-items:center;gap:var(--sp-2)}
 .wrap{flex-wrap:wrap}
 .grow{flex:1 1 auto;min-width:0}
@@ -198,20 +195,6 @@ table.grid td.num,table.grid th.num{text-align:right;font-variant-numeric:tabula
 .switch input:checked+.track:after{transform:translate(16px);background:var(--accent)}
 .switch .label{color:var(--fg-dim);font-size:var(--fs-body)}
 .switch:hover .track{border-color:var(--border-strong)}
-.log{font-family:ui-monospace,Cascadia Code,Consolas,Liberation Mono,monospace;font-size:var(--fs-caption);line-height:1.65}
-.log-line{display:flex;gap:var(--sp-2);align-items:baseline;border-bottom:1px solid var(--line-1);padding:var(--sp-1) var(--sp-1)}
-.log-line .ts{color:var(--fg-mute);flex:0 0 auto;font-variant-numeric:tabular-nums}
-.log-line .lv{flex:0 0 auto;min-width:64px;text-align:center;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;padding:1px 7px;border-radius:var(--radius-full);border:1px solid}
-.log-line .tx{color:var(--fg-dim);white-space:pre-wrap;word-break:break-word}
-.log-line.info .lv{color:var(--info);border-color:color-mix(in srgb,var(--info) 45%,transparent);background:color-mix(in srgb,var(--info) 8%,transparent)}
-.log-line.success .lv{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent);background:color-mix(in srgb,var(--ok) 8%,transparent)}
-.log-line.warn .lv{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent);background:color-mix(in srgb,var(--warn) 8%,transparent)}
-.log-line.error .lv{color:var(--err);border-color:color-mix(in srgb,var(--err) 45%,transparent);background:color-mix(in srgb,var(--err) 8%,transparent)}
-.log-line.warn .tx{color:var(--warn)}
-.log-line.error .tx{color:var(--err)}
-.log-line.success .tx{color:var(--ok)}
-.log-search{width:240px}
-.log-counts{flex-wrap:wrap}
 .scheme-tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-3)}
 @media (max-width: 1100px){.scheme-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
@@ -318,7 +301,6 @@ color:var(--fg-mute)}
 /* На узком окне панель фильтров переносится, и счётчики уезжают на свою строку,
    иначе строка поиска сжимается до нечитаемой полосы. */
 @media (max-width:940px){
-.wizard-toolbar .log-counts{order:3;flex:1 1 100%}
 .wizard-toolbar .spacer{display:none}
 }
 @media (max-width:620px){.wizard-toolbar .seg{width:100%}
@@ -392,7 +374,6 @@ table.grid.results td{overflow:hidden;text-overflow:ellipsis}
 .scheme-tiles>*:nth-child(4){animation-delay:90ms}
 .scheme-tiles>*:nth-child(n+5){animation-delay:.12s}
 .scheme-tiles>*:nth-child(n+11){animation-delay:40ms}
-.log-line{animation:var(--motion-page) var(--ease) backwards}
 html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{transition:none!important;animation:none!important}
 /* Системная настройка ОС применяется так же — полным отключением. */
 @media (prefers-reduced-motion: reduce){*,*:before,*:after{transition:none!important;animation:none!important}}
@@ -468,17 +449,12 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 .grid2>*,.run-grid>*,.mode-stats>*{min-width:0}
 .dd-item.on{font-weight:600}
 .page.fill{height:100%;min-height:0}
-.fill-grow{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
-.fill-grow>.log-box{flex:1 1 auto;min-height:120px;max-height:none}
 .fill-list{flex:1 1 auto;min-height:160px;max-height:none}
 .section-title{font-size:var(--fs-h2);font-weight:650;margin:var(--sp-4) 0 2px;letter-spacing:-.1px}
 /* --- Настройки: раскладка «строка настройки» и карточки состояния --------- */
 .set-page{gap:var(--sp-2)}
 .set-sec{display:flex;flex-direction:column;gap:var(--sp-1)}
-.set-sec .section-head{margin-top:var(--sp-2);flex-wrap:nowrap;justify-content:space-between;align-items:baseline;gap:var(--sp-3)}
-/* Подпись секции прижата к правому краю и не переносится: на своей строке она
-   расталкивала карточки по вертикали. */
-.set-sec .section-head .hint{margin-left:auto;text-align:right;min-width:0}
+.set-sec .section-head{margin-top:var(--sp-2)}
 
 /* Кнопка каталога в шапке: приглушённая, с рамкой и значком. */
 /* Радиус 9px, а не общий `--radius-md` (14px): на кнопке высотой 34px он
@@ -521,7 +497,12 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 
 /* Заметка о железе: поле и быстрые теги. */
 .bios-card{display:flex;flex-direction:column;gap:var(--sp-3);padding:var(--sp-4)}
-.bios-label{font-size:var(--fs-body);font-weight:600;color:var(--fg)}
+/* Подпись «Необязательно · …» живёт в первой строке карточки, а не под
+   заголовком секции: иначе отступ от заголовка до карточки у этой секции
+   отличался от двух остальных. */
+.bios-top{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap}
+.bios-label{font-size:var(--fs-body);font-weight:600;color:var(--fg);flex:0 0 auto}
+.bios-top .hint{margin-left:auto;text-align:right;min-width:0}
 /* Высота фиксирована, растягивание выключено: у поля с двумя строками под
    плейсхолдером оставалась пустая чёрная полоса. */
 .bios-input{width:100%;height:54px;resize:none;background:var(--bg-0);color:var(--fg);border:1px solid var(--line-1);border-radius:var(--radius-md);padding:8px 13px;font:inherit;font-size:var(--fs-body);line-height:1.45;transition:border-color var(--dur) var(--ease)}
@@ -549,6 +530,8 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 .set-row .seg button{flex:1 1 0;justify-content:center}
 .set-row .switch{align-self:flex-start}
 .status-card{align-items:flex-start;flex-direction:column;gap:var(--sp-2)}
+.bios-top{flex-direction:column;align-items:flex-start;gap:4px}
+.bios-top .hint{margin-left:0;text-align:left}
 .qt-clear{margin-left:0}
 }
 @keyframes toastIn{0%{opacity:0;transform:translateX(16px)}100%{opacity:1;transform:none}}
@@ -741,3 +724,71 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 .rd-machine{display:flex;flex-wrap:wrap;gap:6px 16px;margin:10px 0 14px;font-size:12px;color:var(--muted)}
 .rd-machine span{white-space:nowrap}
 .evid-table tr.warn-row td{color:var(--warn)}
+/* ===== Логи: фильтры, карточка журнала, строки ===== */
+/* Высоту задаёт `.logs-page` через `.page.fill`, а карточка растёт на
+   оставшееся место: журнал должен занимать окно целиком, а не полосу. */
+.logs-page{height:100%;min-height:0}
+.logs-page .page-head{flex:0 0 auto}
+
+/* Панель выгрузки отчёта для поддержки: в шапке, рядом с заголовком. */
+.support-bar{display:inline-flex;align-items:center;gap:12px;background:var(--bg-1);border:1px solid var(--line-1);border-radius:11px;padding:5px 6px 5px 12px}
+.privacy-toggle{display:inline-flex;align-items:center;gap:7px;font-size:var(--fs-sm);color:var(--fg-dim);cursor:pointer;-webkit-user-select:none;user-select:none;white-space:nowrap}
+.privacy-toggle input{accent-color:var(--fg);margin:0;cursor:pointer}
+.export-btn{display:inline-flex;align-items:center;gap:7px;background:var(--accent);color:#111;border:0;border-radius:8px;padding:7px 14px;font:inherit;font-size:var(--fs-sm);font-weight:650;cursor:pointer;white-space:nowrap;transition:opacity var(--dur) var(--ease),transform var(--dur-fast) var(--ease)}
+.export-btn:hover{opacity:.92}
+.export-btn:active{transform:translateY(1px)}
+.export-btn:disabled{opacity:.6;cursor:default;transform:none}
+
+/* Один ряд фильтров: поиск слева, вкладки уровней со счётчиками справа. */
+.log-controls{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap;flex:0 0 auto;margin-bottom:var(--sp-3)}
+.log-search{flex:1 1 240px;max-width:320px;width:auto}
+.log-search .search{padding:7px 28px 7px 32px;border-radius:10px;background:var(--bg-1);border-color:var(--line-1)}
+.log-search .search:focus{border-color:var(--line-2);box-shadow:none}
+
+.filter-tabs{display:inline-flex;align-items:center;background:var(--bg-1);border:1px solid var(--line-1);border-radius:10px;padding:3px;gap:2px;flex-wrap:wrap}
+.ftab{display:inline-flex;align-items:center;gap:6px;border:1px solid transparent;background:transparent;color:var(--fg-mute);font:inherit;font-size:var(--fs-sm);font-weight:600;padding:5px 11px;border-radius:7px;cursor:pointer;white-space:nowrap;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.ftab:hover{color:var(--fg-dim)}
+.ftab.active{background:var(--bg-2);color:var(--fg);border-color:var(--line-2)}
+/* Счётчик окрашен по уровню вкладки: иначе пять одинаковых серых чисел
+   приходилось сверять с подписями. */
+.ftab .cnt{font-size:11px;font-weight:700;padding:1px 6px;border-radius:var(--radius-full);background:rgba(255,255,255,.06);color:var(--fg-dim);font-variant-numeric:tabular-nums}
+.ftab[data-level=info] .cnt{color:var(--info);background:color-mix(in srgb,var(--info) 12%,transparent)}
+.ftab[data-level=success] .cnt{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent)}
+.ftab[data-level=warn] .cnt{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent)}
+.ftab[data-level=error] .cnt{color:var(--err);background:color-mix(in srgb,var(--err) 12%,transparent)}
+
+/* Карточка журнала. */
+.log-card{flex:1 1 auto;min-height:0;background:var(--bg-1);border:1px solid var(--line-1);border-radius:var(--radius-lg);display:flex;flex-direction:column;overflow:hidden}
+.log-card-head{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);padding:9px var(--sp-4);border-bottom:1px solid var(--line-1);background:rgba(255,255,255,.015);font-size:var(--fs-sm);color:var(--fg-mute);flex:0 0 auto}
+.log-meta{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.log-tools{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+.tool-btn{background:transparent;color:var(--fg-mute);border:1px solid var(--line-1);border-radius:6px;padding:3px 9px;font:inherit;font-size:var(--fs-meta);cursor:pointer;white-space:nowrap;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.tool-btn:hover:not(:disabled){color:var(--fg);background:var(--bg-2);border-color:var(--line-2)}
+.tool-btn:disabled{opacity:.5;cursor:default}
+
+.log-list{flex:1 1 auto;min-height:0;overflow-y:auto;padding:4px 0;font-family:ui-monospace,Cascadia Code,Consolas,Liberation Mono,monospace;font-size:var(--fs-sm)}
+.log-row{display:grid;grid-template-columns:68px 68px 1fr;align-items:center;gap:12px;padding:6.5px var(--sp-4);border-bottom:1px solid rgba(255,255,255,.04);transition:background var(--dur-fast) var(--ease)}
+.log-row:last-child{border-bottom:0}
+.log-row:hover{background:rgba(255,255,255,.03)}
+.l-time{color:var(--fg-mute);font-variant-numeric:tabular-nums;font-size:var(--fs-sm)}
+.l-badge{display:inline-block;text-align:center;padding:1.5px 0;border-radius:var(--radius-full);font-family:Inter Variable,Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;border:1px solid transparent}
+.l-badge.info{color:var(--info);background:color-mix(in srgb,var(--info) 12%,transparent);border-color:color-mix(in srgb,var(--info) 38%,transparent)}
+.l-badge.success{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent);border-color:color-mix(in srgb,var(--ok) 42%,transparent)}
+.l-badge.warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent);border-color:color-mix(in srgb,var(--warn) 42%,transparent)}
+.l-badge.error{color:var(--err);background:color-mix(in srgb,var(--err) 12%,transparent);border-color:color-mix(in srgb,var(--err) 42%,transparent)}
+.l-msg{color:var(--fg-dim);white-space:pre-wrap;word-break:break-word}
+.log-row[data-level=success] .l-msg{color:var(--ok)}
+.log-row[data-level=warn] .l-msg{color:var(--warn)}
+.log-row[data-level=error] .l-msg{color:var(--err)}
+
+.empty-state{display:grid;place-items:center;min-height:0;padding:36px 20px;text-align:center;color:var(--fg-mute);font-size:var(--fs-body);font-family:Inter Variable,Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
+/* Пока журнал грузится, пустое состояние занимает карточку целиком. */
+.log-card>.empty-state{flex:1 1 auto}
+
+@media (max-width:720px){
+.logs-page{height:auto;min-height:0}
+.log-controls{justify-content:stretch}
+.log-search{max-width:none}
+.support-bar{width:100%;justify-content:space-between;flex-wrap:wrap}
+.log-card{min-height:220px}
+}

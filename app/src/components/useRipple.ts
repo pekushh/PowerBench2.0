@@ -27,15 +27,29 @@ const RIPPLE_HOSTS = [
 
 let installed = false;
 
+/** Анимации сейчас не идут: волна не отрисовалась бы, а её узел остался бы
+ *  висеть белым пятном до перерисовки кнопки. */
+function motionOff(): boolean {
+  const el = document.documentElement;
+  return (
+    el.dataset.motion === "off" ||
+    el.classList.contains("bench-running") ||
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
 function install(): void {
   if (installed) return;
   installed = true;
   document.addEventListener(
     "pointerdown",
     (e) => {
-      if (document.documentElement.dataset.motion === "off") return;
+      if (motionOff()) return;
       const host = (e.target as HTMLElement | null)?.closest?.<HTMLElement>(RIPPLE_HOSTS);
       if (!host || host.hasAttribute("disabled")) return;
+      // Скрытым кнопкам волна не нужна: в свёрнутом меню и в блоках с
+      // нулевой высотой она осталась бы незамеченной, но в разметке висла.
+      if (host.hidden || host.offsetParent === null) return;
       const r = host.getBoundingClientRect();
       const size = Math.max(r.width, r.height);
       const span = document.createElement("span");
@@ -44,7 +58,11 @@ function install(): void {
       span.style.height = `${size}px`;
       span.style.left = `${e.clientX - r.left - size / 2}px`;
       span.style.top = `${e.clientY - r.top - size / 2}px`;
-      span.addEventListener("animationend", () => span.remove(), { once: true });
+      const drop = () => span.remove();
+      // Убираем и по событию анимации, и по таймеру: если моторику выключат
+      // прямо во время волны, `animationend` не придёт и узел останется.
+      span.addEventListener("animationend", drop, { once: true });
+      window.setTimeout(drop, 900);
       // Кнопка должна уметь обрезать волну по своим скруглённым краям.
       if (getComputedStyle(host).position === "static") host.style.position = "relative";
       host.appendChild(span);

@@ -1,10 +1,10 @@
 // Корень приложения: безрамочное окно, иконка-сайдбар, страницы.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { commands, onTestFinished, type SettingsDto } from "./api";
 import { setRunning, useSession, useToasts, pushToast } from "./store";
 import { useScrollFade } from "./components/ui";
-import { usePill } from "./components/usePill";
+import { useNavIndicator } from "./components/useNavIndicator";
 import { useRipple } from "./components/useRipple";
 import TitleBar from "./components/TitleBar";
 import { BarsIcon, GaugeIcon, GearIcon, LogLinesIcon, PlugIcon } from "./components/icons";
@@ -52,10 +52,9 @@ export default function App() {
   const [appearance, setAppearance] = useState<SettingsDto | null>(null);
   const toasts = useToasts();
   const { ref: mainRef, top: mainTop, bottom: mainBottom } = useScrollFade<HTMLElement>();
-  // Переезжающие полоски активного пункта: в каждой группе меню своя, по
-  // спецификации они меняют позицию и высоту, а не появляются заново.
-  const navMarker = usePill(page, [], "y");
-  const footMarker = usePill(page, [], "y");
+  // Один индикатор активного пункта на всё меню, внутри сайдбара.
+  const sidebarRef = useRef<HTMLElement>(null);
+  useNavIndicator(page, collapsed, sidebarRef);
   useRipple();
   // Подписка на «идёт ли сессия» — единственный источник для отключения
   // анимаций ниже.
@@ -234,8 +233,8 @@ export default function App() {
         quietOn={sessionRunning}
       />
       <div className="body">
-        <aside className={`sidebar fade-in ${collapsed ? "collapsed" : ""}`}>
-          <nav className="sidebar-nav" ref={navMarker.ref}>
+        <aside ref={sidebarRef} className={`sidebar fade-in ${collapsed ? "collapsed" : ""}`}>
+          <nav className="sidebar-nav">
             {NAV.map((n) => (
               <button
                 key={n.id}
@@ -253,7 +252,7 @@ export default function App() {
               </button>
             ))}
           </nav>
-          <div className="sidebar-foot" ref={footMarker.ref}>
+          <div className="sidebar-foot">
             <button
               type="button"
               className={`nav-item ${page === "settings" ? "active" : ""}`}

@@ -232,6 +232,16 @@ export function SquareIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/** Два наложенных квадрата (вернуть в окно). */
+export function SquaresIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.3} strokeLinecap="round" {...props}>
+      <rect x="3" y="7" width="13" height="13" rx="2.2" />
+      <path d="M8.5 7V5.4A2.4 2.4 0 0 1 10.9 3H18.6A2.4 2.4 0 0 1 21 5.4v7.7A2.4 2.4 0 0 1 18.6 15.5H17" />
+    </Base>
+  );
+}
+
 /** Закрыть. */
 export function CrossIcon(props: SVGProps<SVGSVGElement>) {
   return (

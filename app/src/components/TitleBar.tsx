@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { CrossIcon, MenuIcon, MinusIcon, MotionIcon } from "./icons";
+import { CrossIcon, MenuIcon, MinusIcon, MotionIcon, SquaresIcon, SquareIcon } from "./icons";
 
 export default function TitleBar({
   collapsed,
@@ -36,6 +36,33 @@ export default function TitleBar({
   useEffect(() => {
     setStatusShown(status);
   }, [status]);
+
+  // Состояние окна нужно для иконки разворачивания: у развёрнутого окна она
+  // должна быть «два квадрата», иначе кнопка врёт о том, что сделает.
+  const [maximized, setMaximized] = useState(false);
+  useEffect(() => {
+    const w = win();
+    if (!w) return;
+    const sync = () => w.isMaximized().then(setMaximized).catch(() => undefined);
+    void sync();
+    const un = w.onResized(() => void sync());
+    return () => {
+      un.then((f) => f()).catch(() => undefined);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggleMaximize = async () => {
+    const w = win();
+    if (!w) return;
+    try {
+      await w.toggleMaximize();
+      setMaximized(await w.isMaximized());
+    } catch {
+      // Окно может быть недоступно (например, при выходе): кнопка просто
+      // ничего не делает, ошибку в тост не выводим.
+    }
+  };
   function win() {
     try {
       return getCurrentWindow();
@@ -51,7 +78,7 @@ export default function TitleBar({
       // поведение безрамочного окна, кнопки при этом не затрагиваются.
       onDoubleClick={(e) => {
         if ((e.target as HTMLElement).closest("button")) return;
-        void win()?.toggleMaximize().catch(() => undefined);
+        void toggleMaximize();
       }}
     >
       <div className="titlebar-brand" data-tauri-drag-region>
@@ -123,6 +150,15 @@ export default function TitleBar({
             onClick={() => win()?.minimize().catch(() => undefined)}
           >
             <MinusIcon />
+          </button>
+          <button
+            type="button"
+            className="titlebar-btn"
+            title={maximized ? "Вернуть в окно" : "Развернуть"}
+            aria-label={maximized ? "Вернуть в окно" : "Развернуть"}
+            onClick={() => void toggleMaximize()}
+          >
+            {maximized ? <SquaresIcon /> : <SquareIcon />}
           </button>
           <button
             type="button"

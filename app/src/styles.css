@@ -948,7 +948,8 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .mc-tag{font-size:11px;font-weight:600;padding:2px 7px;border-radius:6px;background:var(--bg-2);color:var(--fg-dim);border:1px solid var(--line-1);white-space:nowrap}
 .mode-card.selected .mc-tag{background:var(--okbg);color:var(--ok);border-color:var(--okline)}
 .mc-desc{font-size:var(--fs-body);color:var(--fg-mute);line-height:1.45;margin:0}
-.mc-radio{width:22px;height:22px;border-radius:50%;border:1.5px solid var(--line-2);display:inline-grid;place-items:center;flex:0 0 auto;font-size:12px;color:transparent}
+.mc-radio{width:22px;height:22px;border-radius:50%;border:1.5px solid var(--line-2);display:inline-grid;place-items:center;flex:0 0 auto;color:transparent;transition:border-color var(--t-2) var(--e-out),color var(--t-2) var(--e-out),background var(--t-2) var(--e-out)}
+.mc-radio svg{display:block}
 .mode-card.selected .mc-radio{border-color:var(--ok);background:var(--okbg);color:var(--ok)}
 .mc-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .mc-pill{background:var(--bg-0);border:1px solid var(--line-1);border-radius:9px;padding:8px 11px;min-width:0}
@@ -1394,3 +1395,37 @@ html[data-motion="off"] *::after{
 /* У неактивного пункта подвала заливки нет: иначе «Настройки» выглядит
    главнее рабочих разделов. */
 .sidebar-foot .nav-item:not(.active){background:transparent}
+/* ===== Правки по разбору скриншотов ===== */
+
+/* Индикатор активного пункта: один на всё меню, лежит в сайдбаре.
+   В покое у него нулевая высота и `visibility: hidden` — раньше полоски
+   прятались одной прозрачностью, и любая перерисовка возвращала их. */
+.pb-nav-ind{position:absolute;left:0;top:0;width:3px;height:0;border-radius:0 3px 3px 0;background:var(--accent);opacity:0;visibility:hidden;pointer-events:none;z-index:2;transition:transform var(--t-3) var(--e-spring),height var(--t-3) var(--e-spring),opacity var(--t-2) var(--e-out),visibility 0s linear var(--t-2)}
+.pb-nav-ind.is-on{opacity:1;visibility:visible;transition:transform var(--t-3) var(--e-spring),height var(--t-3) var(--e-spring),opacity var(--t-2) var(--e-out)}
+/* После смены раскладки полоска встаёт на место сразу, без пролёта. */
+.pb-nav-ind.is-instant{transition:none}
+
+/* Вертикальный «провал» под шапкой раздела: содержимое центрировалось по
+   высоте окна и висело посреди экрана, оставляя сверху пустоту в четверть
+   окна. Теперь блок начинается сразу под шапкой. */
+.wizard-stage.centered{margin-block:0}
+
+/* Плашки режима: равная высота и запрет переноса значения. */
+.mc-stats{align-items:stretch}
+.mc-pill{min-height:52px;display:flex;flex-direction:column;justify-content:center}
+.mc-pill b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mc-pill small{white-space:nowrap}
+
+/* Кружок выбора режима: галочка прорисовывается линией, у невыбранного
+   слегка подсвечивается при наведении. */
+.mc-radio .chk{stroke-dasharray:24;stroke-dashoffset:0}
+.mode-card:not(.selected):hover .mc-radio{border-color:var(--fg-mute);color:color-mix(in srgb,var(--ok) 45%,transparent)}
+.mode-card.selected .mc-radio .chk{animation:pb-draw 260ms var(--e-out) both}
+
+/* Активный пункт в свёрнутом меню: квадрат тоже залит, иначе состояние
+   читалось только по полоске слева. */
+.sidebar.collapsed .nav-item.active{background:rgba(255,255,255,.06);border-color:var(--line-2)}
+
+/* Полоса прокрутки не должна наезжать на иконки пунктов. */
+.sidebar-nav{padding-right:4px}
+.sidebar.collapsed .sidebar-nav{padding-right:0}

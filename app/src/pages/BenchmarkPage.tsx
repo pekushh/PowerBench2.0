@@ -100,8 +100,13 @@ function tf(v: number | null | undefined, digits: number): string {
 
 const T_TABLE = [12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262];
 
-function earlyStopNeed(reps: number, cv = 0.05): number | null {
-  if (reps < 2) return null;
+/** «около 7 мин 11 с» → «≈ 7 мин 11 с»: слово «около» съедало полплашки
+ *  и переносило значение на вторую строку. */
+function shortEstimate(label: string): string {
+  return label.replace(/^около\s*/i, "≈ ");
+}
+
+function earlyStopNeed(reps: number, cv = 0.05): number | null {  if (reps < 2) return null;
   const n = T_TABLE[Math.min(reps - 2, T_TABLE.length - 1)];
   return ((2 * Math.SQRT2 * n * cv * 100) / Math.sqrt(reps));
 }
@@ -751,7 +756,19 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                           </div>
                           <p className="mc-desc">{def.desc}</p>
                         </div>
-                        <span className="mc-radio">✓</span>
+                        <span className="mc-radio">
+                          <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+                            <path
+                              className="chk"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth={2.6}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              d="M5 12.5 10 17.5 19 7.5"
+                            />
+                          </svg>
+                        </span>
                       </div>
                       <div className="mc-stats">
                         <div className="mc-pill">
@@ -764,7 +781,10 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                         </div>
                         <div className="mc-pill time">
                           <small>Одна схема</small>
-                          <b>{presetEstimates[key] ?? "—"}</b>
+                          {/* Оценка приходит с префиксом «около», из-за чего
+                              значение переносилось на две строки и ряд
+                              плашек становился неровным. */}
+                          <b>{presetEstimates[key] ? shortEstimate(presetEstimates[key]) : "—"}</b>
                         </div>
                       </div>
                     </Spot>

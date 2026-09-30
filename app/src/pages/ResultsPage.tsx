@@ -8,7 +8,7 @@ import {
   type HistoryRow,
   type SessionJson,
 } from "../api";
-import { Badge, Button, FadeScroll, Modal } from "../components/ui";
+import { Badge, FadeScroll, Modal } from "../components/ui";
 import {
   ChevronIcon,
   ExportIcon,
@@ -35,21 +35,6 @@ const LEVEL_ORDER: Record<string, number> = {
   Equivalent: 6,
   None: 7,
 };
-
-function levelKind(level: string): "ok" | "warn" | "plain" | "danger" {
-  switch (level) {
-    case "Confirmed":
-      return "ok";
-    case "Probable":
-    case "StabilityTieBreak":
-      return "danger";
-    case "Preliminary":
-    case "KeepCurrent":
-      return "warn";
-    default:
-      return "plain";
-  }
-}
 
 /** Ключ сортировки по убыванию: пропуски уходят в конец, NaN не появляется. */
 function numDesc(v: number | null | undefined): number {
@@ -178,6 +163,7 @@ export default function ResultsPage() {
     max_sessions: number;
   } | null>(null);
   const [detail, setDetail] = useState<SessionJson | null>(null);
+  const [reportOpening, setReportOpening] = useState(false);
   /** GUID → название из списка схем питания: нужно, когда в файле сессии
    *  сохранился только идентификатор лидера. */
   const [schemeNames, setSchemeNames] = useState<ReadonlyMap<string, string>>(
@@ -354,6 +340,47 @@ export default function ResultsPage() {
     if (known) return known;
     if (guid) return `Схема ${guid.slice(0, 8)}…`;
     return raw && raw !== "-" ? raw : "Сессия без схемы";
+  };
+
+  const openReportFromModal = useCallback((guid: string) => {
+    if (reportBusy.current) return;
+    reportBusy.current = true;
+    setReportOpening(true);
+    commands
+      .sessionReport(guid)
+      .then((p) => {
+        const name = p.split(/[/\\]/).pop() ?? p;
+        pushToast("okk", `HTML-отчёт открыт в браузере: ${name}`);
+      })
+      .catch((e) => pushToast("err", String(e)))
+      .finally(() => {
+        reportBusy.current = false;
+        setReportOpening(false);
+      });
+  }, []);
+
+  const detailRow = useMemo(
+    () => rows.find((r) => r.plan_guid === detail?.plan_guid) ?? null,
+    [rows, detail],
+  );
+
+  // Удаление записи из подвала модалки: файл закрытой записи известен только
+  // по строке списка, поэтому удаляем через неё.
+  const deleteDetail = async () => {
+    const file = detailRow?.file_name;
+    if (!detailRow || !file) {
+      pushToast("err", "Файл записи не найден");
+      return;
+    }
+    if (!window.confirm("Удалить запись?")) return;
+    try {
+      await commands.historyDelete(file);
+      pushToast("okk", "Запись удалена");
+      setDetail(null);
+      refresh();
+    } catch (e) {
+      pushToast("err", String(e));
+    }
   };
 
   const shown = useMemo(() => {
@@ -616,62 +643,135 @@ export default function ResultsPage() {
         </FadeScroll>
       )}
 
-      <Modal open={detail !== null} title="Результат сессии" wide onClose={() => setDetail(null)}>
-        {detail ? (
-          <SessionDetail
-            s={detail}
-            fileName={rows.find((r) => r.plan_guid === detail.plan_guid)?.file_name ?? ""}
-            onDelete={() => {
-              setDetail(null);
-              refresh();
-            }}
-          />
-        ) : null}
+      <Modal
+        open={detail !== null}
+        wide
+        className="session-modal"
+        title={
+          detail ? (
+            <span className="sm-title">
+              Результат сессии
+              <span className="sm-hw-meta">{hwMeta(detail, detailRow)}</span>
+            </span>
+          ) : (
+            "Результат сессии"
+          )
+        }
+        onClose={() => setDetail(null)}
+        footer={
+          detail ? (
+            <SessionFooter
+              s={detail}
+              schemeNames={schemeNames}
+              opening={reportOpening}
+              onReport={() => openReportFromModal(detail.plan_guid)}
+              onDelete={() => void deleteDetail()}
+            />
+          ) : null
+        }
+      >
+        {detail ? <SessionDetail s={detail} schemeNames={schemeNames} /> : null}
       </Modal>
+    </div>
+  );
+}
+
+/** Копирование значения в буфер: чипы в подвале показывают его обрезанным. */
+async function copyText(value: string, what: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(value);
+    pushToast("okk", `${what} скопирован`);
+  } catch (e) {
+    pushToast("err", String(e));
+  }
+}
+
+/** Дата и состав машины одной строкой в шапке модалки. */
+function hwMeta(s: SessionJson, row: HistoryRow | null): string {
+  const id = s.identity;
+  const cpu = (id.cpu_brand || id.cpu_identifier || "процессор неизвестен").trim();
+  const parts = [cpu];
+  if (id.logical_cpus > 0) parts.push(`(${id.logical_cpus} ${plural(id.logical_cpus, "ядро", "ядра", "ядер")})`);
+  if (id.memory_gib > 0) parts.push(`${id.memory_gib.toFixed(0)} ГБ ОЗУ`);
+  if (id.os_build) parts.push(`ОС ${id.os_build}`);
+  const date = row ? sessionDate(row) : "";
+  return date ? `${date} · ${parts.join(" · ")}` : parts.join(" · ");
+}
+
+/** Подвал модалки: тех-детали чипами слева, действия справа.
+ *
+ *  Кнопки и метаданные уехали сюда из тела: при 109 схемах модалка
+ *  прокручивалась вместе с ними, и действия оказывались в самом низу
+ *  страницы. */
+function SessionFooter({
+  s,
+  schemeNames,
+  opening,
+  onReport,
+  onDelete,
+}: {
+  s: SessionJson;
+  schemeNames: ReadonlyMap<string, string>;
+  opening: boolean;
+  onReport: () => void;
+  onDelete: () => void;
+}) {
+  const originalName = s.original_scheme_guid
+    ? (schemeNames.get(s.original_scheme_guid.toLowerCase()) ?? s.original_scheme_guid)
+    : null;
+  return (
+    <div className="sm-foot-inner">
+      <div className="sm-foot-meta">
+        {originalName ? (
+          <span>
+            {s.original_restored ? "✓" : "⚠"} Исходная схема «{originalName}»{" "}
+            {s.original_restored ? "восстановлена" : "НЕ восстановлена"}
+          </span>
+        ) : (
+          <span>Системная схема не менялась</span>
+        )}
+        {s.identity.config_hash ? (
+          <button
+            type="button"
+            className="meta-chip"
+            title={`Конфигурация: ${s.identity.config_hash} · нажмите, чтобы скопировать`}
+            onClick={() => void copyText(s.identity.config_hash, "Хэш конфигурации")}
+          >
+            Конфиг: {s.identity.config_hash.slice(0, 8)}…
+          </button>
+        ) : null}
+        {s.identity.seed_hex ? (
+          <button
+            type="button"
+            className="meta-chip"
+            title={`Seed: ${s.identity.seed_hex} · нажмите, чтобы скопировать`}
+            onClick={() => void copyText(s.identity.seed_hex, "Seed")}
+          >
+            Seed: {s.identity.seed_hex.slice(0, 8)}…
+          </button>
+        ) : null}
+      </div>
+      <div className="sm-foot-actions">
+        <button type="button" className="btn-delete" onClick={onDelete}>
+          Удалить запись
+        </button>
+        <button type="button" className="btn-open-report" disabled={opening} onClick={onReport}>
+          {opening ? "Открываю…" : "Открыть HTML-отчёт"}
+        </button>
+      </div>
     </div>
   );
 }
 
 function SessionDetail({
   s,
-  fileName,
-  onDelete,
+  schemeNames,
 }: {
   s: SessionJson;
-  fileName: string;
-  onDelete: () => void;
+  schemeNames: ReadonlyMap<string, string>;
 }) {
   const rec = s.recommendation;
   const probs = rec.probabilities;
-  const [opening, setOpening] = useState(false);
-
-  const del = async () => {
-    if (!fileName) {
-      pushToast("err", "Файл записи не найден");
-      return;
-    }
-    if (!window.confirm("Удалить запись?")) return;
-    try {
-      await commands.historyDelete(fileName);
-      pushToast("okk", "Запись удалена");
-      onDelete();
-    } catch (e) {
-      pushToast("err", String(e));
-    }
-  };
-
-  const openHtml = () => {
-    if (opening) return;
-    setOpening(true);
-    commands
-      .sessionReport(s.plan_guid)
-      .then((p) => {
-        const name = p.split(/[/\\]/).pop() ?? p;
-        pushToast("okk", `HTML-отчёт открыт в браузере: ${name}`);
-      })
-      .catch((e) => pushToast("err", String(e)))
-      .finally(() => setOpening(false));
-  };
 
   // Лидер: рекомендованная схема, иначе лучшая по медиане среди допущенных.
   const tie = rec.level === "Equivalent" || rec.level === "KeepCurrent";
@@ -682,11 +782,19 @@ function SessionDetail({
       : undefined) ??
     [...admitted].sort((a, b) => b.median_throughput - a.median_throughput)[0] ??
     null;
-  const leaderName = leader ? (leader.name ?? leader.scheme_id) : null;
+  // Имя лидера: в записи может сохраниться только GUID — тогда берём
+  // название из списка схем питания.
+  const leaderName = leader
+    ? ((leader.name ?? "").trim() ||
+      schemeNames.get(leader.scheme_id.toLowerCase()) ||
+      `Схема ${leader.scheme_id.slice(0, 8)}…`)
+    : (rec.level_label ?? "—");
   const margin = rec.expected_margin_percent;
   const marginText =
-    margin != null && Number.isFinite(margin) ? `${margin >= 0 ? "+" : ""}${margin.toFixed(2)}%` : "—";
-  const marginKind = margin == null || !Number.isFinite(margin) ? "" : margin >= 1 ? "ok" : "warn";
+    margin != null && Number.isFinite(margin)
+      ? `${margin >= 0 ? "+" : ""}${margin.toFixed(2)}%`
+      : "—";
+  const marginGreen = margin != null && Number.isFinite(margin) && margin >= 1;
 
   // Таблица: лидер первым, затем остальные по убыванию медианы; забракованные — в конце.
   const tableRows = [...s.schemes].sort((a, b) => {
@@ -695,158 +803,187 @@ function SessionDetail({
   });
   const rejectedCount = s.schemes.length - admitted.length;
   const totalRuns = s.schemes.reduce((n, x) => n + x.runs, 0);
+  const testedCount = s.schemes.filter((x) => x.runs > 0).length;
+  const leaderMedian = leader?.median_throughput ?? 0;
+  const modeName = s.screening ? "Скрининг" : "Детально";
 
-  // Доверие к лидерству берём из `recommend()` — того же расчёта, который
-  // поставил бейдж «Предварительно» рядом. Раньше здесь стояла своя проверка
-  // «прогонов >= 2», и при двух прогонах на схему бейдж говорил
-  // «Предварительно», а плашка под ним — «Лидеру можно верить»: два
-  // взаимоисключающих вывода на одном экране.
-  const trustNote = !leader
-    ? { kind: "warn" as const, title: "Сравнивать нечего", items: ["Все схемы забракованы."] }
-    : {
-        kind: rec.level === "Confirmed" || rec.level === "Probable" ? ("ok" as const) : ("warn" as const),
-        title:
-          rec.level === "Confirmed"
-            ? "Лидерство подтверждено"
-            : rec.level === "Probable"
-              ? "Лидеру можно верить"
-              : rec.level === "StabilityTieBreak"
-                ? "Лидер выбран по стабильности, не по скорости"
-                : rec.level === "Preliminary"
-                  ? "Вердикт предварительный"
-                  : (rec.level_label ?? "Вердикт не определён"),
-        items: [
-          rec.level === "Preliminary" || rec.level === "StabilityTieBreak"
-            ? `Повторите сессию в режиме «Детально» — у лидера ${leader.runs} ${plural(
-                leader.runs,
-                "прогон",
-                "прогона",
-                "прогонов",
-              )}.`
-            : `У лидера ${leader.runs} ${plural(leader.runs, "прогон", "прогона", "прогонов")}.`,
-        ],
-      };
+  // Фильтр таблицы: пустые схемы (0 прогонов) по умолчанию скрыты, иначе
+  // сессия на сотню схем выглядит как таблица из нулей.
+  const [tblFilter, setTblFilter] = useState<"tested" | "all">("tested");
+  const [schemeQuery, setSchemeQuery] = useState("");
+  const [tblSort, setTblSort] = useState<"speed" | "alpha">("speed");
+  const hasEmpty = testedCount < s.schemes.length;
+  const shownSchemes = useMemo(() => {
+    const q = schemeQuery.trim().toLowerCase();
+    let list = tblFilter === "tested" ? tableRows.filter((x) => x.runs > 0) : tableRows;
+    if (q) {
+      list = list.filter(
+        (x) =>
+          (x.name ?? "").toLowerCase().includes(q) ||
+          x.scheme_id.toLowerCase().includes(q),
+      );
+    }
+    if (tblSort === "alpha") {
+      list = [...list].sort((a, b) =>
+        (a.name ?? a.scheme_id).localeCompare(b.name ?? b.scheme_id, "ru", {
+          sensitivity: "base",
+        }),
+      );
+    }
+    return list;
+  }, [tableRows, tblFilter, schemeQuery, tblSort]);
+
+  // Пиковый фон CPU: считаем по всем прогонам сессии, как это делает
+  // бэкенд при выдаче предупреждений.
+  const bgP95 = useMemo(() => {
+    let max = 0;
+    let has = false;
+    for (const sch of s.schemes) {
+      for (const r of sch.per_run) {
+        const v = r.background_cpu_p95;
+        if (typeof v === "number" && Number.isFinite(v) && (r.background_sample_seconds ?? 0) > 0) {
+          has = true;
+          if (v > max) max = v;
+        }
+      }
+    }
+    return has ? max : null;
+  }, [s.schemes]);
+
+  const alerts: { title: string; text: string }[] = [];
+  const leaderRuns = leader?.runs ?? 0;
+  if (leaderRuns > 0 && leaderRuns < 3) {
+    alerts.push({
+      title: `${modeName} (${leaderRuns} ${plural(leaderRuns, "прогон", "прогона", "прогонов")}):`,
+      text: "для расчёта доверительного интервала нужно от 3 прогонов.",
+    });
+  }
+  if (bgP95 != null && bgP95 > 15) {
+    alerts.push({
+      title: `Фон до ${bgP95.toFixed(0)} % CPU:`,
+      text: "95-й перцентиль фоновой нагрузки выше порога.",
+    });
+  }
+  for (const w of s.warnings) {
+    const cut = w.indexOf(": ");
+    alerts.push(
+      cut > 0 && cut < 46
+        ? { title: w.slice(0, cut + 1), text: w.slice(cut + 2) }
+        : { title: "Замечание:", text: w },
+    );
+  }
+  if (s.early_stop_reason) {
+    alerts.push({ title: "Ранняя остановка:", text: s.early_stop_reason });
+  }
+
+  const trustTitle = !leader
+    ? "Сравнивать нечего: все схемы забракованы."
+    : rec.level === "Confirmed"
+      ? "Лидерство подтверждено."
+      : rec.level === "Probable"
+        ? "Лидеру можно верить."
+        : rec.level === "StabilityTieBreak"
+          ? "Лидер выбран по стабильности, а не по скорости."
+          : rec.level === "Preliminary"
+            ? "Вердикт предварительный."
+            : (rec.level_label ?? "Вердикт не определён.");
 
   return (
-    <div className="rd">
-      <div className="rd-hero">
-        <div className="rd-kicker">{tie ? "ничья" : "лидер сессии"}</div>
-        <div className="rd-lead ok">{leaderName ? `«${leaderName}»` : (rec.level_label ?? "—")}</div>
-        <div className="row wrap gap-2" style={{ justifyContent: "center" }}>
-          <Badge kind={levelKind(rec.level)} big>
-            {rec.level_label ?? rec.level}
-          </Badge>
-          <Badge kind="plain">раундов {s.rounds_completed}/{s.rounds_planned}</Badge>
+    <div className="sm-body">
+      <section className="leader-hero">
+        <div className="lh-left">
+          <div className="lh-eyebrow">
+            <span className="badge-leader">
+              {tie ? "★ Ничья" : leader ? "★ Лидер сессии" : "★ Лидер не определён"}
+            </span>
+            <span className="badge-pill">
+              {modeName} · {s.rounds_completed}/{s.rounds_planned} раунд
+            </span>
+            {probs ? (
+              <span
+                className="badge-pill"
+                title={`P(лучший)=${f1(probs[0], 2)} · P(перевес>1%)=${f1(probs[2], 2)}`}
+              >
+                Уверенность {Math.round(Math.min(1, Math.max(0, probs[0])) * 100)}%
+              </span>
+            ) : null}
+            <span className="badge-pill level" title={trustTitle}>
+              {rec.level_label ?? rec.level}
+            </span>
+          </div>
+          <h3 className="lh-name">{leaderName}</h3>
         </div>
-      </div>
 
-      <div className="rd-stats">
-        <div className="rd-stat">
-          <div className="k">Медиана лидера</div>
-          <div className="v ok">{f1(leader?.median_throughput)}</div>
-          <div className="s">тик/с</div>
-        </div>
-        <div className="rd-stat">
-          {/* Хэш конфигурации определяет сопоставимость сессий: без него
-              нельзя понять, что два замера мерили одно и то же. */}
-          <div className="k">Конфигурация</div>
-          <div className="v mono break">{s.identity.config_hash || "—"}</div>
-          <div className="s">
-            seed {s.identity.seed_hex || "-"} · воркеров {s.identity.worker_count} /{" "}
-            {s.identity.logical_cpus}
+        <div className="lh-metrics">
+          <div className="m-box">
+            <small>Медиана лидера</small>
+            <b className={leaderMedian > 0 ? "green" : ""}>
+              {leaderMedian > 0 ? f1(leaderMedian) : "—"}
+            </b>
+            {leaderMedian > 0 ? <span>тик/с</span> : null}
+          </div>
+          <div className="m-box">
+            <small>Перевес</small>
+            <b className={marginGreen ? "green" : ""}>{marginText}</b>
+          </div>
+          <div className="m-box">
+            <small>Замерено схем</small>
+            <b>{testedCount}</b>
+            <span>из {s.schemes.length}</span>
+          </div>
+          <div className="m-box">
+            <small>Прогонов</small>
+            <b>{totalRuns}</b>
+            <span>всего</span>
           </div>
         </div>
-        <div className="rd-stat">
-          <div className="k">Перевес</div>
-          <div className={`v ${marginKind}`}>{marginText}</div>
-          <div className="s">ожидаемый</div>
-        </div>
-        <div className="rd-stat">
-          <div className="k">Схем</div>
-          <div className="v">{admitted.length}</div>
-          <div className="s">
-            {rejectedCount > 0
-              ? `забраковано: ${rejectedCount} ${plural(rejectedCount, "схема", "схемы", "схем")}`
-              : "все допущены"}
-          </div>
-        </div>
-        <div className="rd-stat">
-          <div className="k">Прогонов</div>
-          <div className="v">{totalRuns}</div>
-          <div className="s">всего</div>
-        </div>
-      </div>
+      </section>
 
-      {/* Состав машины вынесен под карточки: в узкой плитке строка с CPU, ОС и
-          памятью обрезалась многоточием и половина условий была не видна. */}
-      <div className="rd-machine">
-        <span>
-          {s.identity.cpu_brand || s.identity.cpu_identifier}
-        </span>
-        <span>ОС {s.identity.os_build || "—"}</span>
-        <span>
-          {s.identity.memory_gib > 0
-            ? `${s.identity.memory_gib.toFixed(0)} ГБ ОЗУ`
-            : "память неизвестна"}
-        </span>
-      </div>
-
-      <div className={`rd-note ${trustNote.kind}`}>
-        <b>{trustNote.title}</b>
-        <ul>
-          {trustNote.items.map((t, i) => (
-            <li key={i}>{t}</li>
+      {alerts.length > 0 ? (
+        <div className="alerts-strip">
+          {alerts.map((a, i) => (
+            <div className="alert-chip" key={i}>
+              <b>{a.title}</b>
+              <span>{a.text}</span>
+            </div>
           ))}
-        </ul>
-        {rec.reason ? <span className="why">{rec.reason}</span> : null}
-      </div>
-      {/* Условия замера: без них «уверенный» вердикт выглядит так же, как
-          вердикт на зашумлённой и перегретой машине. Про сам скрининг уже
-          сказано в плашке выше, поэтому здесь только измерения. */}
-      {s.reference ? (
-        <div className={`rd-note ${s.reference.unstable ? "warn" : ""}`}>
-          <b>Опорная схема:</b> {s.reference.scheme_name ?? s.reference.scheme_id} —{" "}
-          {s.reference.per_round.map((v) => f1(v, 0)).join(" → ")} тик/с по раундам.{" "}
-          разброс {s.reference.span_percent.toFixed(1)} % (порог{" "}
-          {s.reference.span_limit_percent.toFixed(1)} %), тренд{" "}
-          {s.reference.trend_percent_per_round >= 0 ? "+" : ""}
-          {s.reference.trend_percent_per_round.toFixed(1)} %/раунд.
-          {s.reference.unstable
-            ? " Машина плавает сильнее, чем различаются схемы: вердикт понижен."
-            : " Разброс в пределах нормы."}
         </div>
       ) : null}
-      {s.warnings.length > 0 ? (
-        <div className="rd-note warn">{s.warnings.join(" ")}</div>
-      ) : null}
 
-      {/* Метрики по фазам: внутри фазы схемы сравнимы, между фазами «тик/с» —
-          нет, потому что работа на тик различается. */}
       {leader && leader.phases.length > 0 ? (
-        <div className="modal-scrollx">
-          <table className="grid evid-table rd-table">
+        <section className="section-card">
+          <div className="sc-bar">
+            <h4 className="sc-title">Показатели лидера по фазам</h4>
+            <span className="sc-hint">
+              Сравнение корректно внутри одной фазы · ↓ — снижение частоты CPU
+            </span>
+          </div>
+          <table className="phases-tbl">
             <thead>
               <tr>
-                <th>Фаза</th>
-                <th className="num">Медиана, тик/с</th>
-                <th className="num">P1, тик/с</th>
-                <th className="num">Стабильность</th>
-                <th>Частота</th>
+                <th>Фаза нагрузки</th>
+                <th>Медиана, тик/с</th>
+                <th>P1 (мин. 1%), тик/с</th>
+                <th>Стабильность</th>
+                <th>Частота CPU</th>
               </tr>
             </thead>
             <tbody>
-              {leader.phases.map((p) => (
-                <tr
-                  key={p.name}
-                  className={p.frequency_drop_percent >= 5 ? "warn-row" : undefined}
-                >
-                  <td className="nm">{p.name}</td>
-                  <td className="num">{f1(p.median_throughput)}</td>
-                  <td className="num">{f1(p.p1_throughput)}</td>
-                  <td className="num">{f1(p.consistency_percent, 2)}</td>
+              {leader.phases.map((p, i) => (
+                <tr key={p.name}>
+                  {/* Номер фазы: в JSON хранится только подпись («Лёгкая»), а
+                      в таблице без номера строки не с чем сравнивать. */}
+                  <td>
+                    {i + 1}. {p.name}
+                  </td>
+                  <td>
+                    <b>{f1(p.median_throughput)}</b>
+                  </td>
+                  <td>{f1(p.p1_throughput)}</td>
+                  <td>{f1(p.consistency_percent, 2)}%</td>
                   <td>
                     {p.frequency_mhz > 0
-                      ? `${Math.round(p.frequency_mhz)}${
+                      ? `${Math.round(p.frequency_mhz)} МГц${
                           p.frequency_drop_percent >= 5
                             ? ` ↓${Math.round(p.frequency_drop_percent)}%`
                             : ""
@@ -857,101 +994,168 @@ function SessionDetail({
               ))}
             </tbody>
           </table>
-          <div className="field-hint">
-            Лидер по фазам. Внутри фазы схемы сравнимы столбик к столбику; между
-            разными фазами «тик/с» сравнивать нельзя — у лёгкой фазы работы на
-            тик меньше. Стрелка ↓ означает, что в этой фазе замечено снижение
-            частоты относительно лучшей частоты сессии: часть фазы измерялась
-            на пониженной частоте, и это не заслуга схемы питания.
+        </section>
+      ) : null}
+
+      <section className="section-card">
+        <div className="schemes-toolbar">
+          <div className="st-left">
+            <h4 className="sc-title">Сравнение схем питания</h4>
+            {hasEmpty ? (
+              <div className="mini-tabs" role="tablist" aria-label="Какие схемы показывать">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={tblFilter === "tested"}
+                  className={`mtab${tblFilter === "tested" ? " active" : ""}`}
+                  onClick={() => setTblFilter("tested")}
+                >
+                  С замерами ({testedCount})
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={tblFilter === "all"}
+                  className={`mtab${tblFilter === "all" ? " active" : ""}`}
+                  onClick={() => setTblFilter("all")}
+                >
+                  Все в сессии ({s.schemes.length})
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <div className="st-right">
+            <div className="mini-tabs">
+              <button
+                type="button"
+                className={`mtab${tblSort === "speed" ? " active" : ""}`}
+                title="Сортировка по результату"
+                onClick={() => setTblSort("speed")}
+              >
+                По скорости
+              </button>
+              <button
+                type="button"
+                className={`mtab${tblSort === "alpha" ? " active" : ""}`}
+                title="Сортировка по названию"
+                onClick={() => setTblSort("alpha")}
+              >
+                По названию
+              </button>
+            </div>
+            <input
+              type="search"
+              className="mini-search"
+              value={schemeQuery}
+              onChange={(e) => setSchemeQuery(e.target.value)}
+              placeholder="Поиск схемы…"
+              aria-label="Поиск схемы в таблице"
+            />
           </div>
         </div>
-      ) : null}
-      {/* Что было до и после сессии: пользователю важно знать, вернулась ли
-          система к прежней схеме питания. */}
-      {s.original_scheme_guid || s.original_restored ? (
-        <div className="rd-note">
-          <b>Системная схема:</b>{" "}
-          {s.original_scheme_guid ? (
-            <>
-              <span className="mono break">{s.original_scheme_guid}</span>{" "}
-              {s.original_restored
-                ? "— восстановлена после сессии"
-                : "— НЕ восстановлена, верните её вручную"}
-            </>
-          ) : (
-            "не менялась"
-          )}
-        </div>
-      ) : null}
 
-      {s.early_stop_reason ? (
-        <div className="rd-note warn">
-          <b>Ранняя остановка:</b> {s.early_stop_reason}
-        </div>
-      ) : null}
-
-      {probs ? (
-        <div className="rd-note">
-          <b>Уверенность:</b> P(лучший) = {f1(probs[0], 2)} · P(перевес &gt; 0) ={" "}
-          {f1(probs[1], 2)} · P(перевес &gt; 1%) = {f1(probs[2], 2)}
-        </div>
-      ) : null}
-
-      <div className="modal-scrollx">
-        <table className="grid evid-table rd-table">
-          <thead>
-            <tr>
-              <th>Схема</th>
-              <th className="num">Медиана, тик/с</th>
-              <th className="num">ДИ 95%</th>
-              <th className="num">Прогонов</th>
-              <th>Статус</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tableRows.map((sch) => {
-              const isLeader = leader != null && sch.scheme_id === leader.scheme_id;
-              return (
-                <tr key={sch.scheme_id} className={isLeader ? "lead" : sch.rejected ? "dead" : undefined}>
-                  <td className="nm">
-                    {isLeader ? "★ " : ""}
-                    {sch.name ?? sch.scheme_id}
-                  </td>
-                  <td className="num">{f1(sch.median_throughput)}</td>
-                  <td className="num">
-                    {sch.ci_95[0] > 0 ? `[${f1(sch.ci_95[0])}; ${f1(sch.ci_95[1])}]` : "—"}
-                  </td>
-                  <td className="num">{sch.runs}</td>
-                  <td>
-                    {sch.rejected ? (
-                      // Причина брака — главное, ради чего строка и есть:
-                      // «забракована» без объяснения ни о чём не говорит.
-                      <Badge kind="danger" title={sch.rejection_reason ?? undefined}>
-                        забракована
-                        {sch.rejection_reason ? `: ${sch.rejection_reason}` : ""}
-                      </Badge>
-                    ) : isLeader ? (
-                      <Badge kind="ok">лидер</Badge>
-                    ) : (
-                      <Badge kind="plain">допущена</Badge>
-                    )}
+        <div className="schemes-scroll">
+          <table className="schemes-tbl">
+            <thead>
+              <tr>
+                <th>Схема питания</th>
+                <th>Медиана, тик/с</th>
+                <th>ДИ 95%</th>
+                <th>Прогонов</th>
+                <th>Статус</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shownSchemes.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="tbl-empty">
+                    Ничего не найдено
                   </td>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="rd-foot">
-        <Button variant="primary" disabled={opening} onClick={openHtml}>
-          {opening ? "Открываю…" : "Открыть HTML-отчёт"}
-        </Button>
-        <span className="spacer" />
-        <Button variant="danger" onClick={() => void del()}>
-          Удалить запись
-        </Button>
-      </div>
+              ) : (
+                shownSchemes.map((sch, i) => {
+                  const isLeader = leader != null && sch.scheme_id === leader.scheme_id;
+                  const isTested = sch.runs > 0;
+                  const pct =
+                    isTested && leaderMedian > 0
+                      ? Math.max(2, Math.min(100, Math.round((sch.median_throughput / leaderMedian) * 100)))
+                      : 0;
+                  const name =
+                    (sch.name ?? "").trim() ||
+                    schemeNames.get(sch.scheme_id.toLowerCase()) ||
+                    `Схема ${sch.scheme_id.slice(0, 8)}…`;
+                  return (
+                    <tr
+                      key={sch.scheme_id}
+                      className={
+                        isLeader ? "is-leader" : !isTested ? "is-untested" : undefined
+                      }
+                    >
+                      <td>
+                        <span className="rk-num">#{i + 1}</span>
+                        {isLeader ? "★ " : ""}
+                        {name}
+                        <span className="guid-tail">{sch.scheme_id.slice(0, 8)}…</span>
+                      </td>
+                      <td>
+                        {isTested ? (
+                          <span className="score-cell">
+                            <span className="score-bar">
+                              <i style={{ width: `${pct}%` }} />
+                            </span>
+                            <b>{f1(sch.median_throughput)}</b>
+                          </span>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="mut">
+                        {isTested && sch.ci_95[0] > 0
+                          ? `[${f1(sch.ci_95[0])}; ${f1(sch.ci_95[1])}]`
+                          : "—"}
+                      </td>
+                      <td>{sch.runs}</td>
+                      <td>
+                        {!isTested ? (
+                          // Схема без прогонов: медиана неизвестна, а не ноль.
+                          // Причину брака (если она есть) отдаём в подсказке —
+                          // иначе строка молча теряет объяснение.
+                          <span
+                            className="st-badge skipped"
+                            title={sch.rejection_reason ?? undefined}
+                          >
+                            пропущена
+                          </span>
+                        ) : sch.rejected ? (
+                          // Причина брака — главное, ради чего строка и есть:
+                          // «забракована» без объяснения ни о чём не говорит.
+                          <span
+                            className="st-badge rejected"
+                            title={sch.rejection_reason ?? undefined}
+                          >
+                            забракована
+                            {sch.rejection_reason ? `: ${sch.rejection_reason}` : ""}
+                          </span>
+                        ) : isLeader ? (
+                          <span className="st-badge leader">лидер</span>
+                        ) : (
+                          <span className="st-badge">допущена</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+        {rejectedCount > 0 ? (
+          <div className="tbl-note">
+            Забраковано схем: {rejectedCount}
+            {tblFilter === "tested" ? " — они спрятаны вкладкой «Все в сессии»." : "."}
+          </div>
+        ) : null}
+      </section>
     </div>
   );
 }

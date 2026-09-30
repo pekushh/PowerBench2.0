@@ -343,6 +343,7 @@ export function Modal({
   onClose,
   footer,
   wide = false,
+  className = "",
   children,
 }: {
   open: boolean;
@@ -350,6 +351,9 @@ export function Modal({
   onClose: () => void;
   footer?: ReactNode;
   wide?: boolean;
+  /** Дополнительный класс окна: у крупных окон своя раскладка шапки и
+   *  подвала, и без него их нечем было отличить от обычного диалога. */
+  className?: string;
   children: ReactNode;
 }) {
   const panel = useRef<HTMLDivElement>(null);
@@ -399,7 +403,7 @@ export function Modal({
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
-        className={`modal${wide ? " wide" : ""}`}
+        className={`modal${wide ? " wide" : ""}${className ? ` ${className}` : ""}`}
         onClick={(e) => e.stopPropagation()}
         ref={panel}
         role="dialog"

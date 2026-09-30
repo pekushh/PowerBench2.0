@@ -368,7 +368,6 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 
 
 
-.evid-table th.num,.evid-table td.num{text-align:right}
 
 
 
@@ -585,45 +584,8 @@ html.bench-running .pick-tile{
    повторялось на всех страницах. */
 .page-head{align-items:baseline}
 /* --- ╨б╨╛╨┤╨╡╤А╨╢╨╕╨╝╨╛╨╡ ╨╝╨╛╨┤╨░╨╗╨║╨╕ ╤А╨╡╨╖╤Г╨╗╤М╤В╨░╤В╨░ --- */
-.rd{display:flex;flex-direction:column;gap:var(--sp-4);padding-bottom:var(--sp-2)}
-.rd-hero{display:flex;flex-direction:column;align-items:center;gap:var(--sp-2);text-align:center}
-.rd-kicker{font-size:10.5px;letter-spacing:1.8px;text-transform:uppercase;color:var(--fg-mute);font-weight:700}
-.rd-lead{font-size:26px;font-weight:700;letter-spacing:-.4px;line-height:1.2;overflow-wrap:anywhere}
-.rd-lead.ok{color:var(--ok)}
 /* Пять плиток (медиана, конфигурация, перевес, схемы, прогонов): четыре колонки
    жмут текст, поэтому на узком окне схема на две, дальше на одну. */
-.rd-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--sp-2)}
-@media (max-width:1100px){.rd-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
-
-}
-@media (max-width:560px){.rd-stats{grid-template-columns:1fr}
-
-}
-.rd-stat{background:var(--bg-1);border:1px solid var(--line-1);border-radius:var(--radius-md);padding:var(--sp-3)}
-.rd-stat .k{font-size:10px;letter-spacing:1.3px;text-transform:uppercase;color:var(--fg-mute);font-weight:600}
-.rd-stat .v{font-size:var(--fs-h3);font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums;letter-spacing:-.2px}
-.rd-stat .v.ok{color:var(--ok)}
-.rd-stat .v.warn{color:var(--warn)}
-.rd-stat .s{font-size:var(--fs-caption);color:var(--fg-mute);margin-top:2px;overflow:hidden;
-text-overflow:ellipsis;white-space:nowrap}
-.rd-note{border:1px solid var(--line-1);border-radius:var(--radius-md);padding:var(--sp-3) var(--sp-4);
-background:var(--bg-1);font-size:var(--fs-sm);color:var(--fg-dim);line-height:1.6}
-.rd-note.warn{border-color:color-mix(in srgb,var(--warn) 34%,transparent);
-background:color-mix(in srgb,var(--warn) 6%,var(--bg-1))}
-.rd-note.ok{border-color:color-mix(in srgb,var(--ok) 34%,transparent);
-background:color-mix(in srgb,var(--ok) 6%,var(--bg-1))}
-.rd-note b{color:var(--fg)}
-.rd-note ul{margin:6px 0 0;padding-left:18px}
-.rd-note li{margin:3px 0}
-.rd-note .why{color:var(--fg-mute);font-style:italic;margin-top:4px;display:block}
-.rd-table{width:100%;font-size:var(--fs-body)}
-.rd-table td{white-space:nowrap}
-.rd-table td.nm{white-space:normal;min-width:180px;overflow-wrap:anywhere}
-.rd-table tr.lead td{background:color-mix(in srgb,var(--ok) 7%,transparent)}
-.rd-table tr.lead td:first-child{box-shadow:inset 3px 0 0 var(--ok)}
-.rd-table tr.dead td{opacity:.5}
-.rd-foot{display:flex;gap:var(--sp-2);align-items:center;padding-top:var(--sp-2)}
-.rd-foot .spacer{flex:1 1 auto}
 /* --- ╨Я╨╗╨╕╤В╨║╨╕ ╨▓╤Л╨▒╨╛╤А╨░ ╤Б╤Е╨╡╨╝ ╨▓ ╨▒╨╡╨╜╤З╨╝╨░╤А╨║╨╡ (╨║╨░╨║ ╨╜╨░ ╤Б╤В╤А╨░╨╜╨╕╤Ж╨╡ ┬л╨б╤Е╨╡╨╝╤Л┬╗) --- */
 /* Три колонки, как на странице «Схемы питания». `auto-fill` давал разное число
    колонок на одной и той же ширине из-за дробных остатков — список на двух
@@ -668,8 +630,6 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 .rp-name{font-size:var(--fs-body);font-weight:600}
 .rp-time{font-size:var(--fs-caption);color:var(--fg-mute);font-variant-numeric:tabular-nums}
 .run-phase.active .rp-time{color:var(--accent);font-weight:650}
-@media (max-width:760px){.rd-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
-}
 /* Индикатор «здесь есть что прокрутить» — только сверху и снизу.
    Вариант с боковыми тенями (`scroll shadow` на `background-attachment`)
    приклеивал их к рамке элемента, и они рисовались ПОВЕРХ текста: в журнале
@@ -684,10 +644,6 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
  -webkit-mask-composite:source-in;mask-composite:intersect;
  mask-image:linear-gradient(to bottom,transparent 3px,#000 14px),linear-gradient(to bottom,#000 calc(100% - 14px),transparent calc(100% - 3px))}
 /* Строка с троттлингом частоты: результат замерялся в ограниченном режиме. */
-.evid-table tr.warn-row td{color:var(--warn)}
-.rd-machine{display:flex;flex-wrap:wrap;gap:6px 16px;margin:10px 0 14px;font-size:12px;color:var(--muted)}
-.rd-machine span{white-space:nowrap}
-.evid-table tr.warn-row td{color:var(--warn)}
 /* ===== Логи: фильтры, карточка журнала, строки ===== */
 /* Высоту задаёт `.logs-page` через `.page.fill`, а карточка растёт на
    оставшееся место: журнал должен занимать окно целиком, а не полосу. */
@@ -975,3 +931,110 @@ background:color-mix(in srgb,var(--accent) 6%,var(--bg-1))}
 .schemes-toolbar .ftab{border-radius:7px}
 .view-switch{padding:3px;border-radius:10px}
 .vbtn{border-radius:7px}
+/* ===== Модальное окно «Результат сессии» по макету =====
+   Каркас жёсткий: шапка и подвал с кнопками зафиксированы, прокручивается
+   только тело, а таблице схем достаётся собственный компактный скролл. Без
+   этого окно на 109 схем вытягивалось за пределы экрана. */
+.modal.session-modal{background:#161616;width:min(920px,94vw);max-height:min(86vh,880px)}
+.modal.session-modal .modal-head{padding:14px 20px;border-bottom:1px solid var(--line-1);background:var(--bg-1);flex:0 0 auto;align-items:center}
+.modal.session-modal .modal-title{font-size:16px;font-weight:700;min-width:0}
+.modal.session-modal .modal-close{width:30px;height:30px;border-radius:8px;border:1px solid var(--line-1);background:var(--bg-2);color:var(--fg-dim);font-size:15px;flex:0 0 auto}
+.modal.session-modal .modal-close:hover{border-color:var(--line-2);background:var(--bg-3);color:var(--fg)}
+.modal.session-modal .modal-body{padding:16px 20px;display:flex;flex-direction:column;gap:12px;flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.modal.session-modal .modal-foot{padding:0;border-top:1px solid var(--line-1);background:var(--bg-1);flex:0 0 auto}
+
+/* Заголовок и состав машины в одну строку */
+.sm-title{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;min-width:0}
+.sm-hw-meta{font-size:12px;font-weight:400;color:var(--fg-mute);font-variant-numeric:tabular-nums;line-height:1.4}
+
+/* Блок лидера и четыре метрики в один ряд */
+.leader-hero{background:var(--bg-1);border:1px solid var(--line-1);border-radius:13px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;flex:0 0 auto}
+.lh-left{min-width:220px;flex:1 1 auto}
+.lh-eyebrow{display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap}
+.badge-leader{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:5px;background:color-mix(in srgb,var(--ok) 12%,transparent);color:var(--ok);border:1px solid var(--okline)}
+.badge-pill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;background:var(--bg-2);color:var(--fg-dim);border:1px solid var(--line-1);white-space:nowrap}
+.badge-pill.level{color:var(--fg);cursor:help}
+.lh-name{font-size:20px;font-weight:800;color:var(--ok);letter-spacing:-.3px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lh-metrics{display:grid;grid-template-columns:repeat(4,auto);gap:8px}
+.m-box{background:var(--bg-0);border:1px solid var(--line-1);border-radius:9px;padding:7px 12px;min-width:105px}
+.m-box small{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--fg-mute);margin-bottom:2px;white-space:nowrap}
+.m-box b{font-size:15px;font-weight:750;color:var(--fg);font-variant-numeric:tabular-nums}
+.m-box b.green{color:var(--ok)}
+.m-box span{font-size:11px;color:var(--fg-mute);margin-left:3px}
+
+/* Компактная полоса предупреждений в одну строку */
+.alerts-strip{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:0 0 auto}
+.alert-chip{flex:1 1 260px;display:flex;align-items:baseline;gap:8px;padding:7px 12px;border-radius:9px;background:color-mix(in srgb,var(--warn) 12%,transparent);border:1px solid var(--warnline);font-size:12px;color:var(--fg-dim);min-width:0}
+.alert-chip b{color:var(--warn);white-space:nowrap}
+.alert-chip span{min-width:0}
+
+/* Карточки секций с компактной шапкой */
+.section-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:12px;overflow:hidden;flex:0 0 auto}
+.sc-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:9px 14px;border-bottom:1px solid var(--line-1);background:rgba(255,255,255,.015)}
+.sc-title{font-size:12.5px;font-weight:700;color:var(--fg);margin:0}
+.sc-hint{font-size:11.5px;color:var(--fg-mute)}
+
+/* Таблица фаз */
+.phases-tbl{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+.phases-tbl th{text-align:right;font-size:11px;font-weight:600;color:var(--fg-mute);padding:6px 14px;border-bottom:1px solid var(--line-1);white-space:nowrap}
+.phases-tbl th:first-child{text-align:left}
+.phases-tbl td{text-align:right;padding:7px 14px;font-size:12.5px;border-bottom:1px solid rgba(255,255,255,.04)}
+.phases-tbl tr:last-child td{border-bottom:0}
+.phases-tbl td:first-child{text-align:left;font-weight:600;color:var(--fg)}
+.phases-tbl td b{font-weight:700}
+
+/* Тулбар над таблицей схем: поиск и переключатель набора строк */
+.schemes-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:8px 14px;border-bottom:1px solid var(--line-1);background:rgba(255,255,255,.015)}
+.st-left{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.st-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mini-tabs{display:inline-flex;background:var(--bg-0);border:1px solid var(--line-1);border-radius:8px;padding:2px;gap:2px}
+.mini-tabs .mtab{font-size:11.5px;padding:3px 9px;border-radius:6px}
+.mini-search{background:var(--bg-0);color:var(--fg);border:1px solid var(--line-1);border-radius:7px;padding:4px 10px;font:inherit;font-size:12px;width:195px;height:auto}
+.mini-search:focus{outline:none;border-color:var(--line-2)}
+
+/* Собственный скролл таблицы: ~6 строк на виду при любом числе схем */
+.schemes-scroll{max-height:195px;overflow-y:auto;overscroll-behavior:contain}
+.schemes-tbl{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+.schemes-tbl thead th{position:sticky;top:0;background:#1c1c1c;z-index:1;text-align:right;font-size:11px;font-weight:600;color:var(--fg-mute);padding:6px 14px;border-bottom:1px solid var(--line-1);white-space:nowrap}
+.schemes-tbl thead th:first-child{text-align:left}
+.schemes-tbl td{text-align:right;padding:7.5px 14px;font-size:12.5px;border-bottom:1px solid rgba(255,255,255,.04)}
+.schemes-tbl tr:last-child td{border-bottom:0}
+.schemes-tbl td:first-child{text-align:left;font-weight:600}
+.schemes-tbl td.mut{color:var(--fg-mute)}
+.schemes-tbl tr.is-leader{background:color-mix(in srgb,var(--ok) 7%,transparent)}
+.schemes-tbl tr.is-untested{opacity:.55}
+.tbl-empty{text-align:center!important;color:var(--fg-mute);padding:18px 14px!important}
+.tbl-note{padding:7px 14px;border-top:1px solid var(--line-1);font-size:11.5px;color:var(--fg-mute)}
+.rk-num{display:inline-block;width:22px;color:var(--fg-mute);font-size:11.5px}
+tr.is-leader .rk-num{color:var(--ok);font-weight:700}
+/* Короткий GUID под именем: помогает отличить одноимённые копии. */
+.guid-tail{color:var(--fg-mute);font-weight:400;font-size:11px;font-family:ui-monospace,Cascadia Code,Consolas,monospace;margin-left:5px}
+
+/* Мини-полоска наглядного сравнения результата рядом с медианой */
+.score-cell{display:inline-flex;align-items:center;justify-content:flex-end;gap:8px}
+.score-bar{width:54px;height:5px;background:var(--bg-2);border-radius:999px;overflow:hidden;flex:0 0 auto}
+.score-bar i{display:block;height:100%;background:var(--fg-mute);border-radius:999px}
+tr.is-leader .score-bar i{background:var(--ok)}
+
+.st-badge{display:inline-block;font-size:11px;font-weight:600;padding:1.5px 8px;border-radius:6px;border:1px solid var(--line-1);background:var(--bg-2);color:var(--fg-dim);text-align:left;max-width:260px}
+.st-badge.leader{background:color-mix(in srgb,var(--ok) 12%,transparent);border-color:var(--okline);color:var(--ok)}
+.st-badge.skipped{background:transparent;border-color:var(--line-1);color:var(--fg-mute)}
+.st-badge.rejected{background:color-mix(in srgb,var(--err) 12%,transparent);border-color:var(--errline);color:var(--err)}
+
+/* Подвал: тех-чипы слева, действия справа, всегда на виду */
+.sm-foot-inner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 20px}
+.sm-foot-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11.5px;color:var(--fg-mute);min-width:0}
+.meta-chip{background:var(--bg-0);border:1px solid var(--line-1);border-radius:6px;padding:3px 8px;font-family:ui-monospace,Cascadia Code,Consolas,monospace;font-size:11px;color:var(--fg-mute);cursor:pointer;white-space:nowrap}
+.meta-chip:hover{border-color:var(--line-2);color:var(--fg-dim)}
+.sm-foot-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.btn-delete{padding:7px 14px;border-radius:9px;border:1px solid var(--errline);background:color-mix(in srgb,var(--err) 12%,transparent);color:var(--err);font:inherit;font-size:12.5px;font-weight:650;cursor:pointer;white-space:nowrap}
+.btn-delete:hover{background:color-mix(in srgb,var(--err) 22%,transparent)}
+.btn-open-report{padding:7px 16px;border-radius:9px;border:0;background:var(--accent);color:#111;font:inherit;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap}
+.btn-open-report:hover{opacity:.92}
+.btn-open-report:disabled{opacity:.6;cursor:default}
+
+@media (max-width:760px){
+.lh-metrics{grid-template-columns:repeat(2,1fr);width:100%}
+.sm-title{gap:4px}
+.mini-search{width:150px}
+}

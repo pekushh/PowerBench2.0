@@ -197,6 +197,10 @@ export interface StoredRun {
   burst_retention_percent: number;
   background: CorrelatedProcessJson[];
   spike_windows: number;
+  /** Фоновая нагрузка. В записях, сделанных до их появления, полей нет. */
+  background_cpu_p50?: number;
+  background_cpu_p95?: number;
+  background_sample_seconds?: number;
 }
 
 export interface SchemeJson {

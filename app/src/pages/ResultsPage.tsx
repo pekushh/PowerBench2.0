@@ -589,12 +589,23 @@ function SessionDetail({
             </thead>
             <tbody>
               {leader.phases.map((p) => (
-                <tr key={p.name} className={p.throttled ? "warn-row" : undefined}>
+                <tr
+                  key={p.name}
+                  className={p.frequency_drop_percent >= 5 ? "warn-row" : undefined}
+                >
                   <td className="nm">{p.name}</td>
                   <td className="num">{f1(p.median_throughput)}</td>
                   <td className="num">{f1(p.p1_throughput)}</td>
                   <td className="num">{f1(p.consistency_percent, 2)}</td>
-                  <td>{p.throttled ? "троттлинг" : "—"}</td>
+                  <td>
+                    {p.frequency_mhz > 0
+                      ? `${Math.round(p.frequency_mhz)}${
+                          p.frequency_drop_percent >= 5
+                            ? ` ↓${Math.round(p.frequency_drop_percent)}%`
+                            : ""
+                        }`
+                      : "—"}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -602,7 +613,9 @@ function SessionDetail({
           <div className="field-hint">
             Лидер по фазам. Внутри фазы схемы сравнимы столбик к столбику; между
             разными фазами «тик/с» сравнивать нельзя — у лёгкой фазы работы на
-            тик меньше.
+            тик меньше. Стрелка ↓ означает, что в этой фазе замечено снижение
+            частоты относительно лучшей частоты сессии: часть фазы измерялась
+            на пониженной частоте, и это не заслуга схемы питания.
           </div>
         </div>
       ) : null}

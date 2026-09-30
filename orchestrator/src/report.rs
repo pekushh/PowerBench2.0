@@ -3,7 +3,7 @@
 //! зависимостей — все стили и SVG встроены.
 
 use crate::history::{date_time_stamp, session_started_at_ns};
-use crate::result::{IdentityJson, PhaseSummaryJson, SessionJson};
+use crate::result::{IdentityJson, SessionJson};
 
 /// Описание машины одной строкой для подвала отчёта.
 ///
@@ -125,6 +125,25 @@ border:1px solid transparent;white-space:nowrap}
 .ptrack i{display:block;height:100%;border-radius:999px;background:#4A4A4A}
 .pbar.lead .ptrack i{background:linear-gradient(90deg,#4EA87F,var(--ok))}
 .pval{color:var(--fg);font-variant-numeric:tabular-nums;font-weight:700;font-size:13.5px;min-width:44px;text-align:right}
+
+/* Категории схем: заменили «балл по вашим весам». Три колонки на широком
+   экране, одна на узком — карточки не должны сжиматься в нечитаемую полосу. */
+.cats{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:12px 0 14px}
+.catcard{background:var(--bg-2);border:1px solid var(--line-1);border-radius:var(--radius-lg);padding:14px 16px}
+.cat-title{font-size:var(--fs-sm);color:var(--fg-mute);text-transform:uppercase;letter-spacing:.04em}
+.cat-name{font-size:var(--fs-lead,18px);font-weight:600;margin:6px 0 10px;color:var(--fg);word-break:break-word}
+.cat-metrics{display:grid;gap:4px}
+.cat-metrics div{display:flex;align-items:baseline;gap:8px;font-size:var(--fs-sm);color:var(--fg-dim)}
+.cat-metrics span{flex:0 0 auto;min-width:132px;color:var(--fg-mute)}
+.cat-metrics b{font-size:var(--fs-body);color:var(--fg);font-variant-numeric:tabular-nums}
+.cat-hint{margin-top:10px;font-size:var(--fs-sm);color:var(--fg-mute);line-height:1.5}
+/* Таблица метрик по фазам шире экрана: прокручивается по горизонтали
+   внутри своей обёртки, а не растягивает страницу и не срезает колонки. */
+.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+table.phases{border-collapse:collapse;width:100%}
+table.phases th,table.phases td{white-space:nowrap}
+/* Подзаголовок групп фаз — не «жирный» заголовок уровня фазы. */
+table.phases thead tr:nth-child(2) th{font-weight:400;font-size:var(--fs-sm);color:var(--fg-mute);text-align:right}
 .meta{color:var(--mute);font-size:12.5px;line-height:1.6;margin-bottom:2px}
 .muted{color:var(--mute)}
 .note{color:var(--mute);font-size:12.5px;margin-top:8px;line-height:1.55}
@@ -223,9 +242,14 @@ const HTML_JS: &str = r##"
     var counter = box.querySelector('.sch-count');
     var more = box.querySelector('.sch-more');
     var moreWrap = box.querySelector('.sch-morewrap');
-    // Порция на экране: список длиннее этого лучше листать по кнопке,
-    // чем прокручивать сотни строк.
+    // Список длинный: схем больше PAGE показываем постранично, остальные
+    // раскрывает кнопка.
     var PAGE = 60;
+    // Состояние «показаны все» держим в переменной, а не в свойстве
+    // `checked` кнопки: у `<button>` такого свойства нет, оно всегда
+    // `undefined`, из-за чего кнопка «Показать все» никогда не срабатывала,
+    // а строки после шестидесятой оставались скрыты навсегда.
+    var showAll = false;
 
     rows.forEach(function (tr, i) { tr.dataset.order = String(i); });
 
@@ -245,7 +269,7 @@ const HTML_JS: &str = r##"
         if (by === 'median') {
           var av = parseFloat(a.dataset.median);
           var bv = parseFloat(b.dataset.median);
-          // Схемы без данных уходят в конец, а не считаются «нулевыми».
+          // Схема без замеров (пусто или «—») уходит вниз, а не вверх.
           return (isNaN(bv) ? -Infinity : bv) - (isNaN(av) ? -Infinity : av);
         }
         if (by === 'runs') {
@@ -254,19 +278,23 @@ const HTML_JS: &str = r##"
         return (+a.dataset.order) - (+b.dataset.order);
       });
       hit.forEach(function (tr) { body.appendChild(tr); });
-      var limit = more.checked ? hit.length : Math.min(PAGE, hit.length);
+      var limit = showAll ? hit.length : Math.min(PAGE, hit.length);
       rows.forEach(function (tr) { tr.style.display = 'none'; });
       hit.slice(0, limit).forEach(function (tr) { tr.style.display = ''; });
       counter.textContent = 'Показано ' + Math.min(limit, hit.length) + ' из ' + rows.length
         + (hit.length === rows.length ? '' : ' · найдено ' + hit.length);
       moreWrap.style.display = hit.length > PAGE ? '' : 'none';
-      more.textContent = more.checked ? 'Показать первые ' + PAGE : 'Показать все (' + hit.length + ')';
+      more.textContent = showAll
+        ? 'Свернуть до ' + PAGE
+        : 'Показать все (' + (hit.length - Math.min(PAGE, hit.length)) + ')';
+      more.setAttribute('aria-expanded', showAll ? '1' : '0');
     }
 
-    [search, status, sort, more].forEach(function (el) {
-      el.addEventListener(el === more ? 'click' : 'input', apply);
+    [search, status, sort].forEach(function (el) {
+      el.addEventListener('input', apply);
       if (el === status || el === sort) el.addEventListener('change', apply);
     });
+    more.addEventListener('click', function () { showAll = !showAll; apply(); });
     search.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') { search.value = ''; apply(); }
     });
@@ -411,11 +439,10 @@ pub fn build_session_report(s: &SessionJson) -> String {
     let robust_id = robust.as_ref().map(|r| r.scheme_id.clone());
     // Строка подсвечивается, если это рекомендованная схема либо (при ничьей
     // или отсутствии рекомендации) лидер по медиане.
-    let win_id: Option<&str> = winner.map(|w| w.scheme_id.as_str()).or(if tie {
-        robust_id.as_deref()
-    } else {
-        None
-    });
+    let win_id: Option<&str> =
+        winner
+            .map(|w| w.scheme_id.as_str())
+            .or(if tie { robust_id.as_deref() } else { None });
 
     let mut sch_rows = String::new();
     for sch in &s.schemes {
@@ -494,8 +521,7 @@ pub fn build_session_report(s: &SessionJson) -> String {
     let mut rec_notes: Vec<String> = match &robust {
         None => vec!["Все схемы забракованы — сравнивать нечего.".to_string()],
         Some(r)
-            if r.flags.is_empty()
-                && r.confidence == crate::leader::LeaderConfidence::Normal =>
+            if r.flags.is_empty() && r.confidence == crate::leader::LeaderConfidence::Normal =>
         {
             vec!["Лидер устойчив по медиане, выбросов и шума нет.".to_string()]
         }
@@ -610,7 +636,7 @@ pub fn build_session_report(s: &SessionJson) -> String {
              <tbody>{rows}</tbody></table>",
             rows = sch_rows
         )),
-        score = score_section(s),
+        score = categories_section(s),
         background = background_section(s, "<h2>Фоновая нагрузка</h2>", ""),
         conditions = conditions_section(s),
         phases = phase_table_section(s),
@@ -1067,7 +1093,7 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
         )),
         rec_line = rec_line,
         reason = esc(&rec.reason),
-        score = score_section(s),
+        score = categories_section(s),
         // Внутри раскрытой сессии заголовок уровнем ниже — `.dhead` и таблица
         // без рамки, как соседние блоки деталей.
         background = background_section(s, "<div class=\"dhead\">Фоновая нагрузка</div>", "sub",),
@@ -1087,49 +1113,37 @@ fn background_section(s: &SessionJson, heading: &str, table_class: &str) -> Stri
     // раз, даже если всплески были в прогонах разных схем.
     struct Acc {
         name: String,
-        path: String,
         median_cpu: f64,
         peak_cpu: f64,
         windows: usize,
-        schemes: Vec<String>,
-        phases: Vec<String>,
     }
     let mut acc: Vec<Acc> = Vec::new();
     for sch in &s.schemes {
-        let scheme = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
         for run in &sch.per_run {
             for p in &run.background {
-                let hit = acc.iter_mut().find(|a| {
-                    a.name.eq_ignore_ascii_case(p.name.trim()) && a.path == p.path.trim()
-                });
+                // Ключ — только имя. Раньше добавлялся и путь, из-за чего один
+                // и тот же процесс, запущенный из разных мест (например, из
+                // системной папки и из каталога пользователя), попадал в отчёт
+                // двумя строками.
+                let key = p.name.trim();
+                let hit = acc.iter_mut().find(|a| a.name.eq_ignore_ascii_case(key));
                 match hit {
                     Some(a) => {
                         a.windows += p.correlated_spike_windows;
                         a.peak_cpu = a.peak_cpu.max(p.peak_cpu_percent);
                         a.median_cpu = a.median_cpu.max(p.median_cpu_percent);
-                        for ph in &p.phases {
-                            if !a.phases.iter().any(|x| x == ph) {
-                                a.phases.push(ph.clone());
-                            }
-                        }
-                        if !a.schemes.iter().any(|x| x == &scheme) {
-                            a.schemes.push(scheme.clone());
-                        }
                     }
                     None => acc.push(Acc {
-                        name: p.name.trim().to_string(),
-                        path: p.path.trim().to_string(),
+                        name: key.to_string(),
                         median_cpu: p.median_cpu_percent,
                         peak_cpu: p.peak_cpu_percent,
                         windows: p.correlated_spike_windows,
-                        schemes: vec![scheme.clone()],
-                        phases: p.phases.clone(),
                     }),
                 }
             }
         }
     }
-    // В первую очередь те, что реально совпали с просадками, потом — по пику.
+    // В списке только те, чья активность совпала с провалом throughput.
     acc.retain(|a| a.windows > 0);
     if acc.is_empty() {
         return String::new();
@@ -1141,37 +1155,33 @@ fn background_section(s: &SessionJson, heading: &str, table_class: &str) -> Stri
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
     });
+    // Только имя и процент нагрузки. Путь к исполняемому файлу, число
+    // совпавших окон и список схем убраны: таблица из семи колонок
+    // перегружала отчёт, а путь — это длинная строка, которая ломала
+    // вёрстку и ничего не добавляла к пониманию причины.
     let mut rows = String::new();
     for a in &acc {
         rows.push_str(&format!(
-            "<tr><td>{name}</td><td class=\"mono\">{path}</td>\
-             <td class=\"num\">{med}</td><td class=\"num\">{peak}</td><td class=\"num\">{wins}</td>\
-             <td>{schemes}</td><td>{phases}</td></tr>",
+            "<tr><td>{name}</td><td class=\"num\">{med}</td><td class=\"num\">{peak}</td></tr>",
             name = esc(&a.name),
-            path = esc(if a.path.is_empty() { "—" } else { &a.path }),
             med = pct1(a.median_cpu),
             peak = pct1(a.peak_cpu),
-            wins = a.windows,
-            schemes = esc(&a.schemes.join(", ")),
-            phases = esc(&a.phases.join(", ")),
         ));
     }
     format!(
         "{heading}\
-         <table class=\"{cls}\"><thead><tr><th>Процесс</th><th>Путь</th>\
-         <th class=\"num\">CPU, медиана</th><th class=\"num\">CPU, пик</th>\
-         <th class=\"num\">Окон</th><th>Схемы</th><th>Фазы</th></tr></thead>\
+         <table class=\"{cls}\"><thead><tr><th>Процесс</th>\
+         <th class=\"num\">CPU, обычно</th><th class=\"num\">CPU, пик</th></tr></thead>\
          <tbody>{rows}</tbody></table>\
-         <div class=\"note\">Процесс отмечен, если его рост CPU совпал с провалом \
-         throughput. «Окон» — сколько таких совпадений набралось за сессию, \
-         CPU — максимум по прогонам.</div>",
+         <div class=\"note\">Только процессы, чья активность совпала с провалом \
+         throughput. «Обычно» — медиана нагрузки за замер, «пик» — максимум. \
+         Совпадение по времени не значит, что процесс вызвал провал.</div>",
         heading = heading,
         cls = table_class,
         rows = rows
     )
 }
-
-/// Пофазная таблица: медиана и P1 по каждой фазе плюс отметка троттлинга.
+/// Пофазная таблица: медиана и P1 по каждой фазе плюс отметка снижения частоты.
 ///
 /// Фазы различаются объёмом работы на тик, поэтому «тик/с» между ними
 /// сравнивать нельзя: фаза с меньшей работой на тик даёт больше тиков в
@@ -1182,61 +1192,90 @@ fn phase_table_section(s: &SessionJson) -> String {
     if s.schemes.iter().all(|x| x.phases.is_empty()) {
         return String::new();
     }
+    // Фазы для шапки берутся объединением по всем схемам. Раньше шапка
+    // строилась от первой схемы, а строки — от каждой своей, поэтому у схем с
+    // разным набором фаз числа уезжали под чужие заголовки: над шапкой
+    // «Лёгкая/Частичная» оказывалось шестнадцать ячеек.
+    let mut phase_names: Vec<String> = Vec::new();
+    for sch in &s.schemes {
+        for p in &sch.phases {
+            if !phase_names.iter().any(|n| n == &p.name) {
+                phase_names.push(p.name.clone());
+            }
+        }
+    }
+    if phase_names.is_empty() {
+        return String::new();
+    }
     let mut rows = String::new();
     for sch in &s.schemes {
         if sch.phases.is_empty() {
             continue;
         }
-        let cells: String = sch
-            .phases
+        let cells: String = phase_names
             .iter()
-            .map(|p| {
-                format!(
+            .map(|name| match sch.phases.iter().find(|p| &p.name == name) {
+                Some(p) => format!(
                     "<td class=\"num\">{m:.1}</td><td class=\"num\">{p1:.1}</td>\
-                     <td class=\"num\">{c:.1}</td><td>{state}</td>",
+                         <td class=\"num\">{c:.1}</td><td class=\"num\">{f}</td>",
                     m = p.median_throughput,
                     p1 = p.p1_throughput,
                     c = p.consistency_percent,
-                    state = if p.throttled {
-                        "троттлинг"
-                    } else {
-                        "—"
-                    }
-                )
+                    f = frequency_cell(p)
+                ),
+                None => "<td class=\"num\">—</td><td class=\"num\">—</td>\
+                         <td class=\"num\">—</td><td class=\"num\">—</td>"
+                    .to_string(),
             })
             .collect();
         rows.push_str(&format!("<tr><td>{}</td>{cells}</tr>", esc(&name_of(sch))));
     }
-    if rows.is_empty() {
-        return String::new();
-    }
-    // Шапка строится по ФАЗАМ, а не по парам (схема, фаза): иначе при двух
-    // схемах в шапке оказывалось восемь столбцов вместо четырёх, и браузер
-    // растягивал таблицу, а данные уезжали в первые четыре заголовка. Раньше
-    // это не было заметно на тестах с одной схемой.
-    let first_phases: &[PhaseSummaryJson] = s
-        .schemes
+    // Шапка в два уровня: «Схема» занимает обе строки, а под каждой фазой
+    // повторяются четыре подписи. Без `rowspan` первая строка занимала одну
+    // ячейку, вторая — четыре, и браузер развёл их по разным столбцам: на
+    // скриншоте подписи «Медиана/P1/Стабильность/Частота» уезжали вправо и
+    // накрывали соседние фазы.
+    let head: String = phase_names
         .iter()
-        .find(|x| !x.phases.is_empty())
-        .map(|x| x.phases.as_slice())
-        .unwrap_or(&[]);
-    let head: String = first_phases
+        .map(|n| format!("<th colspan=\"4\">{}</th>", esc(n)))
+        .collect();
+    let sub: String = phase_names
         .iter()
-        .map(|p| format!("<th class=\"num\" colspan=\"4\">{}</th>", esc(&p.name)))
+        .map(|_| {
+            "<th class=\"num\">Медиана</th><th class=\"num\">P1</th>\
+             <th class=\"num\">Стабильность</th><th class=\"num\">Частота</th>"
+                .to_string()
+        })
         .collect();
     format!(
         "<h2>Метрики по фазам</h2>\
-         <table><thead><tr><th>Схема</th>{head}</tr>\
-         <tr><th></th><th class=\"num\">Медиана</th><th class=\"num\">P1</th>\
-         <th class=\"num\">Стабильность</th><th>Частота</th></tr></thead>\
-         <tbody>{rows}</tbody></table>\
-         <div class=\"note\">Внутри одной фазы работа на тик одинакова, поэтому схемы\
-         сравнимы столбик к столбику. Между разными фазами «тик/с» сравнивать\
-         нельзя: у лёгкой фазы работы на тик меньше, значит и тиков в секунду\
-         больше.</div>"
+         <div class=\"table-scroll\"><table class=\"phases\"><thead>\
+         <tr><th rowspan=\"2\">Схема</th>{head}</tr><tr>{sub}</tr></thead>\
+         <tbody>{rows}</tbody></table></div>\
+         <div class=\"note\">Медиана и P1 — в тиках в секунду, стабильность — в \
+         процентах, частота — в МГц. Стрелка ↓ означает, что в этой фазе \
+         замечено снижение частоты относительно лучшей частоты этой же \
+         сессии: часть фазы измерялась на пониженной частоте, и это не \
+         заслуга схемы питания. Фазы отличаются по времени и нагрузке, поэтому \
+         их числа нельзя складывать.</div>"
     )
 }
 
+/// Ячейка частоты фазы: сама частота, а при заметном падении — со стрелкой.
+///
+/// Отсчёт падения идёт от лучшей частоты сессии, а не от потолка Windows:
+/// в потолок входят и штатный буст, и разгон в BIOS, поэтому на машине с
+/// разгоном отсчёт от него давал бы срабатывание в каждой фазе.
+fn frequency_cell(p: &crate::result::PhaseSummaryJson) -> String {
+    if p.frequency_mhz <= 0.0 {
+        return "—".to_string();
+    }
+    if p.frequency_dropped() {
+        format!("{:.0} ↓{:.0}%", p.frequency_mhz, p.frequency_drop_percent)
+    } else {
+        format!("{:.0}", p.frequency_mhz)
+    }
+}
 /// Секция «Условия замера»: опорная схема (дрейф машины), состояние питания и
 /// фон — всё, что решает, можно ли вообще доверять ранжированию.
 ///
@@ -1285,30 +1324,22 @@ fn conditions_section(s: &SessionJson) -> String {
             },
         ));
     }
-
-    // Фон и троттлинг — по каждому прогону, сводно по худшему.
+    // Фон — это то, что мешает замеру; частота — то, что может урезать
+    // результат. Обе величины собираются по всем прогонам сессии.
     let mut bg_p50: f64 = 0.0;
     let mut bg_p95: f64 = 0.0;
-    let mut throttled: Vec<String> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
     let mut power: Vec<String> = Vec::new();
     for sch in &s.schemes {
         for r in &sch.per_run {
             bg_p50 = bg_p50.max(r.background_cpu_p50);
             bg_p95 = bg_p95.max(r.background_cpu_p95);
-            let hits = r
-                .phases
-                .iter()
-                .filter(|p| {
-                    p.power
-                        .map(|x| x.throttled || x.thermal_throttle)
-                        .unwrap_or(false)
-                })
-                .count();
+            let hits = sch.phases.iter().filter(|p| p.frequency_dropped()).count();
             if hits > 0 {
                 let name = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
                 let entry = format!("{name} ({hits})");
-                if !throttled.contains(&entry) {
-                    throttled.push(entry);
+                if !dropped.contains(&entry) {
+                    dropped.push(entry);
                 }
             }
             if let Some(p) = r.power.as_ref().and_then(|p| p.note()) {
@@ -1319,12 +1350,11 @@ fn conditions_section(s: &SessionJson) -> String {
             }
         }
     }
-    // Условия должны печататься и при троттлинге: раньше блок выводился только
-    // при фоне или снимке питания, и троттлинг в фазе оставался в отчёте
-    // незамеченным, хотя в интерфейсе и в консоли он был виден.
-    if bg_p95 > 0.0 || !power.is_empty() || !throttled.is_empty() {
+    // Фон печатается, если машина была занята; снижение частоты — если оно
+    // замечено. Это две разные вещи, и сводная строка перечисляет обе.
+    if bg_p95 > 0.0 || !power.is_empty() || !dropped.is_empty() {
         out.push_str("<h2>Условия замера</h2>");
-        out.push_str("<div class=\"note\"><b>Состояние системы во время замера:</b>");
+        out.push_str("<div class=\"note\"><b>Фон и частота во время замера:</b>");
         if bg_p95 > 0.0 {
             out.push_str(&format!(
                 " фон до {:.0} % CPU (медиана {:.0} %, пик {:.0} % одного ядра)",
@@ -1334,12 +1364,14 @@ fn conditions_section(s: &SessionJson) -> String {
         if !power.is_empty() {
             out.push_str(&format!("; {}", power.join("; ")));
         }
-        if !throttled.is_empty() {
-            out.push_str(&format!("; троттлинг: {}", throttled.join(", ")));
+        if !dropped.is_empty() {
+            out.push_str(&format!(
+                "; замечено снижение частоты: {}",
+                dropped.join(", ")
+            ));
         }
         out.push_str(".</div>");
     }
-    // Предупреждения сессии: без них отчёт молчал о событиях, которые
     // приложение и консоль показывали, и пользователь получал два разных
     // рассказа об одном замере.
     if !s.warnings.is_empty() {
@@ -1349,105 +1381,133 @@ fn conditions_section(s: &SessionJson) -> String {
         }
         out.push_str("</ul>");
     }
-    if out.is_empty() { String::new() } else { out }
+    if out.is_empty() {
+        String::new()
+    } else {
+        out
+    }
 }
 
 fn name_of(sch: &crate::result::SchemeJson) -> String {
     sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone())
 }
 
-/// Секция отчёта «Балл по вашим весам» + информирование о досрочной остановке.
-fn score_section(s: &SessionJson) -> String {
-    let weights = crate::score::ScoreWeights {
-        performance: s.score_weights[0],
-        stability: s.score_weights[1],
-        worst_second: s.score_weights[2],
-    };
-    let n = weights.normalized();
-    let scores = crate::score::score_schemes(&s.schemes, &weights);
-    let leader = crate::score::score_leader(&scores);
-    // Схемы без законченных прогонов: балл у них 0 «не потому что схема
-    // плохая, а потому что её не мерили». Помечать их «допущена» значило
-    // показывать пустую полосу как результат.
-    let unmeasured: Vec<&str> = s
-        .schemes
-        .iter()
-        .filter(|x| !is_measured(x))
-        .map(|x| x.scheme_id.as_str())
-        .collect();
-    let mut admitted = Vec::new();
-    let mut bars = String::new();
-    for sc in &scores {
-        let name = sc.name.clone().unwrap_or_else(|| sc.scheme_id.clone());
-        let is_leader = leader.map(|l| l.scheme_id == sc.scheme_id).unwrap_or(false);
-        let badge = if sc.rejected {
-            "<span class=\"badge err\">ЗАБРАКОВАНА</span>".to_string()
-        } else if unmeasured.contains(&sc.scheme_id.as_str()) {
-            "<span class=\"badge\" title=\"ни одного законченного прогона\">НЕ ИЗМЕРЕНА</span>"
-                .to_string()
-        } else if is_leader {
-            "<span class=\"badge ok\">ЛИДЕР</span>".to_string()
-        } else {
-            "<span class=\"badge\">ДОПУЩЕНА</span>".to_string()
-        };
-        if !sc.rejected && !unmeasured.contains(&sc.scheme_id.as_str()) && sc.score.is_finite() {
-            admitted.push(sc.score);
-        }
-        let p = if sc.score.is_finite() && sc.score > 0.0 {
-            sc.score.min(100.0)
-        } else {
-            0.0
-        };
-        let lead_cls = if is_leader { " lead" } else { "" };
-        bars.push_str(&format!(
-            "<div class=\"pbar{lead}\"><span class=\"plab\">{name}</span>\
-             <div class=\"ptrack\"><i style=\"width:{p:.0}%\"></i></div>\
-             <span class=\"pval\">{score:.1}</span>{badge}</div>",
-            lead = lead_cls,
-            name = esc(&name),
-            p = p,
-            score = sc.score,
-            badge = badge,
-        ));
+/// Расклад отчёта: две категории вместо «балла по вашим весам».
+///
+/// Балл со свободными весами конфликтовал с рекомендацией: рядом стояли
+/// «лидер» по баллу и «рекомендована» по статистике, и два разных ответа на
+/// вопрос «какая схема лучше» выглядели как противоречие. Теперь
+/// показываются ровно те величины, по которым выбирается рекомендация:
+/// средняя пропускная способность и худшая секунда вместе со стабильностью.
+fn categories_section(s: &SessionJson) -> String {
+    let measured: Vec<&crate::result::SchemeJson> =
+        s.schemes.iter().filter(|x| is_measured(x)).collect();
+    if measured.is_empty() {
+        return String::new();
     }
-    let close_note = if admitted.len() >= 2 {
-        admitted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        let diff = admitted[0] - admitted[1];
-        if diff < 1.0 {
-            format!(
-                "<div class=\"note\">Баллы лидера и второго места почти неразличимы \
-                 (разница {diff:.1} из 100) — ранжир по баллам нестабилен; оцените перевес и стабильность.",
-                diff = diff
-            )
+
+    // «Самое высокое AVG» — по средней throughput за прогон.
+    let best_avg = measured
+        .iter()
+        .map(|x| x.mean_average_throughput)
+        .fold(f64::MIN, f64::max);
+    let top_avg = measured.iter().copied().reduce(|a, b| {
+        if b.mean_average_throughput > a.mean_average_throughput {
+            b
         } else {
-            String::new()
+            a
         }
-    } else {
-        String::new()
+    });
+
+    // «Самое стабильное» — высокий P1 (худшая секунда) и высокая стабильность.
+    // Порядок именно такой: без высокого P1 отличная стабильность среднего
+    // не спасает от провала на одной секунде.
+    let top_stable = measured.iter().copied().reduce(|a, b| {
+        let ka = (a.median_p1_throughput, a.median_consistency_percent);
+        let kb = (b.median_p1_throughput, b.median_consistency_percent);
+        if kb > ka {
+            b
+        } else {
+            a
+        }
+    });
+
+    // Рекомендация: среди схем с высоким AVG берём самую стабильную.
+    let avg_floor = best_avg * 0.98;
+    let recommended = measured
+        .iter()
+        .copied()
+        .filter(|x| x.mean_average_throughput >= avg_floor)
+        .reduce(|a, b| {
+            let ka = (a.median_p1_throughput, a.median_consistency_percent);
+            let kb = (b.median_p1_throughput, b.median_consistency_percent);
+            if kb > ka {
+                b
+            } else {
+                a
+            }
+        })
+        .or(top_stable);
+
+    let card = |title: &str, hint: &str, sch: Option<&crate::result::SchemeJson>| -> String {
+        let Some(sch) = sch else {
+            return String::new();
+        };
+        format!(
+            "<div class=\"catcard\"><div class=\"cat-title\">{title}</div>\
+             <div class=\"cat-name\">{name}</div>\
+             <div class=\"cat-metrics\">\
+             <div><span>AVG</span><b>{avg:.0}</b> тик/с</div>\
+             <div><span>P1 (худшая секунда)</span><b>{p1:.0}</b> тик/с</div>\
+             <div><span>Стабильность</span><b>{cons:.0}</b> %</div></div>\
+             <div class=\"cat-hint\">{hint}</div></div>",
+            title = esc(title),
+            name = esc(&name_of(sch)),
+            avg = sch.mean_average_throughput,
+            p1 = sch.median_p1_throughput,
+            cons = sch.median_consistency_percent,
+            hint = esc(hint),
+        )
     };
+
+    let mut cards = String::new();
+    cards.push_str(&card(
+        "Самое высокое AVG",
+        "Наивысшая средняя пропускная способность за прогон.",
+        top_avg,
+    ));
+    cards.push_str(&card(
+        "Самое стабильное",
+        "Наивысшая худшая секунда (P1) и наивысшая стабильность.",
+        top_stable,
+    ));
+
+    let rec = match recommended {
+        Some(r) => format!(
+            "<div class=\"note ok\"><b>Рекомендуемая: {}</b> — высокий P1 среди схем \
+             с высоким AVG (не ниже {:.0} % от лучшего) и лучшая стабильность.</div>",
+            esc(&name_of(r)),
+            98.0
+        ),
+        None => String::new(),
+    };
+
     let early_note = s
         .early_stop_reason
         .as_ref()
         .map(|r| {
             format!(
-                "<div class=\"note\"> Досрочная остановка ({rd}/{rp} раундов): {r}</div>",
+                "<div class=\"note\"> Прервана досрочно ({rd}/{rp} раундов): {r}</div>",
                 rd = s.rounds_completed,
                 rp = s.rounds_planned,
                 r = esc(r)
             )
         })
         .unwrap_or_default();
+
     format!(
-        "<h2>Балл по вашим весам</h2>\
-         производительность {wp:.0}% · стабильность {ws:.0}% · худшее окно (P1) \
-         {ww:.0}% (агрегировано по фазам; 100 = лучшее окно схемы)</div>\
-         {bars}{close_note}{early_note}",
-        wp = n[0] * 100.0,
-        ws = n[1] * 100.0,
-        ww = n[2] * 100.0,
-        bars = bars,
-        close_note = close_note,
-        early_note = early_note,
+        "<h2>Категории схем</h2>\
+         <div class=\"cats\">{cards}</div>{rec}{early_note}"
     )
 }
 
@@ -1635,7 +1695,7 @@ fn now_unix_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::{RESULTS_DIR_NAME, save_result_in};
+    use crate::history::{save_result_in, RESULTS_DIR_NAME};
     use crate::result::{IdentityJson, RecommendationJson, SchemeJson};
 
     fn sample_session(id: &str, median: f64) -> SessionJson {
@@ -2034,6 +2094,226 @@ mod tests {
         }
     }
 
+    /// Схема с заданными AVG, P1 и стабильностью — для проверки категорий.
+    fn scheme_with(id: &str, avg: f64, p1: f64, consistency: f64) -> SchemeJson {
+        let mut agg = empty_aggregate(avg);
+        agg.median_p1_throughput = p1;
+        agg.median_consistency_percent = consistency;
+        let mut sch = SchemeJson::from_aggregate(id.to_string(), false, None, &agg, Vec::new());
+        sch.name = Some(format!("План {id}"));
+        sch
+    }
+
+    /// Раздел «Балл по вашим весам» заменён на три категории.
+    ///
+    /// Балл со свободными весами давал два разных ответа на вопрос «какая
+    /// схема лучше»: «лидер» по весам и «рекомендована» по статистике стояли
+    /// рядом и противоречили друг другу. Теперь категории показывают ровно те
+    /// величины, по которым выбирается рекомендация.
+    #[test]
+    fn report_shows_three_categories_without_weighted_score() {
+        let mut s = sample_session("AAA", 500.0);
+        s.schemes = vec![
+            // Самое высокое AVG, но худшая стабильность и худший P1.
+            scheme_with("FAST", 600.0, 100.0, 80.0),
+            // AVG почти такой же (в пределах 2 %), зато лучший P1 и стабильность.
+            scheme_with("STEADY", 590.0, 200.0, 98.0),
+        ];
+        let html = build_session_report(&s);
+        assert!(html.contains("Категории схем"), "нет раздела категорий");
+        assert!(
+            html.contains("Самое высокое AVG"),
+            "нет категории по средней throughput"
+        );
+        assert!(
+            html.contains("Самое стабильное"),
+            "нет категории стабильности"
+        );
+        assert!(
+            html.contains("Рекомендуемая: План STEADY"),
+            "рекомендация не по P1 и стабильности"
+        );
+        assert!(
+            !html.contains("Балл по вашим весам"),
+            "старый раздел с баллом по весам остался в отчёте"
+        );
+        assert!(
+            !html.contains("lead-score") && !html.contains("lead-bar"),
+            "в отчёте остались элементы весового балла"
+        );
+    }
+
+    /// «Самое стабильное» — это P1, а не среднее.
+    ///
+    /// Порядок именно такой: высокая стабильность среднего не спасает от
+    /// провала на одной секунде, поэтому схема с худшим P1 не должна получать
+    /// категорию стабильности, даже если её consistency выше.
+    #[test]
+    fn most_stable_category_prefers_p1_over_consistency() {
+        let mut s = sample_session("AAA", 500.0);
+        s.schemes = vec![
+            scheme_with("MID", 500.0, 150.0, 99.0),
+            scheme_with("P1BEST", 480.0, 220.0, 90.0),
+        ];
+        let html = build_session_report(&s);
+        let section = html
+            .split("Самое стабильное")
+            .nth(1)
+            .expect("нет категории стабильности");
+        // Внутри карточки от подзаголовка до пояснения: там имя схемы.
+        let end = section.find("cat-hint").unwrap_or(section.len());
+        let card = &section[..end];
+        assert!(
+            card.contains("P1BEST"),
+            "категория стабильности отдана схеме с худшим P1"
+        );
+    }
+
+    /// Фоновый список: только имя и нагрузка, без пути.
+    ///
+    /// Путь к исполняемому файлу — длинная строка, которая ломала вёрстку и
+    /// ничего не добавляла к пониманию причины. Плюс раньше ключом был
+    /// `имя + путь`, из-за чего один процесс из разных мест давал две строки.
+    #[test]
+    fn background_table_shows_only_name_and_cpu() {
+        let mut s = sample_session("AAA", 500.0);
+        let mut run = stored_run_with_background("aaa", "svc.exe", 3);
+        // Тот же процесс из другого места — должен слиться с первой строкой.
+        let mut twin = run.clone();
+        twin.background[0].path = r"C:\Users\test\svc.exe".to_string();
+        run.background.push(twin.background[0].clone());
+        s.schemes[0].per_run = vec![run];
+        let html = build_session_report(&s);
+        assert!(html.contains("svc.exe"), "процесс пропал из отчёта");
+        assert!(
+            !html.contains("Program Files"),
+            "в отчёте остался путь к исполняемому файлу"
+        );
+        assert_eq!(
+            html.matches("svc.exe</td>").count(),
+            1,
+            "один процесс из двух путей должен давать одну строку"
+        );
+        let section = html
+            .split("CPU, обычно")
+            .nth(1)
+            .expect("нет колонки с нагрузкой");
+        assert!(
+            !section.contains("<th class=\"num\">Окна</th>"),
+            "в фоновой таблице остался подсчёт окон"
+        );
+    }
+
+    /// Шапка пофазной таблицы не разъезжается и не обрезается.
+    ///
+    /// Два дефекта смотрелись на скриншоте как один. Первый: «Схема» занимала
+    /// одну ячейку в первой строке, а четыре подписи — вторую, поэтому браузер
+    /// разводил их по разным столбцам. Второй: при разном наборе фаз у схем
+    /// тело шире шапки, и таблица вылезала за край страницы.
+    #[test]
+    fn phase_table_header_is_two_level_and_scrollable() {
+        let mut s = sample_session("AAA", 500.0);
+        // У первой схемы четыре фазы, у второй — две: наборы не совпадают.
+        s.schemes = vec![
+            {
+                let mut a = scheme_with("AAA", 500.0, 100.0, 90.0);
+                a.phases = (0..4)
+                    .map(|i| crate::result::PhaseSummaryJson {
+                        name: format!("Фаза {i}"),
+                        median_throughput: 500.0,
+                        p1_throughput: 100.0,
+                        consistency_percent: 90.0,
+                        frequency_drop_percent: if i == 2 { 6.0 } else { 0.0 },
+                        frequency_mhz: if i == 2 { 4400.0 } else { 5200.0 },
+                    })
+                    .collect();
+                a
+            },
+            {
+                let mut b = scheme_with("BBB", 400.0, 90.0, 88.0);
+                b.phases = (0..2)
+                    .map(|i| crate::result::PhaseSummaryJson {
+                        name: format!("Фаза {i}"),
+                        median_throughput: 400.0,
+                        p1_throughput: 90.0,
+                        consistency_percent: 88.0,
+                        frequency_drop_percent: 0.0,
+                        frequency_mhz: 5200.0,
+                    })
+                    .collect();
+                b
+            },
+        ];
+        let html = build_session_report(&s);
+        let section = html
+            .split("Метрики по фазам")
+            .nth(1)
+            .expect("нет раздела фаз");
+        // Обёртка со своей прокруткой: широкая таблица не должна растягивать
+        // страницу и срезаться по краю окна.
+        assert!(
+            section.contains("<div class=\"table-scroll\">"),
+            "нет обёртки с горизонтальной прокруткой"
+        );
+        // «Схема» на две строки, подписи повторены под каждой фазой.
+        let head = section.split("</thead>").next().unwrap_or_default();
+        assert!(
+            head.contains("<th rowspan=\"2\">Схема</th>"),
+            "заголовок «Схема» должен занимать обе строки шапки"
+        );
+        assert_eq!(
+            head.matches("Медиана").count(),
+            4,
+            "подписи метрик должны повторяться под каждой фазой, а не один раз"
+        );
+        // Набор фаз у схем разный, но колонки должны совпадать: недостающие
+        // фазы заполняются прочерком, а не просто исчезают, иначе строка
+        // снова съезжает под чужие заголовки.
+        let b_row = section
+            .split("<td>План BBB</td>")
+            .nth(1)
+            .and_then(|rest| rest.split("</tr>").next())
+            .expect("нет строки схемы BBB");
+        let b_cells = b_row.matches("<td").count();
+        assert_eq!(
+            b_cells, 16,
+            "у схемы с двумя фазами из четырёх должно быть 16 ячеек \
+             (4 группы × 4 метрики), а не {b_cells}"
+        );
+        assert_eq!(
+            b_row.matches("—").count(),
+            8,
+            "две недостающие фазы должны дать по четыре прочерка"
+        );
+        // Пометка падения частоты — в самой таблице, а не только в тексте.
+        assert!(
+            section.contains("↓6%"),
+            "в таблице нет отметки падения частоты"
+        );
+    }
+
+    /// Кнопка «Показать все» обязана переключать состояние.
+    ///
+    /// Раньше обработчик читал `more.checked` у элемента `<button>`, у которого
+    /// такого свойства нет: значение всегда `undefined`, кнопка ничего не
+    /// делала, а схемы после шестидесятой оставались скрыты навсегда.
+    #[test]
+    fn show_all_button_uses_state_not_checked_property() {
+        let mut s = sample_session("AAA", 500.0);
+        s.schemes = (0..120)
+            .map(|i| scheme_with(&format!("S{i}"), 500.0 - f64::from(i), 100.0, 90.0))
+            .collect();
+        let html = build_session_report(&s);
+        assert!(
+            !html.contains("more.checked"),
+            "кнопка снова читает checked у <button>"
+        );
+        assert!(
+            html.contains("showAll = !showAll"),
+            "нет переключателя состояния кнопки"
+        );
+    }
+
     /// Дрейф по опорной схеме: разброс считается по раундам, вердикт при
     /// превышении порога понижается, а при одном замере оценки не выдумывается.
     /// Дрейф: накопленное изменение по тренду, а не размах.
@@ -2076,7 +2356,7 @@ mod tests {
         let mut s = sample_session("AAA", 500.0);
         s.warnings = vec![
             "фон на загруженной машине: до 90 % CPU (пиковое, 95-й перцентиль прогона)".to_string(),
-            "троттлинг частоты наблюдался: AAA (1 фаз)".to_string(),
+            "замечено снижение частоты: AAA (1 фаз)".to_string(),
         ];
         let html = build_session_report(&s);
         assert!(
@@ -2084,8 +2364,15 @@ mod tests {
             "в отчёте нет раздела предупреждений"
         );
         assert!(
-            html.contains("троттлинг частоты наблюдался"),
-            "предупреждение о троттлинге потерялось"
+            html.contains("замечено снижение частоты"),
+            "предупреждение о снижении частоты потерялось"
+        );
+        // Слово «троттлинг» в отчёте не используется: оно означало сравнение с
+        // потолком Windows, а не измеренное падение частоты, и вводило в
+        // заблуждение на машинах с разгоном в BIOS.
+        assert!(
+            !html.to_lowercase().contains("троттлинг"),
+            "в отчёте осталось слово «троттлинг»"
         );
         // Событие с экранируемыми символами не должно ломать разметку.
         s.warnings = vec!["<script>alert(1)</script>".to_string()];
@@ -2096,12 +2383,12 @@ mod tests {
         );
     }
 
-    /// Условия замера печатаются и при одном троттлинге.
+    /// Условия замера печатаются и при одном замеченном снижении частоты.
     ///
-    /// Блок условий выводился только при фоне или снимке питания, и троттлинг
-    /// в отдельной фазе оставался в отчёте незамеченным.
+    /// Блок условий выводился только при фоне или снимке питания, и падение
+    /// частоты в отдельной фазе оставалось в отчёте незамеченным.
     #[test]
-    fn report_shows_throttling_even_without_background_noise() {
+    fn report_shows_frequency_drop_even_without_background_noise() {
         let mut s = sample_session("AAA", 500.0);
         let mut run = stored_run_with_background("aaa", "svc.exe", 3);
         run.background_cpu_p50 = 0.0;
@@ -2121,10 +2408,19 @@ mod tests {
             }),
         }];
         s.schemes[0].per_run = vec![run];
+        // Падение задаётся в сводке фаз, а не во флаге снимка питания.
+        s.schemes[0].phases = vec![crate::result::PhaseSummaryJson {
+            name: "Частичная".to_string(),
+            median_throughput: 500.0,
+            p1_throughput: 100.0,
+            consistency_percent: 90.0,
+            frequency_drop_percent: 6.0,
+            frequency_mhz: 4400.0,
+        }];
         let html = build_session_report(&s);
         assert!(
-            html.contains("троттлинг"),
-            "троттлинг не попал в условия замера"
+            html.contains("замечено снижение частоты"),
+            "снижение частоты не попало в условия замера"
         );
     }
 
@@ -2177,14 +2473,16 @@ mod tests {
                 median_throughput: 500.0 - 10.0 * f64::from(i),
                 p1_throughput: 100.0,
                 consistency_percent: 90.0,
-                throttled: false,
+                frequency_drop_percent: 0.0,
+                frequency_mhz: 5200.0,
             });
             s.schemes[1].phases.push(crate::result::PhaseSummaryJson {
                 name: format!("Фаза {i}"),
                 median_throughput: 400.0 - 10.0 * f64::from(i),
                 p1_throughput: 90.0,
                 consistency_percent: 88.0,
-                throttled: false,
+                frequency_drop_percent: 0.0,
+                frequency_mhz: 5200.0,
             });
         }
         let html = build_session_report(&s);

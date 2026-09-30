@@ -113,24 +113,23 @@ impl PowerSnapshot {
             unavailable: p.unavailable,
         }
     }
-
-    /// Короткое описание для отчёта; `None`, если ограничений не было.
+    /// Заметка о состоянии питания; `None`, если замечаний нет.
+    ///
+    /// Частота сюда не попадает намеренно. Снимок одной фазы ничего не знает о
+    /// том, какой частота была в начале сессии, а сама частота и так видна в
+    /// пофазной таблице вместе со стрелкой падения. Если печатать её здесь,
+    /// в условиях замера появлялась строка на каждый прогон, и настоящие
+    /// замечания — тепловая защита и ACPI-ограничение — в них терялись.
     pub fn note(&self) -> Option<String> {
         if self.unavailable {
             return None;
         }
         let mut parts: Vec<String> = Vec::new();
-        if self.throttled {
-            parts.push(format!(
-                "троттлинг ({}/{} МГц)",
-                self.current_mhz, self.max_mhz
-            ));
-        }
         if self.thermal_throttle {
-            parts.push("термоограничение".to_string());
+            parts.push("тепловая защита".to_string());
         }
         if self.policy_reason != 0 {
-            parts.push(format!("ACPI-причина {}", self.policy_reason));
+            parts.push(format!("ACPI-ограничение {}", self.policy_reason));
         }
         if parts.is_empty() {
             None

@@ -36,7 +36,11 @@ export interface PhaseSummaryJson {
   median_throughput: number;
   p1_throughput: number;
   consistency_percent: number;
-  throttled: boolean;
+  /** Насколько частота в этой фазе просела относительно лучшей частоты
+   *  сессии, %. 0 — снижения не замечено. */
+  frequency_drop_percent: number;
+  /** Медианная частота CPU в этой фазе, МГц; 0 — не сообщалась. */
+  frequency_mhz: number;
 }
 
 /** Оценка дрейфа машины по опорной схеме. */
@@ -76,8 +80,14 @@ export interface SettingsDto {
   sidebar_collapsed: boolean;
   favorite_schemes: string[];
   excluded_schemes: string[];
+  // Веса убраны из интерфейса вместе с весовым баллом: категории в отчёте
+  // считаются по throughput, P1 и стабильности. Поля остаются в DTO, чтобы
+  // не ломать чтение сохранённых настроек.
+  /** @deprecated весовой балл больше не показывается. */
   score_performance: number;
+  /** @deprecated весовой балл больше не показывается. */
   score_stability: number;
+  /** @deprecated весовой балл больше не показывается. */
   score_worst_second: number;
   max_sessions: number;
   /**

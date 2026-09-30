@@ -200,6 +200,31 @@ impl SchemeJson {
         aggregate: &AggregateResult,
         per_run: Vec<StoredRun>,
     ) -> Self {
+        Self::from_aggregate_with_base(
+            scheme_id,
+            rejected,
+            rejection_reason,
+            aggregate,
+            per_run,
+            0.0,
+        )
+    }
+
+    /// То же, но с явной базой для отсчёта снижения частоты.
+    ///
+    /// База обязана быть общей на всю сессию. Считать её отдельно по схеме
+    /// нельзя: у схемы, у которой просели все фазы, собственная база тоже
+    /// просела, и падение показывалось как нулевое — ровно тот случай, ради
+    /// которого флаг и нужен. Ноль означает «базы нет», тогда берётся лучшая
+    /// частота по прогонам самой схемы.
+    pub fn from_aggregate_with_base(
+        scheme_id: String,
+        rejected: bool,
+        rejection_reason: Option<String>,
+        aggregate: &AggregateResult,
+        per_run: Vec<StoredRun>,
+        frequency_base_mhz: f64,
+    ) -> Self {
         let a = aggregate;
         Self {
             scheme_id,
@@ -226,7 +251,7 @@ impl SchemeJson {
             median_background_purity: a.median_background_purity.map(finite_or_zero),
             run_duration_ms: a.run_duration_ms,
             started_at_min_ns: a.started_at_min_ns,
-            phases: phase_summaries(&per_run),
+            phases: phase_summaries(&per_run, frequency_base_mhz),
             per_run,
         }
     }
@@ -247,8 +272,66 @@ fn phase_label_for(index: u8) -> &'static str {
     }
 }
 
+/// Порог, с которого падение частоты считается замеченным, % от лучшей
+/// частоты, наблюдавшейся в этой же сессии.
+///
+/// Число выбрано так, чтобы ловить именно «просел и не вернулся», а не
+/// обычный разброс счётчика частоты: на десктопах он прыгает на единицы
+/// процентов сам по себе, и более строгий порог молчал бы на реальном
+/// перегреве.
+pub const FREQUENCY_DROP_ALERT_PERCENT: f64 = 5.0;
+
+/// Медиана `current_mhz` по фазе, МГц; 0, если частоту не сообщали.
+fn median_current_mhz(group: &[&PhaseStats]) -> f64 {
+    let mut v: Vec<f64> = group
+        .iter()
+        .filter_map(|p| p.power.as_ref())
+        .map(|p| p.current_mhz as f64)
+        .filter(|x| *x > 0.0)
+        .collect();
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+/// Самая высокая частота среди переданных прогонов — та, которую процессор
+/// держал в нормальных условиях.
+///
+/// Именно она, а не `MaxMhz` из Windows, служит точкой отсчёта. `MaxMhz` —
+/// текущий разрешённый потолок, в который одинаково входят штатный буст и
+/// ручная настройка в BIOS, поэтому падение от него почти всегда означает
+/// «у нас не разгон», а не «частоту снизили».
+fn frequency_base<'a>(runs: impl Iterator<Item = &'a StoredRun>) -> f64 {
+    runs.flat_map(|r| r.phases.iter())
+        .filter_map(|p| p.power.as_ref())
+        .map(|p| p.current_mhz as f64)
+        .filter(|x| *x > 0.0)
+        .fold(0.0f64, f64::max)
+}
+
+/// База по прогонам одной схемы — запасной вариант, когда база сессии
+/// неизвестна.
+fn session_frequency_base(per_run: &[StoredRun]) -> f64 {
+    frequency_base(per_run.iter())
+}
+
 /// Медианы по фазам из прогонов схемы.
-fn phase_summaries(per_run: &[StoredRun]) -> Vec<PhaseSummaryJson> {
+///
+/// `session_base_mhz` — общая база сессии; ноль означает «считать по своим
+/// прогонам».
+fn phase_summaries(per_run: &[StoredRun], session_base_mhz: f64) -> Vec<PhaseSummaryJson> {
+    let base = if session_base_mhz > 0.0 {
+        session_base_mhz
+    } else {
+        session_frequency_base(per_run)
+    };
     let mut out: Vec<PhaseSummaryJson> = Vec::new();
     for idx in 0..=u8::MAX {
         let group: Vec<&PhaseStats> = per_run
@@ -285,9 +368,18 @@ fn phase_summaries(per_run: &[StoredRun]) -> Vec<PhaseSummaryJson> {
             median_throughput: med(|p| p.stats.average_throughput),
             p1_throughput: med(|p| p.stats.p1_throughput),
             consistency_percent: med(|p| p.stats.consistency_percent),
-            throttled: group
-                .iter()
-                .any(|p| p.power.map(|x| x.throttled || x.thermal_throttle).unwrap_or(false)),
+            // Насколько фаза просела относительно лучшей частоты сессии.
+            frequency_drop_percent: if base > 0.0 {
+                let current = median_current_mhz(&group);
+                if current > 0.0 {
+                    ((base - current) / base * 100.0).max(0.0)
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            },
+            frequency_mhz: median_current_mhz(&group),
         });
     }
     out
@@ -304,13 +396,34 @@ pub struct PhaseSummaryJson {
     pub p1_throughput: f64,
     /// Медиана стабильности фазы, %.
     pub consistency_percent: f64,
-    /// Наблюдался ли троттлинг частоты в этой фазе.
-    pub throttled: bool,
+    /// Насколько частота в этой фазе просела относительно лучшей частоты
+    /// сессии, %. 0 — снижения не замечено.
+    ///
+    /// Раньше здесь был булев `throttled`, который означал «частота ниже
+    /// потолка, который сообщает Windows». Формулировка вводила в заблуждение:
+    /// на машине с разгоном в BIOS почти каждая фаза попадала в «троттлинг»,
+    /// хотя никто ничего не ограничивал.
+    #[serde(default)]
+    pub frequency_drop_percent: f64,
+    /// Медианная частота CPU в этой фазе, МГц; 0, если не сообщалась.
+    #[serde(default)]
+    pub frequency_mhz: f64,
+}
+
+impl PhaseSummaryJson {
+    /// Замечено ли снижение частоты в этой фазе.
+    pub fn frequency_dropped(&self) -> bool {
+        self.frequency_drop_percent >= FREQUENCY_DROP_ALERT_PERCENT
+    }
 }
 
 /// `NaN`/`inf` → `0.0`; конечные значения проходят без изменений.
 fn finite_or_zero(v: f64) -> f64 {
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
 }
 
 /// Рекомендация в результате.
@@ -529,10 +642,25 @@ pub fn build_session_json(
     score_weights: [f64; 3],
 ) -> SessionJson {
     let _ = &aggregated;
+    // База отсчёта — одна на всю сессию: лучшая частота, которую процессор
+    // держал в каких-либо фазах. Считать её отдельно по схеме нельзя: у
+    // схемы, у которой просели все фазы, падение не было бы видно.
+    let session_base = frequency_base(
+        recommendation_schemes
+            .iter()
+            .flat_map(|(_, _, _, _, per_run)| per_run.iter()),
+    );
     let schemes: Vec<SchemeJson> = recommendation_schemes
         .iter()
         .map(|(id, rejected, reason, agg, per_run)| {
-            SchemeJson::from_aggregate(id.clone(), *rejected, reason.clone(), agg, per_run.clone())
+            SchemeJson::from_aggregate_with_base(
+                id.clone(),
+                *rejected,
+                reason.clone(),
+                agg,
+                per_run.clone(),
+                session_base,
+            )
         })
         .collect();
     let rounds_planned = checkpoint.plan.repetitions;
@@ -555,30 +683,26 @@ pub fn build_session_json(
     };
     // Дрейф по опорной схеме: её прогоны уже лежат в чекпоинте, отдельного
     // времени на эталон не тратится.
-    let reference = checkpoint
-        .plan
-        .reference_scheme_id
-        .as_ref()
-        .and_then(|id| {
-            let mut per_round: Vec<(u32, f64)> = checkpoint
-                .runs
-                .iter()
-                .filter(|r| r.scheme_id.eq_ignore_ascii_case(id))
-                .map(|r| (r.round, r.combined.average_throughput))
-                .collect();
-            per_round.sort_by_key(|(r, _)| *r);
-            let name = checkpoint
-                .runs
-                .iter()
-                .find(|r| r.scheme_id.eq_ignore_ascii_case(id))
-                .and_then(|r| r.scheme_name.clone());
-            ReferenceSummary::build(
-                id,
-                name,
-                per_round.into_iter().map(|(_, v)| v).collect(),
-                REFERENCE_SPAN_LIMIT_PERCENT,
-            )
-        });
+    let reference = checkpoint.plan.reference_scheme_id.as_ref().and_then(|id| {
+        let mut per_round: Vec<(u32, f64)> = checkpoint
+            .runs
+            .iter()
+            .filter(|r| r.scheme_id.eq_ignore_ascii_case(id))
+            .map(|r| (r.round, r.combined.average_throughput))
+            .collect();
+        per_round.sort_by_key(|(r, _)| *r);
+        let name = checkpoint
+            .runs
+            .iter()
+            .find(|r| r.scheme_id.eq_ignore_ascii_case(id))
+            .and_then(|r| r.scheme_name.clone());
+        ReferenceSummary::build(
+            id,
+            name,
+            per_round.into_iter().map(|(_, v)| v).collect(),
+            REFERENCE_SPAN_LIMIT_PERCENT,
+        )
+    });
     let screening = aggregated
         .iter()
         .filter(|(_, a)| a.runs > 0)
@@ -628,45 +752,34 @@ pub fn build_session_json(
             bg_p95
         ));
     }
-    // Троттлинг по фазам: если система ограничивала частоту, это нужно сказать
-    // прямо — иначе «медленную» схему можно принять за неудачную.
-    let throttled: Vec<String> = schemes
+    // Замечено снижение частоты: в отличие от сравнения с потолком Windows,
+    // здесь отсчёт идёт от лучшей частоты самой сессии, поэтому на машине с
+    // разгоном в BIOS пустых срабатываний не будет. Снижение частоты —
+    // причина занизить результат, а не вина схемы, поэтому оно попадает в
+    // предупреждения и понижает уровень до <Предварительно>.
+    let dropped: Vec<String> = schemes
         .iter()
         .filter_map(|s| {
-            let hit = s
-                .per_run
-                .iter()
-                .flat_map(|r| r.phases.iter())
-                .filter(|p| p.power.map(|x| x.throttled || x.thermal_throttle).unwrap_or(false))
-                .count();
-            (hit > 0).then(|| format!("{} ({} фаз)", s.name.clone().unwrap_or(s.scheme_id.clone()), hit))
+            let hit = s.phases.iter().filter(|p| p.frequency_dropped()).count();
+            (hit > 0).then(|| {
+                format!(
+                    "{} ({} фаз)",
+                    s.name.clone().unwrap_or(s.scheme_id.clone()),
+                    hit
+                )
+            })
         })
         .collect();
-    if !throttled.is_empty() {
-        warnings.push(format!(
-            "троттлинг частоты наблюдался: {}",
-            throttled.join(", ")
-        ));
+    if !dropped.is_empty() {
+        warnings.push(format!("замечено снижение частоты: {}", dropped.join(", ")));
     }
-    // Условия среды, обесценивающие уверенность, должны понижать уровень, а
-    // не только дописываться в предупреждения. Иначе на загруженной и
-    // троттлящей машине вердикт «Подтверждено» выглядит так же, как на
-    // спокойной: пользователь не может отличить одно от другого.
-    if !throttled.is_empty()
-        && matches!(
-            level,
-            EvidenceLevel::Confirmed | EvidenceLevel::Probable
-        )
-    {
-        // Троттлинг — это ограничение самой железа: под ним разница между
-        // схемами может отражать не схему, а то, где сработало ограничение.
+    if !dropped.is_empty() && matches!(level, EvidenceLevel::Confirmed | EvidenceLevel::Probable) {
+        // Снижение частоты — причина занизить оценку: часть фазы измерялась
+        // на пониженной частоте, и это не заслуга схемы питания.
         level = EvidenceLevel::Preliminary;
     }
     if bg_p95 >= BLOCKING_BACKGROUND_P95_PERCENT
-        && matches!(
-            level,
-            EvidenceLevel::Confirmed | EvidenceLevel::Probable
-        )
+        && matches!(level, EvidenceLevel::Confirmed | EvidenceLevel::Probable)
     {
         // Два занятых ядра фона — это уже не «фон», а соревнование за ресурс.
         // Порог в 2 × BACKGROUND_BLOCKING_PERCENT: тот же смысл, что и у
@@ -813,11 +926,102 @@ mod tests {
             background_cpu_p95: 0.0,
             background_sample_seconds: 0,
         };
-        let summaries = phase_summaries(&[mk(900.0), mk(1100.0)]);
+        let summaries = phase_summaries(&[mk(900.0), mk(1100.0)], 0.0);
         assert_eq!(summaries.len(), 1);
         assert_eq!(
             summaries[0].median_throughput, 1000.0,
             "медиана по двум прогонам должна быть средним двух значений"
+        );
+    }
+
+    /// Снижение частоты считается от общей базы сессии.
+    ///
+    /// Проверяем ровно тот случай, который ломался при отсчёте внутри схемы:
+    /// здоровая схема держит 5200 МГц, а у другой схемы частота просела до
+    /// 4400 МГц. Считая базу по своей схеме, вторая схема получила бы 0 % и
+    /// потеряла единственный признак, что её замер испорчен.
+    #[test]
+    fn frequency_drop_uses_session_base_not_scheme_base() {
+        fn run_with_mhz(mhz: u32) -> StoredRun {
+            StoredRun {
+                key: "0:g".to_string(),
+                round: 0,
+                scheme_id: "g".into(),
+                scheme_name: None,
+                started_at_ns: 0,
+                duration_ms: 1,
+                ticks: 1,
+                supercycles: 0,
+                first_tick_checksums: [1; crate::config::PHASES_PER_RUN as usize],
+                run_checksums: [1; crate::config::PHASES_PER_RUN as usize],
+                phases: vec![PhaseStats {
+                    phase_index: 0,
+                    stats: run_stats_of(&[]),
+                    power: Some(crate::checkpoint::PowerSnapshot {
+                        max_mhz: mhz,
+                        current_mhz: mhz,
+                        throttled: false,
+                        thermal_throttle: false,
+                        policy_reason: 0,
+                        on_ac: true,
+                        unavailable: false,
+                    }),
+                }],
+                combined: run_stats_of(&[]),
+                cross_phase_consistency: 0.0,
+                burst_retention_percent: 0.0,
+                background: Vec::new(),
+                spike_windows: 0,
+                power: None,
+                background_cpu_p50: 0.0,
+                background_cpu_p95: 0.0,
+                background_sample_seconds: 0,
+            }
+        }
+        let slow = run_with_mhz(4400);
+        let with_session_base = phase_summaries(std::slice::from_ref(&slow), 5200.0);
+        let phase = with_session_base.first().expect("фаза не собрана");
+        assert!(
+            (phase.frequency_drop_percent - 15.38).abs() < 0.1,
+            "падение посчитано как {} %, а не 15.38 %",
+            phase.frequency_drop_percent
+        );
+        assert!(
+            phase.frequency_dropped(),
+            "падение в 15 % должно попадать под флаг"
+        );
+        assert_eq!(phase.frequency_mhz, 4400.0, "в таблице нужна сама частота");
+
+        // Считаем базу по всем прогонам сессии — она берётся у здоровой фазы.
+        let session_base = frequency_base([&slow, &run_with_mhz(5200)].into_iter());
+        assert_eq!(session_base, 5200.0, "база сессии — лучшая частота");
+
+        // Без базы сессии (0) отсчёт идёт по своей схеме: единственный замер
+        // сам и есть база, и падение не должно выдумываться.
+        let own_base = phase_summaries(&[slow], 0.0);
+        assert_eq!(
+            own_base.first().expect("фаза").frequency_drop_percent,
+            0.0,
+            "без базы сессии падение не должно выдумываться"
+        );
+    }
+
+    /// Порог 5 %: ниже него падение не показывается.
+    #[test]
+    fn frequency_drop_threshold_is_five_percent() {
+        let mut p = PhaseSummaryJson {
+            name: "Лёгкая".into(),
+            median_throughput: 500.0,
+            p1_throughput: 100.0,
+            consistency_percent: 90.0,
+            frequency_drop_percent: 4.9,
+            frequency_mhz: 5000.0,
+        };
+        assert!(!p.frequency_dropped(), "4.9 % — ниже порога");
+        p.frequency_drop_percent = 5.0;
+        assert!(
+            p.frequency_dropped(),
+            "5.0 % — ровно порог, флаг должен стоять"
         );
     }
 
@@ -872,7 +1076,8 @@ mod tests {
             run_duration_ms: 0,
             started_at_min_ns: 0,
         };
-        let sch = SchemeJson::from_aggregate("g".into(), true, Some("брак".into()), &agg, Vec::new());
+        let sch =
+            SchemeJson::from_aggregate("g".into(), true, Some("брак".into()), &agg, Vec::new());
         // Метрики — числа: `null` означал бы, что файл не прочитается обратно.
         // `name` здесь `Option<String>`, его `null` допустим.
         let text = serde_json::to_string(&sch).expect("сериализация");

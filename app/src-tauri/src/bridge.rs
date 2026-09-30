@@ -205,6 +205,10 @@ pub struct SettingsDto {
     pub max_sessions: u32,
     pub favorite_schemes: Vec<String>,
     pub excluded_schemes: Vec<String>,
+    /// Своими словами о настройках CPU и BIOS: разгон, андерволт, отключённые
+    /// функции. Попадает в отчёт для поддержки, потому что иначе эту
+    /// информацию взять неоткуда: Windows не отличает буст от разгона.
+    pub cpu_notes: String,
 }
 
 fn settings_to_dto(s: &AppSettings) -> SettingsDto {
@@ -220,6 +224,7 @@ fn settings_to_dto(s: &AppSettings) -> SettingsDto {
         favorite_schemes: s.favorite_schemes.clone(),
         excluded_schemes: s.excluded_schemes.clone(),
         background_threshold_percent: s.benchmark.background_threshold_percent,
+        cpu_notes: s.cpu_notes.clone(),
     }
 }
 
@@ -264,6 +269,9 @@ pub fn set_settings(settings: SettingsDto) -> Result<(), String> {
         cur.retention.max_sessions = s.max_sessions;
         cur.favorite_schemes = std::mem::take(&mut s.favorite_schemes);
         cur.excluded_schemes = std::mem::take(&mut s.excluded_schemes);
+        // Заметка о железе: обрезаем хвост, потому что она попадает в отчёт
+        // для поддержки, а длинный текст там никому не нужен.
+        cur.cpu_notes = std::mem::take(&mut s.cpu_notes).trim().to_string();
     })
     .map_err(|e| format!("не удалось сохранить настройки: {e}"))
 }

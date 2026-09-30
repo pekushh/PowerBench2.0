@@ -318,6 +318,30 @@ export default function SettingsPage({ onAppearance }: { onAppearance: (s: Setti
           </div>
         </div>
       </Glass>
+
+      <div className="section-head">
+        <h2 className="section-title">Железо и BIOS</h2>
+      </div>
+      <Glass className="inset">
+        <div className="field">
+          <span className="field-label">Разгон, андерволт, отключённые функции</span>
+          <textarea
+            className="cpu-notes"
+            value={st.cpu_notes}
+            rows={3}
+            maxLength={500}
+            placeholder="например: PBO +200 МГц, андерволт −30, отключён SMT, 2×16 ГБ DDR5-6000"
+            onChange={(e) => patch({ cpu_notes: e.target.value })}
+          />
+          <div className="hint">
+            Попадёт в отчёт для поддержки. Заполнять нужно только если что-то
+            меняли: программа не может отличить разгон от штатного буста —
+            Windows показывает одну и ту же цифру в обоих случаях. На разгоне
+            результат меняется сильнее, чем от схемы питания, поэтому без этой
+            заметки сравнивать замеры нельзя.
+          </div>
+        </div>
+      </Glass>
     </div>
   );
 }

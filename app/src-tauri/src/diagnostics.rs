@@ -198,8 +198,8 @@ pub fn default_file_name() -> String {
 fn render(s: &Snapshot) -> (String, usize) {
     let mut findings = Findings::default();
 
-    let env = collect_environment(&mut findings);
     let paths = DataPaths::real();
+    let env = collect_environment(&paths, &mut findings);
     let data = collect_data(&paths, &mut findings);
     let schemes = collect_schemes(&mut findings);
     let last_session = collect_last_session(&paths, &mut findings);
@@ -445,7 +445,7 @@ struct EnvInfo {
     facts: Vec<(String, String)>,
 }
 
-fn collect_environment(findings: &mut Findings) -> EnvInfo {
+fn collect_environment(paths: &DataPaths, findings: &mut Findings) -> EnvInfo {
     let mut facts: Vec<(String, String)> = Vec::new();
     facts.push(("Сборка Windows".into(), power::os_build()));
     let cpus = std::thread::available_parallelism()
@@ -511,11 +511,32 @@ fn collect_environment(findings: &mut Findings) -> EnvInfo {
         } else {
             // Важная оговорка, без которой строка вводит в заблуждение:
             // «нет» означает «система не держит процессор ниже разрешённого
-            // потолка». Потолок этот — с учётом буста, а базовая частота здесь
-            // не измеряется, поэтому застрять на ней эта проверка не может.
+            // потолка». Потолок этот — с учётом буста и любых ручных настроек
+            // в BIOS, а базовая частота здесь не измеряется, поэтому застрять
+            // на ней эта проверка не может.
             "нет (ниже разрешённого потолка не держит)".to_string()
         },
     ));
+    // Потолок включает и буст, и разгон, и поднятый в BIOS множитель: Windows
+    // их не разделяет. Поэтому рядом обязана стоять заметка пользователя.
+    let settings = AppSettings::load_from(&paths.settings());
+    let notes = settings.cpu_notes.trim();
+    facts.push((
+        "Настройки CPU (из настроек)".into(),
+        if notes.is_empty() {
+            "не указаны".to_string()
+        } else {
+            notes.to_string()
+        },
+    ));
+    if notes.is_empty() {
+        findings.notice(
+            "пользователь не описал настройки CPU и BIOS. Если там был разгон, \
+             андерволт или отключённые функции, скажите об этом в обращении: \
+             программа не может выяснить это сама, а на разгоне результаты \
+             меняются сильнее, чем от схемы питания",
+        );
+    }
     if ps.throttled || ps.thermal_throttle {
         findings.problem(
             "Windows удерживала частоту CPU ниже разрешённого потолка во время сбора \
@@ -535,7 +556,7 @@ fn collect_environment(findings: &mut Findings) -> EnvInfo {
             id
         }
     }));
-    let data_dir = checkpoint::data_dir();
+    let data_dir = paths.dir.clone();
     facts.push(("Каталог данных".into(), data_dir.display().to_string()));
     let free = disk::free_space_bytes(&data_dir);
     let total = disk::volume_bytes(&data_dir);
@@ -1563,6 +1584,80 @@ mod tests {
             last.is_none(),
             "на пустом каталоге последней сессии быть не может"
         );
+    }
+
+    /// Заметка о разгоне обязана попасть в отчёт: разгон невозможно выяснить
+    /// программно, и без слов пользователя поддержка читает 5201 МГц как
+    /// обычный буст, а потом удивляется, почему цифры не сходятся.
+    #[test]
+    fn cpu_notes_reach_the_report() {
+        let dir = std::env::temp_dir().join(format!("pb-diag-oc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = DataPaths { dir: dir.clone() };
+
+        let settings = AppSettings {
+            cpu_notes: "PBO +200 МГц, андерволт -30".to_string(),
+            ..AppSettings::default()
+        };
+        std::fs::write(
+            paths.settings(),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let mut findings = Findings::default();
+        let env = collect_environment(&paths, &mut findings);
+        let line = env
+            .facts
+            .iter()
+            .find(|(k, _)| k.starts_with("Настройки CPU"))
+            .map(|(_, v)| v.clone())
+            .expect("в отчёте нет строки о настройках CPU");
+        assert!(
+            line.contains("PBO"),
+            "заметка о разгоне не попала в отчёт: {line}"
+        );
+        assert!(
+            !findings
+                .items
+                .iter()
+                .any(|(_, t)| t.contains("не описал настройки CPU")),
+            "при заполненной заметке находка «не описал» появляться не должна"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Без заметки отчёт должен об этом сказать, а не молчать: иначе
+    /// отсутствие сведений выглядит как «разгона нет».
+    #[test]
+    fn missing_cpu_notes_is_called_out() {
+        let dir = std::env::temp_dir().join(format!("pb-diag-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = DataPaths { dir: dir.clone() };
+        std::fs::write(paths.settings(), "{}").unwrap();
+
+        let mut findings = Findings::default();
+        let env = collect_environment(&paths, &mut findings);
+        let line = env
+            .facts
+            .iter()
+            .find(|(k, _)| k.starts_with("Настройки CPU"))
+            .map(|(_, v)| v.clone())
+            .expect("нет строки о настройках CPU");
+        assert_eq!(
+            line, "не указаны",
+            "пустую заметку нельзя выдавать за «разгона нет»"
+        );
+        assert!(
+            findings
+                .items
+                .iter()
+                .any(|(_, t)| t.contains("не описал настройки CPU")),
+            "без заметки отчёт обязан попросить её заполнить"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Подсказки выдаются только под найденные проблемы, а не всем

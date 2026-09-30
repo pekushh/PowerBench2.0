@@ -80,6 +80,13 @@ export interface SettingsDto {
   score_stability: number;
   score_worst_second: number;
   max_sessions: number;
+  /**
+   * Заметка о настройках CPU и BIOS (разгон, андерволт, отключённые
+   * функции). Попадает в отчёт для поддержки: программа не может выяснить
+   * это сама, потому что Windows одинаково показывает и штатный буст, и
+   * разгон одной и той же цифрой.
+   */
+  cpu_notes: string;
 }
 
 export interface CheckpointDto {

@@ -109,6 +109,20 @@ pub struct AppSettings {
     pub favorite_schemes: Vec<String>,
     /// GUID схем, исключённых из теста.
     pub excluded_schemes: Vec<String>,
+    /// Своими словами о настройках железа и BIOS: разгон, андерволт,
+    /// отключённые функции, планки памяти, второй GPU.
+    ///
+    /// Поле существует потому, что разгон **невозможно определить
+    /// программно**. Windows отдаёт только текущий разрешённый потолок
+    /// частоты, а в него одинаково входят и штатный буст, и ручная настройка
+    /// в BIOS. Номинальная частота из реестра тоже не помогает: любой
+    /// современный процессор превышает её на бусту. Поэтому единственный
+    /// источник сведений — сам пользователь, и отчёт для поддержки обязан
+    /// его показывать: без этого невозможно понять, почему две сессии на
+    /// одной и той же машине дали разный результат.
+    ///
+    /// Пустая строка означает «разгона нет, стоковая конфигурация».
+    pub cpu_notes: String,
 }
 
 /// Путь к `appsettings.json` в каталоге данных.
@@ -205,6 +219,24 @@ mod tests {
         assert!(s.appearance.sidebar_collapsed);
         assert!(s.favorite_schemes.is_empty());
         assert!(s.excluded_schemes.is_empty());
+        // Пустая строка означает «разгона нет»: иначе в отчёте для поддержки
+        // появилось бы утверждение, которого никто не подтверждал.
+        assert!(s.cpu_notes.is_empty());
+    }
+
+    /// Заметка о железе обязана переживать перезапуск: это единственный
+    /// носитель сведений о разгоне, который программа не может выяснить сама.
+    #[test]
+    fn cpu_notes_survive_a_restart() {
+        let dir = tmp_dir("notes");
+        let path = dir.join(APPSETTINGS_FILE_NAME);
+        let s = AppSettings {
+            cpu_notes: "PBO +200 МГц, андерволт -30 на CPU".to_string(),
+            ..AppSettings::default()
+        };
+        s.save_to(&path).unwrap();
+        assert_eq!(AppSettings::load_from(&path).cpu_notes, s.cpu_notes);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -218,6 +250,7 @@ mod tests {
         s.appearance.reduce_motion = true;
         s.favorite_schemes.push("guid-1".to_string());
         s.excluded_schemes.push("guid-2".to_string());
+        s.cpu_notes = "разгон памяти".to_string();
         s.save_to(&path).unwrap();
         let loaded = AppSettings::load_from(&path);
         assert_eq!(loaded, s);
@@ -272,7 +305,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            AppSettings::load_from(&path).benchmark.background_threshold_percent,
+            AppSettings::load_from(&path)
+                .benchmark
+                .background_threshold_percent,
             9.0
         );
         assert!(AppSettings::load_from(&path).appearance.sidebar_collapsed);

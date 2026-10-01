@@ -651,6 +651,11 @@ pub fn build_session_json(
     warnings: Vec<String>,
     cancelled: bool,
     score_weights: [f64; 3],
+    // Настоящая причина досрочной остановки, если она была. Раньше поле
+    // заполнялось синтетически («сессия завершена досрочно»), то есть причина
+    // была всегда одинаковой и не отвечала ни на что: непонятно, сессию
+    // остановил пользователь или накопленный перевес оказался значимым.
+    early_stop_reason: Option<String>,
 ) -> SessionJson {
     let _ = &aggregated;
     // База отсчёта — одна на всю сессию: лучшая частота, которую процессор
@@ -683,15 +688,17 @@ pub fn build_session_json(
         rounds.len() as u32
     };
     let rounds_completed = rounds_completed.min(rounds_planned);
-    let early_stop_reason = if cancelled || rounds_completed < rounds_planned {
-        Some(if cancelled {
-            "сессия остановлена вручную".to_string()
+    // Причина досрочной остановки: сначала настоящая (из цикла раундов), и
+    // только если её нет — синтетическая, отличающая пользователя от машины.
+    let early_stop_reason = early_stop_reason.or_else(|| {
+        if cancelled {
+            Some("сессия остановлена вручную".to_string())
+        } else if rounds_completed < rounds_planned {
+            Some("сессия завершена досрочно".to_string())
         } else {
-            "сессия завершена досрочно".to_string()
-        })
-    } else {
-        None
-    };
+            None
+        }
+    });
     // Дрейф по опорной схеме: её прогоны уже лежат в чекпоинте, отдельного
     // времени на эталон не тратится.
     let reference = checkpoint.plan.reference_scheme_id.as_ref().and_then(|id| {

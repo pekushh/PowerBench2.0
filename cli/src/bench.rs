@@ -440,6 +440,7 @@ fn finish_session(
         warnings,
         outcome.cancelled,
         powerbench_orchestrator::result::default_score_weights(),
+        outcome.early_stop_reason,
     );
     if let Err(e) = crate::write_json(&json, out) {
         eprintln!("PowerBench CLI: {e}");

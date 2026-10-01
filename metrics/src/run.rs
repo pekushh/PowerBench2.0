@@ -100,43 +100,147 @@ pub fn burst_retention_percent(average_heavy: f64, average_light: f64) -> f64 {
     }
 }
 
+/// Доля сэмплов, отбрасываемых с каждого края при расчёте устойчивых
+/// статистик.
+///
+/// Замер идёт на Windows, и в поток тика периодически влетают DPC от сетевого
+/// стека, прерывания таймера, вытеснение ядрами Hyper-V и редкие страничные
+/// ошибки. Каждое такое событие — один сэмпл, в сотни-тысячи раз длиннее
+/// остальных. В среднем они почти не весят, но в σ весят очень много: одно
+/// событие, растянувшее σ втрое, съедает 20-30 процентных пунктов стабильности,
+/// и в отчёте это выглядит как «схема нестабильна», хотя схема тут ни при чём.
+pub const TRIM_FRACTION: f64 = 0.025;
+
+/// Минимальное число сэмплов, при котором усечение вообще имеет смысл.
+///
+/// При 2,5 % с каждого края отбрасывается `floor(n/40)` сэмплов. На сотне
+/// сэмплов это по два — уже шум выборки; на тысяче — по 25, то есть усечение
+/// отделяет реальные выбросы от обычного разброса.
+pub const MIN_TRIM_SAMPLES: usize = 400;
+
+/// Максимальная доля усечения с каждого края.
+///
+/// При 25 % с каждого края остаётся половина выборки. Больше — это уже не
+/// устойчивая оценка, а произвольно выбранный подотрезок: например, 40 % с
+/// каждого края оставили бы middle 20 %, где среднее ничего не говорит о
+/// хвостах распределения.
+pub const MAX_TRIM_FRACTION: f64 = 0.25;
+
+/// Отбросить выбросы с обоих краёв: `floor(n * fraction)` худших и столько же
+/// лучших.
+///
+/// Усечение по **временам тиков**, а не по throughput: среднее считается как
+/// `Σwork·1000 / ΣactiveMs`, и чтобы убрать одно плохое событие, надо убрать
+/// его время работы из знаменателя. Отбрасывание сэмпла по throughput
+/// испортило бы соответствие между числом работы и суммой времени.
+pub fn trim_outliers(times_ms: &[f64], fraction: f64) -> Vec<f64> {
+    let mut sorted = times_ms.to_vec();
+    if sorted.len() < MIN_TRIM_SAMPLES || !(0.0..=MAX_TRIM_FRACTION).contains(&fraction) {
+        return sorted;
+    }
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let k = (sorted.len() as f64 * fraction).floor() as usize;
+    // Усечение не должно съесть больше половины выборки — иначе это уже не
+    // устойчивая оценка, а произвольно выбранный подотрезок.
+    if k == 0 || 2 * k >= sorted.len() {
+        return sorted;
+    }
+    sorted[k..sorted.len() - k].to_vec()
+}
+
+/// Окно для расчёта P0.1: 100 мс.
+///
+/// Окно намеренно меньше секунды: P0.1 должен ловить КРАТКОВРЕМЕННУЮ остановку
+/// (микрофриз, DPC-шторм, вытеснение), а секундное окно её размазывает.
+/// Худшая секунда (`worst_second_throughput`) остаётся крупным окном и отвечает
+/// за устойчивое падение — это две разные вещи, и смешивать их нельзя.
+pub const P01_WINDOW_MS: u64 = 100;
+
+/// Окно для расчёта худшей секунды.
+pub const WORST_SECOND_WINDOW_MS: u64 = 1000;
+
+/// Throughput по скользящим окнам кумулятивного времени.
+///
+/// Окна идут по НАКОПЛЕННОМУ времени, а не по длительности тика: иначе все
+/// тики короче окна попали бы в нулевое окно. Окна с малым числом сэмплов
+/// отбрасываются — иначе последнее неполное окно дало бы шумную оценку из
+/// двух точек, и «худшая секунда» зависела бы от того, где закончилась фаза.
+pub fn windowed_throughput(times_ms: &[f64], window_ms: u64, min_samples: usize) -> Vec<f64> {
+    let times = filter_valid_times(times_ms);
+    if times.is_empty() || window_ms == 0 {
+        return Vec::new();
+    }
+    let window = window_ms as f64;
+    // Ключ окна — миллисекунды кумулятивного времени, делённые на окно.
+    let mut buckets: std::collections::BTreeMap<u64, (u64, f64)> =
+        std::collections::BTreeMap::new();
+    let mut elapsed_ms = 0.0f64;
+    for ms in &times {
+        elapsed_ms += ms;
+        let index = (elapsed_ms / window).floor() as u64;
+        let e = buckets.entry(index).or_insert((0, 0.0));
+        e.0 += 1;
+        e.1 += ms;
+    }
+    buckets
+        .values()
+        .filter(|(work, active_ms)| *work as usize >= min_samples && *active_ms > 0.0)
+        .map(|(work, active_ms)| *work as f64 * 1000.0 / active_ms)
+        .collect()
+}
+
+/// P01Throughput: 0,1-й перцентиль throughput по ОКНАМ в 100 мс.
+///
+/// Раньше это был 0,001-й перцентиль по ВСЕМ сэмплам, и величина зависела от
+/// их количества: при n = 2000 интерполяция попадала на второй с конца сэмпл,
+/// при n = 50000 — на 50-й, то есть «худший момент» становился тем лучше,
+/// чем длиннее фаза. Сравнивать P01 фаз разной длины было бессмысленно, а он
+/// при этом первоклассный выход отчёта и критерий разрешения ничьей.
+pub fn p01_throughput(times_ms: &[f64]) -> f64 {
+    let windows = windowed_throughput(times_ms, P01_WINDOW_MS, 5);
+    if windows.is_empty() {
+        // Окна не набрались (короткая или очень медленная фаза) — честно
+        // откатываемся к исходной величине по всем сэмплам.
+        return percentile(
+            &filter_valid_times(times_ms)
+                .into_iter()
+                .map(|ms| 1000.0 / ms)
+                .collect::<Vec<f64>>(),
+            0.001,
+        );
+    }
+    percentile(&windows, 0.001)
+}
+
 /// Худшая секунда прогона: минимум AverageThroughput по 1-секундным окнам
 /// кумулятивного времени (целочисленные границы). Окно без валидных
 /// сэмплов не участвует.
 pub fn worst_second_throughput(times_ms: &[f64]) -> f64 {
-    use std::collections::BTreeMap;
-    let times = filter_valid_times(times_ms);
-    if times.is_empty() {
-        return 0.0;
+    let windows = windowed_throughput(times_ms, WORST_SECOND_WINDOW_MS, 20);
+    if windows.is_empty() {
+        0.0
+    } else {
+        windows.iter().copied().fold(f64::INFINITY, f64::min)
     }
-    let mut buckets: BTreeMap<u64, (u64, f64)> = BTreeMap::new();
-    let mut elapsed_ms = 0.0;
-    for ms in &times {
-        elapsed_ms += ms;
-        // Окно — по накопленному времени, а не по длительности тика
-        // (иначе все тики короче секунды падают в бакет 0).
-        let second = (elapsed_ms / 1000.0).floor().max(0.0) as u64;
-        let e = buckets.entry(second).or_insert((0, 0.0));
-        e.0 += 1;
-        e.1 += ms;
-    }
-    let mut worst = f64::INFINITY;
-    for (work, active_ms) in buckets.values() {
-        if *active_ms > 0.0 {
-            let t = *work as f64 * 1000.0 / active_ms;
-            if t < worst {
-                worst = t;
-            }
-        }
-    }
-    if worst.is_finite() { worst } else { 0.0 }
 }
 
 /// Статистика одного прогона фазы.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RunStats {
-    /// Число валидных сэмплов.
+    /// Число валидных сэмплов, оставшихся ПОСЛЕ усечения выбросов.
     pub samples: usize,
+    /// Сколько валидных сэмплов было до усечения.
+    #[serde(default)]
+    pub samples_raw: usize,
+    /// Доля сэмплов, исключённых из устойчивых статистик, 0..=1.
+    ///
+    /// Это НЕ доля «найденных выбросов»: усечение безусловно снимает по
+    /// `TRIM_FRACTION` с каждого края, поэтому на чистых данных здесь тоже
+    /// будет ≈ `2 * TRIM_FRACTION`. Величина показывает, сколько данных не
+    /// участвовало в среднем и стабильности — экстремумы (P01, P95, P99,
+    /// худшая секунда) считаются по полному набору и сюда не входят.
+    #[serde(default)]
+    pub excluded_fraction: f64,
     /// Сумма единиц работы (CompletedWorkUnits = 1 на тик).
     pub work_units: u64,
     /// Сумма активных времён тиков в мс.
@@ -148,9 +252,11 @@ pub struct RunStats {
     pub average_execution_time_ms: f64,
     /// MedianThroughput = перцентиль 0.50 от throughput сэмплов.
     pub median_throughput: f64,
-    /// P1Throughput = перцентиль 0.01.
+    /// P1Throughput = перцентиль 0.01 от throughput сэмплов.
     pub p1_throughput: f64,
-    /// P01Throughput = перцентиль 0.001.
+    /// P01Throughput = 0,1-й перцентиль по ОКНАМ в 100 мс.
+    ///
+    /// Окна, а не все сэмплы: величина не должна зависеть от длины фазы.
     pub p01_throughput: f64,
     /// P95ExecutionTimeMs = перцентиль 0.95 от времён тиков.
     pub p95_execution_time_ms: f64,
@@ -166,11 +272,21 @@ pub struct RunStats {
 }
 
 /// Статистика прогона по временам тиков. `None`, если валидных сэмплов нет.
+///
+/// Расчёт идёт по УСЕЧЁННОМУ набору: 2,5 % худших и столько же лучших
+/// сэмплов отбрасываются, и только потом считаются среднее, σ и стабильность.
+/// Метрики, смысл которых в экстремуме (P01, P95, P99, худшая секунда),
+/// считаются по ПОЛНОМУ набору — иначе усечение съело бы ровно то, что они
+/// измеряют.
 pub fn run_stats(times_ms: &[f64]) -> Option<RunStats> {
-    let times = filter_valid_times(times_ms);
-    if times.is_empty() {
+    let valid = filter_valid_times(times_ms);
+    if valid.is_empty() {
         return None;
     }
+    let samples_raw = valid.len();
+    let times = trim_outliers(&valid, TRIM_FRACTION);
+    let dropped = samples_raw.saturating_sub(times.len());
+
     let samples = times.len();
     let work_units = samples as u64;
     let active_time_ms_total = times.iter().sum::<f64>();
@@ -178,25 +294,35 @@ pub fn run_stats(times_ms: &[f64]) -> Option<RunStats> {
     let average_execution_time_ms = active_time_ms_total / work_units as f64;
 
     let mut throughput: Vec<f64> = times.iter().map(|ms| 1000.0 / ms).collect();
-    throughput.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    throughput.sort_by(|a, b| a.total_cmp(b));
 
-    let mut times_sorted = times.clone();
-    times_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // Верхние перцентили ВРЕМЕНИ — по ПОЛНОМУ набору. Усечение снимает самые
+    // медленные тики, то есть ровно тот хвост, который p95/p99 и должны
+    // показывать; посчитанные по усечённому набору они всегда показывали бы
+    // «всё отлично».
+    let mut all_times_sorted = valid.clone();
+    all_times_sorted.sort_by(|a, b| a.total_cmp(b));
 
     Some(RunStats {
         samples,
+        samples_raw,
+        excluded_fraction: if samples_raw == 0 {
+            0.0
+        } else {
+            dropped as f64 / samples_raw as f64
+        },
         work_units,
         active_time_ms_total,
         average_throughput,
         average_execution_time_ms,
         median_throughput: percentile_sorted(&throughput, 0.50),
         p1_throughput: percentile_sorted(&throughput, 0.01),
-        p01_throughput: percentile_sorted(&throughput, 0.001),
-        p95_execution_time_ms: percentile_sorted(&times_sorted, 0.95),
-        p99_execution_time_ms: percentile_sorted(&times_sorted, 0.99),
+        p01_throughput: p01_throughput(&valid),
+        p95_execution_time_ms: percentile_sorted(&all_times_sorted, 0.95),
+        p99_execution_time_ms: percentile_sorted(&all_times_sorted, 0.99),
         consistency_percent: consistency_percent(&[(0, &times)]),
         jitter_p99_ms: jitter_p99_ms(&times),
-        worst_second_throughput: worst_second_throughput(&times),
+        worst_second_throughput: worst_second_throughput(&valid),
     })
 }
 
@@ -282,5 +408,239 @@ mod tests {
         // Меньше двух сэмплов — jitter 0.
         assert_eq!(jitter_p99_ms(&[1.0]), 0.0);
         assert_eq!(jitter_p99_ms(&[]), 0.0);
+    }
+
+    /// Настоящая рабочая величина замера: тик около 0,2 мс, с редкими
+    /// выбросами в 20-50 мс (DPC, вытеснение, микрофриз).
+    fn realistic_series(n: usize, outlier_every: usize, outlier_ms: f64) -> Vec<f64> {
+        (0..n)
+            .map(|i| {
+                if outlier_every > 0 && i % outlier_every == 0 {
+                    outlier_ms
+                } else {
+                    0.2
+                }
+            })
+            .collect()
+    }
+
+    /// Усечение отделяет выбросы ОС от разброса самой нагрузки.
+    ///
+    /// Без усечения один выброс в 250 раз раздувает σ, и стабильность падает
+    /// с ~100 до единиц — то есть схема выглядит «провальной» из-за события,
+    /// к ней никакого отношения не имеющего.
+    #[test]
+    fn trimming_removes_os_level_outliers_from_stability() {
+        let n = 10_000;
+        // 0,5 % выбросов по 20 мс среди тиков по 0,2 мс.
+        let with_outliers = realistic_series(n, 200, 20.0);
+        let stats = run_stats(&with_outliers).expect("есть валидные сэмплы");
+
+        assert_eq!(stats.samples_raw, n);
+        assert!(
+            stats.samples < n,
+            "усечение обязано что-то отбросить: {} из {}",
+            stats.samples,
+            stats.samples_raw
+        );
+        assert!(
+            stats.excluded_fraction > 0.04 && stats.excluded_fraction < 0.06,
+            "ожидалось около 5 % исключённых (2,5 % с каждого края), получено {}",
+            stats.excluded_fraction
+        );
+        // Среднее должно остаться около 1000/0.2 = 5000 тик/с: выбросы
+        // отброшены, а не «размазаны».
+        assert!(
+            (stats.average_throughput - 5000.0).abs() < 60.0,
+            "среднее искажено выбросами: {}",
+            stats.average_throughput
+        );
+        assert!(
+            stats.consistency_percent > 99.0,
+            "стабильность после усечения должна остаться высокой, получено {}",
+            stats.consistency_percent
+        );
+    }
+
+    /// Чистые данные не должны пострадать от усечения.
+    ///
+    /// Само по себе усечение безусловно снимает 2,5 % с каждого края, поэтому на
+    /// чистых данных `excluded_fraction` — те же ≈5 %. Важно другое: среднее и
+    /// стабильность от этого не меняются, потому что симметричный разброс не
+    /// смещает ни среднее, ни σ.
+    #[test]
+    fn trimming_is_harmless_without_outliers() {
+        let n = 10_000;
+        // Разброс ±0,01 мс вокруг 0,2 — обычный шум замера.
+        let clean: Vec<f64> = (0..n)
+            .map(|i| 0.2 + if i % 2 == 0 { 0.01 } else { -0.01 })
+            .collect();
+        let stats = run_stats(&clean).expect("есть валидные сэмплы");
+        assert!(
+            (stats.average_throughput - 5000.0).abs() < 5.0,
+            "среднее должно остаться точным: {}",
+            stats.average_throughput
+        );
+        // ±0,01 мс на тике по 0,2 мс — разброс ±5 %, σ/μ около 5 %, стабильность
+        // около 95. Выше она быть не может: это свойство самих данных, а не
+        // усечения. Проверяем именно относительную величину — об этом весь смысл
+        // усечения.
+        assert!(
+            stats.consistency_percent > 94.0,
+            "чистые данные должны остаться стабильными, получено {}",
+            stats.consistency_percent
+        );
+        assert!(
+            (stats.excluded_fraction - 0.05).abs() < 0.01,
+            "на чистых данных исключается те же 5 %, а не «найденные выбросы»: {}",
+            stats.excluded_fraction
+        );
+        // Главное: усечение не должно ухудшать и без того чистые данные —
+        // стабильность с выбросами обязана быть заметно ХУЖЕ, а не лучше.
+        let noisy = run_stats(&realistic_series(10_000, 200, 20.0)).expect("есть валидные сэмплы");
+        assert!(
+            noisy.consistency_percent > stats.consistency_percent + 3.0,
+            "данные с выбросами обязаны быть менее стабильными: {} против {}",
+            noisy.consistency_percent,
+            stats.consistency_percent
+        );
+    }
+
+    /// Верхние перцентили времени НЕ должны вычисляться по усечённому набору.
+    ///
+    /// Усечение снимает самые медленные тики, то есть ровно тот хвост, который
+    /// p95/p99 показывают. Посчитанные по усечённому набору, они всегда
+    /// показывали бы «всё отлично» — и микрофризы в отчёте были бы не видны.
+    #[test]
+    fn upper_time_percentiles_see_the_slow_tail() {
+        let n = 10_000;
+        // 0,5 % тиков по 20 мс среди тиков по 0,2 мс.
+        let with_outliers = realistic_series(n, 200, 20.0);
+        let stats = run_stats(&with_outliers).expect("есть валидные сэмплы");
+        // p95 в полном наборе — почти обычное время, потому что выбросов всего
+        // 0,5 % и p95 до них не доходит.
+        assert!(
+            stats.p95_execution_time_ms < 1.0,
+            "p95 не должен видеть 0,5 % выбросов, получено {}",
+            stats.p95_execution_time_ms
+        );
+        // p99 — уже видит: выбросов 0,5 %, они попали в верхний процент.
+        assert!(
+            stats.p95_execution_time_ms <= stats.p99_execution_time_ms,
+            "p95 должен быть не больше p99"
+        );
+        // А худшая секунда обязана быть кратно хуже средней: иначе провалы
+        // полностью исчезают из отчёта.
+        assert!(
+            stats.worst_second_throughput < stats.average_throughput,
+            "провал обязан отражаться на худшей секунде: {} против {}",
+            stats.worst_second_throughput,
+            stats.average_throughput
+        );
+    }
+
+    /// На малых выборках усечение не применяется: иначе оно съедало бы
+    /// основную часть данных и «стабильность» короткой фазы становилась бы
+    /// характеристикой трёх сэмплов.
+    #[test]
+    fn small_samples_are_not_trimmed() {
+        let short = vec![0.2, 0.2, 0.2, 5.0, 0.2, 0.2];
+        let stats = run_stats(&short).expect("есть валидные сэмплы");
+        assert_eq!(stats.samples, short.len());
+        assert_eq!(stats.excluded_fraction, 0.0);
+        assert_eq!(stats.samples_raw, short.len());
+    }
+
+    /// Граница усечения: при пороге выборки начинается отбрасывание ровно
+    /// 2,5 % с каждого края.
+    #[test]
+    fn trim_keeps_the_middle_of_the_distribution() {
+        let full: Vec<f64> = (0..1000).map(|i| i as f64).collect();
+        // На пороге ровно 400 сэмплов — усечение применяется: floor(400*0.025)=10.
+        let mut at_threshold = full.clone();
+        at_threshold.truncate(MIN_TRIM_SAMPLES);
+        let trimmed = trim_outliers(&at_threshold, TRIM_FRACTION);
+        assert_eq!(trimmed.len(), 400 - 20);
+        assert_eq!(trimmed[0], 10.0);
+        assert_eq!(trimmed[trimmed.len() - 1], 389.0);
+        // На один сэмпл ниже порога — не применяется вовсе.
+        let mut below = full.clone();
+        below.truncate(MIN_TRIM_SAMPLES - 1);
+        assert_eq!(
+            trim_outliers(&below, TRIM_FRACTION).len(),
+            MIN_TRIM_SAMPLES - 1
+        );
+    }
+
+    /// Усечение не может оставить меньше половины выборки: это уже не
+    /// устойчивая оценка, а произвольно выбранный подотрезок.
+    #[test]
+    fn trimming_refuses_absurd_fractions() {
+        let v: Vec<f64> = (0..1000).map(|i| i as f64).collect();
+        // 40 % с каждого края оставили бы middle 20 % — среднее там ничего
+        // не говорит о хвостах распределения.
+        assert_eq!(trim_outliers(&v, 0.4).len(), 1000);
+        assert_eq!(trim_outliers(&v, 0.26).len(), 1000);
+        // Ровно 25 % с каждого края оставляет половину — предел допустимого.
+        assert_eq!(trim_outliers(&v, 0.25).len(), 500);
+        // Отрицательная доля и ноль — тоже без усечения.
+        assert_eq!(trim_outliers(&v, -0.1).len(), 1000);
+        assert_eq!(trim_outliers(&v, 0.0).len(), 1000);
+    }
+
+    /// P01 не зависит от длины фазы — ради этого он и переведён на окна.
+    ///
+    /// Раньше 0,001-й перцентиль по всем сэмплам при n = 2000 попадал на
+    /// второй с конца сэмпл, а при n = 20000 — на двадцатый: «худший момент»
+    /// улучшался тем длиннее фаза. Один и тот же отрезок работы, показанный
+    /// дважды, должен давать ту же величину.
+    #[test]
+    fn p01_does_not_improve_with_phase_length() {
+        // Одна секунда нормальной работы с одним коротким провалом.
+        let base: Vec<f64> = (0..1000).map(|_| 0.2).collect();
+        let mut one_second = base.clone();
+        one_second[500] = 4.0; // провал на 100-мс окне
+        // Тот же отрезок, показанный трижды: фаза втрое длиннее.
+        let mut three_seconds = Vec::new();
+        for _ in 0..3 {
+            three_seconds.extend_from_slice(&one_second);
+        }
+        assert_eq!(one_second.len() * 3, three_seconds.len());
+
+        let a = p01_throughput(&one_second);
+        let b = p01_throughput(&three_seconds);
+        assert!(
+            (a - b).abs() / a.max(1.0) < 0.05,
+            "P01 зависит от длины фазы: {a} против {b}"
+        );
+        // И он правда ловит провал, а не усредняет его.
+        assert!(a < 4900.0, "P01 должен отражать худшее окно, получено {a}");
+    }
+
+    /// Окна throughput считаются по накопленному времени, а не по времени
+    /// тика: иначе все тики короче окна попали бы в нулевое окно.
+    #[test]
+    fn windows_are_counted_by_elapsed_time() {
+        // 10 тиков по 10 мс = ровно одно 100-мс окно.
+        let times = vec![10.0; 10];
+        let windows = windowed_throughput(&times, P01_WINDOW_MS, 5);
+        assert_eq!(windows.len(), 1);
+        assert!((windows[0] - 100.0).abs() < 1e-9, "100 тик/с в окне 100 мс");
+    }
+
+    /// Окна с малым числом сэмплов отбрасываются: неполное последнее окно
+    /// дало бы «худшую секунду» из двух точек, и величина зависела бы от того,
+    /// где закончилась фаза.
+    #[test]
+    fn windows_without_enough_samples_are_dropped() {
+        // 9 тиков по 10 мс: первое окно полное (10 сэмплов), второе — 9,
+        // но при пороге 10 второе отбрасывается, первое тоже (ровно 10, проходит).
+        let full = windowed_throughput(&[10.0; 9], P01_WINDOW_MS, 5);
+        assert!(!full.is_empty());
+        let strict = windowed_throughput(&[10.0; 9], P01_WINDOW_MS, 50);
+        assert!(
+            strict.is_empty(),
+            "порог выше числа сэмплов отбрасывает всё"
+        );
     }
 }

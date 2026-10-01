@@ -528,6 +528,7 @@ fn run_test(
         warnings,
         outcome.cancelled,
         score_weights,
+        outcome.early_stop_reason,
     );
     let saved = match powerbench_orchestrator::history::save_result(&json) {
         Ok(path) => Some(path.display().to_string()),

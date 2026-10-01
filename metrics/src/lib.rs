@@ -7,14 +7,17 @@
 
 pub mod aggregate;
 pub mod percentile;
+pub mod rank;
 pub mod run;
 
 pub use aggregate::{
     AggregateError, AggregateResult, CompatibilitySignature, DeterminismSignature, RunSummary,
-    aggregate_runs,
+    aggregate_runs, t95,
 };
 pub use percentile::{percentile, percentile_sorted};
+pub use rank::{RankKey, has_data, rank_cmp, sort_by_rank, tiebreak_id};
 pub use run::{
-    RunStats, burst_retention_percent, consistency_percent, filter_valid_times, jitter_p99_ms,
-    median, population_std, run_stats,
+    MIN_TRIM_SAMPLES, P01_WINDOW_MS, RunStats, TRIM_FRACTION, burst_retention_percent,
+    consistency_percent, filter_valid_times, jitter_p99_ms, median, p01_throughput, population_std,
+    run_stats, trim_outliers, windowed_throughput, worst_second_throughput,
 };

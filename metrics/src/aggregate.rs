@@ -385,6 +385,8 @@ mod tests {
                 determinism: DeterminismSignature::new(vec![det]),
                 stats: crate::run::RunStats {
                     samples: 4,
+                    samples_raw: 4,
+                    excluded_fraction: 0.0,
                     work_units: 4,
                     active_time_ms_total: 0.0,
                     average_throughput: 0.0,

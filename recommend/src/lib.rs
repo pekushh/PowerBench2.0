@@ -9,6 +9,7 @@ pub mod calibrate;
 
 use std::cmp::Ordering;
 
+use powerbench_metrics::rank::{RankKey, rank_cmp};
 use powerbench_metrics::{AggregateResult, CompatibilitySignature, DeterminismSignature};
 
 use crate::bootstrap::{BootMode, BootstrapProbabilities, bootstrap_mode, bootstrap_probabilities};
@@ -146,33 +147,36 @@ pub struct Recommendation {
     pub tie_criterion: Option<TieCriterion>,
 }
 
+/// Ключ ранжирования кандидата (см. `powerbench_metrics::rank`).
+///
+/// Собирается один раз и сравнивается ЕДИНСТВЕННЫМ компаратором: раньше
+/// `primary_cmp`, `leader::robust_leader` и `score::score_schemes` сортировали
+/// по разным признакам (среднее / медиана / среднее), и в одном отчёте могли
+/// называть победителями разные схемы.
+fn rank_key(c: &SchemeAggregate) -> RankKey {
+    let a = &c.aggregate;
+    RankKey::from_parts(
+        a.median_throughput,
+        a.median_p1_throughput,
+        a.median_consistency_percent,
+        a.run_variation_percent,
+        a.mean_average_throughput,
+    )
+}
+
 fn primary_cmp(a: &SchemeAggregate, b: &SchemeAggregate) -> Ordering {
-    // 1. AverageThroughput (выше лучше);
-    // 2. MedianThroughput; 3. P1Throughput;
-    // 4. ConsistencyPercent (выше лучше); 5. меньший CV повторов;
-    // 6. исходная, затем активная; 7. ID схемы — последний детерминированный ключ.
-    let da = &a.aggregate;
-    let db = &b.aggregate;
-    if let Some(o) = cmp_f64(da.mean_average_throughput, db.mean_average_throughput).reversed_o() {
-        return o;
+    // Содержательная часть — общий компаратор: медиана, затем худшее окно,
+    // затем стабильность, затем меньший разброс, и только в самом конце
+    // среднее как детерминированный замыкающий ключ.
+    //
+    // `sort_by` ожидает «меньше — раньше», а `rank_cmp` трактует `Greater`
+    // как «лучше», поэтому порядок разворачивается: схемы в `sorted` идут
+    // от лучшей к худшей.
+    match rank_cmp(&rank_key(a), &rank_key(b)).reverse() {
+        Ordering::Equal => {}
+        other => return other,
     }
-    if let Some(o) = cmp_f64(da.median_throughput, db.median_throughput).reversed_o() {
-        return o;
-    }
-    if let Some(o) = cmp_f64(da.median_p1_throughput, db.median_p1_throughput).reversed_o() {
-        return o;
-    }
-    if let Some(o) =
-        cmp_f64(da.median_consistency_percent, db.median_consistency_percent).reversed_o()
-    {
-        return o;
-    }
-    // Меньший CV впереди — порядок обычный (не реверс). Равенство CV — не ключ.
-    match cmp_f64(da.run_variation_percent, db.run_variation_percent) {
-        OrderingLike::Equal => {}
-        OrderingLike::Some(Ordering::Equal) => {}
-        OrderingLike::Some(o) => return o,
-    }
+    // Дальше — только про пользователя и про воспроизводимость порядка.
     let pref_a = preference_key(a);
     let pref_b = preference_key(b);
     if pref_a != pref_b {
@@ -187,6 +191,13 @@ fn preference_key(c: &SchemeAggregate) -> (u8, u8) {
     (original, active)
 }
 
+/// Сравнение двух величин, где NaN и «нет данных» считаются равными.
+///
+/// Основной порядок даёт `powerbench_metrics::rank::rank_cmp`; этот помощник
+/// остался для разрешения ничьих по отдельным признакам, где нужно явно
+/// решить, что делать с нечисловым значением. Оно равно любому: иначе схема с
+/// испорченной метрикой выигрывала бы у схемы с настоящей по признаку, где
+/// эта метрика вообще не вычислялась.
 #[derive(Debug)]
 enum OrderingLike {
     Equal,
@@ -197,18 +208,6 @@ fn cmp_f64(a: f64, b: f64) -> OrderingLike {
     match a.partial_cmp(&b) {
         Some(o) => OrderingLike::Some(o),
         None => OrderingLike::Equal,
-    }
-}
-
-impl OrderingLike {
-    /// Как `Option<Ordering>`, но математическое равенство и NaN оба дают `None`
-    /// (равенство не должно обрывать сравнение следующих ключей).
-    fn reversed_o(self) -> Option<Ordering> {
-        match self {
-            OrderingLike::Equal => None,
-            OrderingLike::Some(Ordering::Equal) => None,
-            OrderingLike::Some(o) => Some(o.reverse()),
-        }
     }
 }
 

@@ -4,8 +4,15 @@
 //! получает балл 0..100 по взвешенному среднему трёх нормированных метрик
 //! (производительность, стабильность, худшая секунда). Нормировка — «лучшая
 //! среди допущенных = 100» по каждой метрике; отвергнутые схему получают 0.
+//!
+//! Производительность нормируется по МЕДИАНЕ, а не по среднему: раньше балл
+//! считался по среднему, а победителя выбирал `recommend` по среднему же и
+//! `leader` по медиане, так что один отчёт называл победителем разные схемы.
+//! Теперь все три модуля опираются на один ключ ранжирования
+//! (`powerbench_metrics::rank`), и балл не может указать не на того.
 
 use crate::result::{SchemeJson, default_score_weights};
+use powerbench_metrics::rank::{RankKey, tiebreak_id};
 
 /// Веса скоринга (производительность / стабильность / худшая секунда, %).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,6 +59,23 @@ impl ScoreWeights {
     }
 }
 
+/// Производительность для нормировки: медиана, тот же главный ключ ранжирования.
+///
+/// Среднее (`mean_average_throughput`) здесь больше не используется: оно
+/// двигается от одного проваленного отрезка сильнее, чем сама схема отличается
+/// от соседней, и балл указывал бы не на ту схему, которую называет победителем
+/// рекомендация.
+fn performance_of(s: &SchemeJson) -> f64 {
+    RankKey::from_parts(
+        s.median_throughput,
+        s.median_p1_throughput,
+        s.median_consistency_percent,
+        s.run_variation_percent,
+        s.mean_average_throughput,
+    )
+    .median_throughput
+}
+
 /// Балл одной схемы.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchemeScore {
@@ -90,7 +114,7 @@ pub fn score_schemes(schemes: &[SchemeJson], weights: &ScoreWeights) -> Vec<Sche
         if s.rejected {
             continue;
         }
-        if let Some(v) = usable_score(s.mean_average_throughput) {
+        if let Some(v) = usable_score(performance_of(s)) {
             best_perf = Some(best_perf.map_or(v, |b: f64| b.max(v)));
         }
         if let Some(v) = usable_score(s.median_consistency_percent) {
@@ -124,7 +148,7 @@ pub fn score_schemes(schemes: &[SchemeJson], weights: &ScoreWeights) -> Vec<Sche
                 };
             }
             let perf = best_perf.map_or(0.0, |b| {
-                usable_score(s.mean_average_throughput).map_or(0.0, |v| v / b * 100.0)
+                usable_score(performance_of(s)).map_or(0.0, |v| v / b * 100.0)
             });
             let stab = best_stab.map_or(0.0, |b| {
                 usable_score(s.median_consistency_percent).map_or(0.0, |v| v / b * 100.0)
@@ -150,12 +174,33 @@ pub fn score_schemes(schemes: &[SchemeJson], weights: &ScoreWeights) -> Vec<Sche
 }
 
 /// Балл лидера среди допущенных (None — нет ни одного допущенного).
+///
+/// При равных баллах выбирается схема с меньшим идентификатором, а не
+/// последняя во входных данных: `max_by` возвращает последний максимум, из-за
+/// чего при полностью равных баллах выбор зависел бы от порядка схем и мог
+/// разойтись с `leader::robust_leader`.
 pub fn score_leader(scores: &[SchemeScore]) -> Option<&SchemeScore> {
-    scores.iter().filter(|s| !s.rejected).max_by(|a, b| {
-        a.score
-            .partial_cmp(&b.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })
+    let mut best: Option<&SchemeScore> = None;
+    for s in scores.iter().filter(|s| !s.rejected) {
+        best = Some(match best {
+            None => s,
+            Some(b) => {
+                let by_score = s.score.total_cmp(&b.score);
+                if by_score == std::cmp::Ordering::Equal {
+                    if tiebreak_id(&s.scheme_id, &b.scheme_id) == std::cmp::Ordering::Less {
+                        s
+                    } else {
+                        b
+                    }
+                } else if by_score == std::cmp::Ordering::Greater {
+                    s
+                } else {
+                    b
+                }
+            }
+        });
+    }
+    best
 }
 
 #[cfg(test)]

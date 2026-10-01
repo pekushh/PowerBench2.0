@@ -8,7 +8,13 @@
 pub mod appsettings;
 pub mod checkpoint;
 pub mod config;
+// Модуль состоит только из проверок инварианта (согласованность выбора
+// победителя между recommend/leader/score), поэтому в обычной сборке не
+// компилируется вовсе.
+#[cfg(test)]
+pub mod consistency;
 pub mod diagnostics;
+pub mod early_stop;
 pub mod history;
 pub mod leader;
 pub mod quarantine;

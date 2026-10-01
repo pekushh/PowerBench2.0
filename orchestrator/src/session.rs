@@ -197,6 +197,10 @@ pub enum SessionEvent {
     Cooling {
         seconds: u64,
     },
+    /// Сессия остановлена досрочно: перевес лидера уже статистически значим.
+    EarlyStopped {
+        reason: String,
+    },
     Restored {
         scheme_id: String,
         label: String,
@@ -289,6 +293,9 @@ impl std::fmt::Display for SessionEvent {
                 write!(f, "Схема {scheme_id} забракована: {reason}")
             }
             SessionEvent::Cooling { seconds } => write!(f, "Охлаждение {seconds} с"),
+            SessionEvent::EarlyStopped { reason } => {
+                write!(f, "Сессия остановлена досрочно: {reason}")
+            }
             SessionEvent::Restored { label, scheme_id } => {
                 write!(f, "Восстановлена схема {scheme_id} ({label})")
             }
@@ -467,6 +474,8 @@ pub struct SessionOutcome {
     pub recommendation: Option<Recommendation>,
     pub events: Vec<SessionEvent>,
     pub cancelled: bool,
+    /// Настоящая причина досрочной остановки (перевес стал значимым).
+    pub early_stop_reason: Option<String>,
 }
 
 /// Подпись прогонов сессии (общая для всех: движок и диагностика фиксированы).
@@ -637,22 +646,42 @@ pub fn measure_background(
 /// Вердикт сторожевого таймера.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchdogVerdict {
+    /// Прогресса нет вовсе: тики не идут. Заведомо поломка машины или
+    /// измерительного устройства — в карантин.
     Hung,
     UserCancelled,
-    /// Машина не пашет, а ползёт: замер продолжать бессмысленно.
+    /// Машина СЛОМАЛАСЬ: темп упал относительно того, что она же показывала
+    /// минуту назад. Замер недостоверен — в карантин.
     Collapsed {
         ticks_per_sec: u64,
+        own_median: u64,
+    },
+    /// Машина идёт РОВНО, но медленно: темп держится у своей же медианы, то
+    /// есть провалов нет. Это может быть и сознательно консервативная схема
+    /// (`max processor state` = 50 %), и просто тяжёлая машина.
+    ///
+    /// Замер при этом достоверен и полезен: медленно — да, но верно. Поэтому
+    /// фаза НЕ прерывается и схема НЕ идёт в карантин; в отчёт попадает
+    /// только предупреждение с объяснением.
+    SlowButStable {
+        ticks_per_sec: u64,
+        own_median: u64,
     },
 }
 
-/// Доля мгновенного темпа, ниже которой фаза считается проваленной.
+/// Доля СОБСТВЕННОЙ медианы фазы, ниже которой темп считается поломкой.
 ///
-/// Порогов в тиках в секунду нет намеренно: абсолютное число было бы свойством
-/// машины, а не схемы, и на ноутбуке обрывало бы здоровые замеры. Ориентиром
-/// служит то, что эта же машина показывала в этой же фазе раньше; если такой
-/// истории нет, фаза не обрывается вовсе (сторож зависания по нулевому
-/// прогрессу остаётся — он от машины не зависит).
-pub const COLLAPSE_RATE_SHARE: f64 = 0.20;
+/// Провал относительно того, что машина показывала минуту назад, — это
+/// событие внутри измерения (троттлинг, фон, вытеснение), и замер после
+/// него недостоверен.
+pub const COLLAPSE_IN_RUN_SHARE: f64 = 0.5;
+/// Доля от лучшего результата машины в этой фазе, ниже которой темп считается
+/// «низким, но ровным».
+///
+/// Абсолютный ориентир, взятый из истории машины: 20 % от её лучшего результата
+/// означает, что машина работает в пять раз медленнее, чем когда-либо могла.
+/// Само по себе это не поломка.
+pub const LOW_RATE_SHARE: f64 = 0.20;
 /// Первые секунды фазы не смотрим: разгон частот и холодный кэш дают низкий
 /// темп даже у совершенно здоровой машины.
 pub const COLLAPSE_ARM_SECS: u64 = 4;
@@ -661,49 +690,151 @@ pub const COLLAPSE_ARM_SECS: u64 = 4;
 /// Несколько секунд, а не один замер: мгновенный темп считается по времени
 /// одного батча и сам по себе скачет.
 pub const COLLAPSE_HOLD_SECS: u64 = 3;
+/// Сколько замеров темпа нужно, чтобы узнать медиану фазы.
+///
+/// При 4 опросах в секунду это примерно секунда — достаточно, чтобы медиана
+/// отражала установившийся темп, и мало, чтобы не тратить память на длинной
+/// фазе: 4 замера в секунду на 60-секундной фазе дают 240 чисел, то есть
+/// меньше двух килобайт.
+pub const RATE_SAMPLES_FOR_MEDIAN: usize = 8;
+/// Сколько секунд ровный низкий темп держится до предупреждения.
+pub const SLOW_HOLD_SECS: u64 = 3;
 
-/// Детектор «машина не тянет» по мгновенному темпу тиков.
+/// Детектор темпа фазы: поломка относительно собственной медианы и ровная
+/// медлительность относительно истории машины.
+///
+/// Два ОРИЕНТИРА, и это суть исправления:
+///
+/// * **Поломка** (`Collapsed`) — темп упал относительно медианы ЭТОГО ЖЕ
+///   прогона. Это признак того, что машина сломалась ПО ХОДУ измерения:
+///   троттлинг, фон, вытеснение. Замер недостоверен.
+/// * **Медлительность** (`SlowButStable`) — темп ровный, но ниже того, что эта
+///   машина показывала раньше. Это может быть и сознательно консервативная
+///   схема (`max processor state` = 50 %), и просто тяжёлая машина. Замер
+///   ДОСТОВЕРЕН: темп не проседал, просто такой.
+///
+/// Прежнее правило использовало только абсолютный ориентир, и медленная, но
+/// ровная машина попадала под тот же вердикт, что и сломанная: и то и другое
+/// уходило в перманентный карантин с причиной «схема не тянет». Теперь эти
+/// случаи разделены, и карантин достаётся только настоящей поломке.
 ///
 /// Вынесен отдельным типом с явным временем на входе, чтобы правило можно было
 /// проверить без реального прогона: иначе любой тест на «обрыв замера» стоил бы
 /// минуты работы сторожевого таймера.
 #[derive(Debug, Default)]
-pub struct CollapseDetector {
+pub struct RateWatchdog {
+    /// Наблюдённые темпы фазы (для собственной медианы).
+    samples: Vec<u64>,
+    /// С какого момента темп держится ниже половины своей медианы.
     below_since: Option<Duration>,
-    /// Порог в тиках в секунду; без ориентира по истории машины его нет.
-    floor: Option<f64>,
+    /// С какого момента темп ниже абсолютного ориентира машины.
+    slow_since: Option<Duration>,
+    /// Уже сообщили о медлительности: повторять каждую фазу незачем.
+    slow_reported: bool,
+    /// Абсолютный ориентир «низкий темп» в тиках в секунду, из истории машины.
+    ///
+    /// `None` — истории нет, и тогда медлительность просто НЕ ОПРЕДЕЛЯЕТСЯ.
+    /// Это лучше, чем угадывать: без ориентира медленная ровная машина не
+    /// получает ни одного вердикта, а значит и никогда не карантинится.
+    floor_abs: Option<f64>,
 }
 
-impl CollapseDetector {
-    /// Создать детектор с порогом из истории машины для этой фазы.
+/// Решение детектора темпа.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateVerdict {
+    /// Всё в порядке.
+    Ok,
+    /// Темп провалился относительно собственной медианы — замер недостоверен.
+    Collapsed { ticks_per_sec: u64, own_median: u64 },
+    /// Темп ровный и низкий, но без провалов — замер достоверен.
+    SlowButStable { ticks_per_sec: u64, own_median: u64 },
+}
+
+impl RateWatchdog {
+    /// Детектор без ориентира «низкий темп»: поломка по своей медиане
+    /// определяется, медлительность — нет.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Детектор с ориентиром «низкий темп» из истории машины для этой фазы.
     pub fn with_reference(reference_p1: Option<f64>) -> Self {
         Self {
-            below_since: None,
-            floor: reference_p1
+            floor_abs: reference_p1
                 .filter(|v| v.is_finite() && *v > 0.0)
-                .map(|v| v * COLLAPSE_RATE_SHARE),
+                .map(|v| v * LOW_RATE_SHARE),
+            ..Self::default()
         }
     }
 
-    /// Отметить очередной замер темпа; вернуть, сколько секунд темп держится
-    /// ниже порога, если пора прекращать замер.
-    pub fn observe(&mut self, ticks_per_sec: u64, elapsed: Duration) -> Option<Duration> {
-        // Без ориентира по истории машины решение не принимаем: неизвестно, что
-        // для неё считать нормой.
-        let floor = self.floor?;
+    /// Отметить очередной замер темпа; вернуть решение, если оно достигнуто.
+    pub fn observe(&mut self, ticks_per_sec: u64, elapsed: Duration) -> RateVerdict {
         // До разгона не смотрим вовсе.
         if elapsed.as_secs() < COLLAPSE_ARM_SECS {
-            return None;
+            return RateVerdict::Ok;
         }
-        let below = (ticks_per_sec as f64) < floor;
-        if !below {
-            // Темп восстановился — отсчёт начинается заново.
-            self.below_since = None;
-            return None;
+        if self.samples.len() < RATE_SAMPLES_FOR_MEDIAN {
+            self.samples.push(ticks_per_sec);
+            return RateVerdict::Ok;
         }
-        let since = *self.below_since.get_or_insert(elapsed);
-        let held = elapsed.saturating_sub(since);
-        (held.as_secs() >= COLLAPSE_HOLD_SECS).then_some(held)
+        let own_median = self.own_median();
+        if own_median == 0 {
+            return RateVerdict::Ok;
+        }
+        let ratio = ticks_per_sec as f64 / own_median as f64;
+
+        // --- Поломка: темп упал относительно собственной медианы ---
+        if ratio < COLLAPSE_IN_RUN_SHARE {
+            self.slow_since = None;
+            let since = *self.below_since.get_or_insert(elapsed);
+            let held = elapsed.saturating_sub(since);
+            if held.as_secs() >= COLLAPSE_HOLD_SECS {
+                return RateVerdict::Collapsed {
+                    ticks_per_sec,
+                    own_median,
+                };
+            }
+            return RateVerdict::Ok;
+        }
+        self.below_since = None;
+
+        // --- Ровная медлительность ---
+        //
+        // Провала нет, но темп ниже того, что машина показывала раньше. Если
+        // так держится несколько секунд — это свойство режима, а не авария:
+        // замер остаётся, в отчёт идёт предупреждение, карантина нет.
+        if let Some(floor) = self.floor_abs
+            && !self.slow_reported
+            && (ticks_per_sec as f64) < floor
+        {
+            let since = *self.slow_since.get_or_insert(elapsed);
+            let held = elapsed.saturating_sub(since);
+            if held.as_secs() >= SLOW_HOLD_SECS {
+                self.slow_reported = true;
+                return RateVerdict::SlowButStable {
+                    ticks_per_sec,
+                    own_median,
+                };
+            }
+            return RateVerdict::Ok;
+        }
+        self.slow_since = None;
+        RateVerdict::Ok
+    }
+
+    /// Медиана наблюдённых темпов фазы.
+    fn own_median(&self) -> u64 {
+        if self.samples.is_empty() {
+            return 0;
+        }
+        let mut v = self.samples.clone();
+        v.sort_unstable();
+        v[v.len() / 2]
+    }
+
+    /// Медиана темпов фазы (для отчёта и тестов).
+    pub fn median_rate(&self) -> u64 {
+        self.own_median()
     }
 }
 
@@ -720,14 +851,14 @@ fn spawn_watchdog(
     scoreboard: Arc<Scoreboard>,
     cancel: Arc<AtomicBool>,
     user_cancel: Arc<AtomicBool>,
-    collapse: CollapseDetector,
+    rates: RateWatchdog,
     phase_finished: Arc<AtomicBool>,
 ) -> (JoinHandle<()>, Receiver<WatchdogVerdict>) {
     let (tx, rx) = mpsc::channel();
     let handle: JoinHandle<()> = std::thread::spawn(move || {
         let mut last_ticks: u64 = 0;
         let mut last_progress = Instant::now();
-        let mut collapse = collapse;
+        let mut rates = rates;
         // Фаза 1: ждём старта фазы. Если пользователь отменил раньше — выходим.
         //
         // Выход есть и по сигналу «фаза завершилась»: если фаза закончилась,
@@ -777,21 +908,40 @@ fn spawn_watchdog(
                 cancel.store(true, Ordering::Relaxed);
                 return;
             }
-            // Замер ползущего темпа: тики идут, поэтому «зависание» не
-            // срабатывает, а ждать конца сессии на такой машине нельзя —
-            // пользователь успевает пожалеть о запуске.
-            if collapse
-                .observe(
-                    snap.current_ticks_per_sec,
-                    Duration::from_secs(snap.elapsed_secs),
-                )
-                .is_some()
-            {
-                let _ = tx.send(WatchdogVerdict::Collapsed {
-                    ticks_per_sec: snap.current_ticks_per_sec,
-                });
-                cancel.store(true, Ordering::Relaxed);
-                return;
+            // Темп фазы против ЕЁ СОБСТВЕННОЙ медианы: провал означает поломку
+            // (замер недостоверен, карантин), ровная медлительность — нет
+            // (замер достоверен, только предупреждение).
+            //
+            // Медлительность замер НЕ прерывает: фаза и так идёт положенное
+            // время, а низкий темп — это характеристика режима, а не событие.
+            match rates.observe(
+                snap.current_ticks_per_sec,
+                Duration::from_secs(snap.elapsed_secs),
+            ) {
+                RateVerdict::Ok => {}
+                RateVerdict::Collapsed {
+                    ticks_per_sec,
+                    own_median,
+                } => {
+                    let _ = tx.send(WatchdogVerdict::Collapsed {
+                        ticks_per_sec,
+                        own_median,
+                    });
+                    cancel.store(true, Ordering::Relaxed);
+                    return;
+                }
+                RateVerdict::SlowButStable {
+                    ticks_per_sec,
+                    own_median,
+                } => {
+                    let _ = tx.send(WatchdogVerdict::SlowButStable {
+                        ticks_per_sec,
+                        own_median,
+                    });
+                    // Продолжаем наблюдение: медлительность — не повод
+                    // прерывать фазу, а отмена здесь испортила бы замер.
+                    return;
+                }
             }
         }
     });
@@ -976,6 +1126,7 @@ fn run_measured_phase(
     label: &str,
     monitor_map: &Arc<Mutex<BTreeMap<u64, Vec<ProcessSample>>>>,
     observer: Option<Arc<dyn TelemetryObserver>>,
+    slow_note: &mut Option<SlowPhaseNote>,
     baseline: Option<&crate::history::MachineBaseline>,
 ) -> Result<(RunReport, Vec<f64>), PhaseFailure> {
     // Приоритет процесса поднимается ровно на время измеряемой фазы и
@@ -1005,7 +1156,12 @@ fn run_measured_phase(
         Arc::clone(&scoreboard),
         cancel,
         Arc::clone(&user_cancel),
-        CollapseDetector::with_reference(baseline.as_ref().and_then(|b| b.p1_of(label))),
+        // Ориентир «низкий темп» — из истории машины, как и раньше: без него
+        // медлительность просто не определяется. А вот ПОЛОМКА определяется по
+        // собственной медиане фазы, которую детектор набирает сам. Так разделены
+        // два случая, которые прежнее правило смешивало в один вердикт с
+        // карантином: ровная медленная машина и машина, сломавшаяся на ходу.
+        RateWatchdog::with_reference(baseline.as_ref().and_then(|b| b.p1_of(label))),
         Arc::clone(&phase_finished),
     );
     // Тел­еметрия ~10 Гц для интерфейса: читает снапшот ядра и зовёт наблюдателя.
@@ -1042,14 +1198,19 @@ fn run_measured_phase(
     phase_finished.store(true, Ordering::Release);
     monitor_run.store(false, Ordering::Relaxed);
     let _ = monitor_handle.join();
-    // Классификация отмены: вердикт запрашиваем только при отмене. Раньше
-    // `recv_timeout` выполнялся при любой ошибке (включая ошибки движка, которых
-    // сторож не присылает) — это гарантированная лишняя пауза в 5 секунд.
+    // Классификация отмены: блокирующее ожидание вердикта нужно только при
+    // отмене — тогда вердикт обязательно будет. Раньше `recv_timeout`
+    // выполнялся при любой ошибке (включая ошибки движка, которых сторож не
+    // присылает) — это гарантированная лишняя пауза в 5 секунд.
+    //
+    // При УСПЕШНОЙ фазе вердикт забираем без блокировки: сторож к этому
+    // моменту либо уже отправил «ровно и медленно», либо молчит, и ждать
+    // было бы лишней паузой в конце каждой фазы.
     let verdict = if matches!(result, Err(RunError::Cancelled)) {
         rx.recv_timeout(Duration::from_millis(WATCHDOG_CANCEL_GRACE_SECS * 1000))
             .ok()
     } else {
-        None
+        rx.try_recv().ok()
     };
     let _ = watchdog_handle.join();
     if let Some(h) = telemetry_handle {
@@ -1069,16 +1230,45 @@ fn run_measured_phase(
         (Err(RunError::Cancelled), Some(WatchdogVerdict::Hung)) => Err(PhaseFailure::Hung {
             phase: label.to_string(),
         }),
-        (Err(RunError::Cancelled), Some(WatchdogVerdict::Collapsed { ticks_per_sec })) => {
-            Err(PhaseFailure::Collapsed {
-                phase: label.to_string(),
+        (
+            Err(RunError::Cancelled),
+            Some(WatchdogVerdict::Collapsed {
                 ticks_per_sec,
-            })
-        }
+                own_median,
+            }),
+        ) => Err(PhaseFailure::Collapsed {
+            phase: label.to_string(),
+            ticks_per_sec,
+            own_median,
+        }),
         (Err(RunError::Cancelled), _) => Err(PhaseFailure::UserCancelled),
         (Err(err), _) => Err(PhaseFailure::Engine(err)),
-        (Ok(report), _) => Ok((report, engine.samples().to_vec())),
+        (Ok(report), slow) => {
+            // Фаза завершилась штатно. Если сторож успел сообщить о ровной
+            // медлительности, замер ДОСТОВЕРЕН — он просто медленный, и
+            // превращать это в ошибку значило бы выбросить хорошее измерение.
+            // Пометка уходит наружу, прогон записывается как есть.
+            if let Some(WatchdogVerdict::SlowButStable {
+                ticks_per_sec,
+                own_median,
+            }) = slow
+            {
+                *slow_note = Some(SlowPhaseNote {
+                    ticks_per_sec,
+                    own_median,
+                });
+            }
+            Ok((report, engine.samples().to_vec()))
+        }
     }
+}
+
+/// Пометка «фаза отмерена, но машина шла ровно медленно».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlowPhaseNote {
+    pub ticks_per_sec: u64,
+    /// Медиана темпа этой же фазы.
+    pub own_median: u64,
 }
 
 /// Ошибка отдельной фазы.
@@ -1088,10 +1278,12 @@ enum PhaseFailure {
     Hung {
         phase: String,
     },
-    /// Машина ползёт: замер остановлен досрочно, схема бракуется.
+    /// Машина сломалась: темп упал относительно её собственной медианы.
+    /// Замер недостоверен — схема в карантин.
     Collapsed {
         phase: String,
         ticks_per_sec: u64,
+        own_median: u64,
     },
     UserCancelled,
     LoadDidNotStop,
@@ -1156,6 +1348,8 @@ struct RunData {
 const fn zero_run_stats() -> RunStats {
     RunStats {
         samples: 0,
+        samples_raw: 0,
+        excluded_fraction: 0.0,
         work_units: 0,
         active_time_ms_total: 0.0,
         average_throughput: 0.0,
@@ -1425,12 +1619,15 @@ pub fn run_session(
         _os_guard.restored.store(true, Ordering::Release);
     }
 
-    let cancelled = match loop_result {
+    let SessionLoopOutcome {
+        cancelled,
+        early_stop_reason,
+    } = match loop_result {
         Err(e) => {
             // Восстановление уже предпринято; возвращаем первичную ошибку.
             return Err(e);
         }
-        Ok(cancelled) => cancelled,
+        Ok(outcome) => outcome,
     };
     restore_result?;
 
@@ -1476,6 +1673,7 @@ pub fn run_session(
         recommendation,
         events,
         cancelled,
+        early_stop_reason,
     })
 }
 
@@ -1493,9 +1691,10 @@ fn run_session_loop(
     name_map: &BTreeMap<String, String>,
     observer: &Option<Arc<dyn TelemetryObserver>>,
     baseline: Option<&crate::history::MachineBaseline>,
-) -> Result<bool, SessionError> {
+) -> Result<SessionLoopOutcome, SessionError> {
     let durs = phase_durations(plan.duration_seconds);
     let mut cancelled = false;
+    let mut early_stop_reason: Option<String> = None;
     let run_total = (plan.scheme_ids.len() as u32) * plan.repetitions;
     let mut run_index: u32 = 0;
 
@@ -1732,7 +1931,7 @@ fn run_session_loop(
                 Arc::clone(user_cancel),
                 // Разогрев — не измерение: обрывать его по темпу нельзя, иначе
                 // плохая схема «успела бы» не начать замер вовсе.
-                CollapseDetector::default(),
+                RateWatchdog::default(),
                 Arc::clone(&warmup_finished),
             );
             let warmup_result = engine.run_phase(
@@ -1911,6 +2110,7 @@ fn run_session_loop(
                         secs,
                     );
                 }
+                let mut slow_note: Option<SlowPhaseNote> = None;
                 let phase_result = run_measured_phase(
                     engine,
                     Arc::clone(user_cancel),
@@ -1919,6 +2119,7 @@ fn run_session_loop(
                     label,
                     &monitor_map,
                     observer.clone(),
+                    &mut slow_note,
                     baseline,
                 );
                 match phase_result {
@@ -1946,6 +2147,25 @@ fn run_session_loop(
                                 samples: times.len(),
                             },
                         );
+                        // Машина шла РОВНО и медленно: темп держался у своей
+                        // медианы, то есть не проседал. Замер достоверен — он
+                        // просто низкий, поэтому он учтён, а не отброшен.
+                        // Ни отбраковки, ни карантина: заведомо консервативная
+                        // схема («max processor state» = 50 %) законный объект
+                        // измерения, и её нельзя наказать за то, что она
+                        // ограничивает частоты намеренно.
+                        if let Some(note_slow) = slow_note {
+                            note(
+                                observer,
+                                events,
+                                SessionEvent::Warn(format!(
+                                    "фаза «{label}» отмерена на низком, но ровном темпе: \
+                                     {} тик/с при медиане {} фазы. Замер достоверен и учтён; \
+                                     если низкий темп не задуман, проверьте ограничения схемы",
+                                    note_slow.ticks_per_sec, note_slow.own_median
+                                )),
+                            );
+                        }
                         ticks += report.ticks;
                         if phase == Phase::Response {
                             supercycles = report.supercycles_completed;
@@ -2050,14 +2270,15 @@ fn run_session_loop(
                     Err(PhaseFailure::Collapsed {
                         phase,
                         ticks_per_sec,
+                        own_median,
                     }) => {
-                        // Машина не пашет, а ползёт. Ждать конца прогона на
-                        // таком темпе незачем: пользователь уже несколько секунд
-                        // работает в замедленной машине. Останавливаем сразу и
-                        // объясняем причину — иначе брак выглядит как зависание.
+                        // Машина сломалась ПО ХОДУ фазы: темп упал относительно
+                        // того, что она же показывала минуту назад. Замер недостоверен,
+                        // и виновата машина, а не схема — но здесь мы обязаны
+                        // остановиться, потому что доверять данным нельзя.
                         let reason = format!(
-                            "машина держит всего {ticks_per_sec} тик/с (фаза «{phase}») — \
-                             замер остановлен, схема не тянет"
+                            "темп упал до {ticks_per_sec} тик/с против медианы фазы \
+                             {own_median} (фаза «{phase}») — замер недостоверен"
                         );
                         note(
                             observer,
@@ -2201,9 +2422,50 @@ fn run_session_loop(
         // раунда, чтобы повторный запуск пропустил ротацию одним махом.
         checkpoint.completed_keys.push(key.clone());
         store.save(checkpoint).map_err(SessionError::Persist)?;
+
+        // --- Адаптивная ранняя остановка ---
+        //
+        // Проверяется после КАЖДОГО целого раунда. Схемы, признанные
+        // забракованными, из статистики исключены: их средние не отвечают ни за
+        // что, а решение о лидерстве принимается по тем, что честно отработали
+        // своё число раундов.
+        let done_rounds = checkpoint
+            .completed_keys
+            .iter()
+            .filter(|k| k.as_str() == run_key(round, &plan.plan_guid).as_str())
+            .count() as u32;
+        let inputs = crate::early_stop::leader_inputs(&checkpoint.runs, &checkpoint.rejections);
+        let decision = crate::early_stop::early_stop_decision(
+            &inputs,
+            done_rounds.max(round + 1),
+            plan.repetitions,
+        );
+        if decision.stop {
+            early_stop_reason = Some(decision.reason.clone());
+            note(
+                observer,
+                events,
+                SessionEvent::EarlyStopped {
+                    reason: decision.reason,
+                },
+            );
+            break 'outer;
+        }
     }
 
-    Ok(cancelled)
+    Ok(SessionLoopOutcome {
+        cancelled,
+        early_stop_reason,
+    })
+}
+
+/// Итог цикла раундов.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct SessionLoopOutcome {
+    /// Сессия прервана пользователем (или недостижимым условием среды).
+    cancelled: bool,
+    /// Причина досрочной остановки, если она была.
+    early_stop_reason: Option<String>,
 }
 
 /// Восстановление исходной схемы (может быть вызвано в любой точке выхода).
@@ -3013,99 +3275,184 @@ mod tests {
 
     /// Медленно ≠ сломано: пока разгон не закончился, низкий темп нормален.
     #[test]
-    fn collapse_detector_ignores_slow_start() {
-        let mut d = CollapseDetector::with_reference(Some(1000.0));
+    fn rate_watchdog_ignores_slow_start() {
+        let mut d = RateWatchdog::new();
         // Первые секунды фазы — низкий темп из-за разгона, обрыва быть не должно,
         // сколько бы секунд мы ни наблюдали.
         for t in 0..COLLAPSE_ARM_SECS {
             assert_eq!(
                 d.observe(5, Duration::from_secs(t)),
-                None,
+                RateVerdict::Ok,
                 "разгон на {t}-й секунде не должен считаться поломкой"
             );
         }
     }
 
-    /// Без ориентира по истории машины решение не принимается вовсе.
+    /// Без истории машины ПОЛОМКА всё равно определяется — по собственной медиане
+    /// фазы. Прежде этого требовался ориентир из истории, и на чистой машине
+    /// зависание по темпу не ловилось вовсе.
     #[test]
-    fn collapse_detector_is_silent_without_machine_baseline() {
-        let mut d = CollapseDetector::with_reference(None);
-        for t in 0..600 {
-            assert_eq!(
-                d.observe(1, Duration::from_secs(t)),
-                None,
-                "без истории машины обрывать нельзя: норма неизвестна"
-            );
+    fn rate_watchdog_detects_collapse_without_machine_history() {
+        let mut d = RateWatchdog::default();
+        let fill = COLLAPSE_ARM_SECS + RATE_SAMPLES_FOR_MEDIAN as u64;
+        for t in COLLAPSE_ARM_SECS..fill {
+            assert_eq!(d.observe(5000, Duration::from_secs(t)), RateVerdict::Ok);
         }
-    }
-
-    /// Порог считается от того, что машина показывала раньше, а не от
-    /// константы: медленная машина не должна обрываться за «нормальный» темп.
-    #[test]
-    fn collapse_detector_threshold_follows_the_machine() {
-        // Медленная машина: её норма — 100 тиков, обрыв ниже 20.
-        let mut slow = CollapseDetector::with_reference(Some(100.0));
-        assert_eq!(slow.observe(50, Duration::from_secs(5)), None);
-        // Быстрая машина: норма — 5000, те же 50 тиков — обрыв.
-        let mut fast = CollapseDetector::with_reference(Some(5000.0));
         let mut fired = false;
-        for t in COLLAPSE_ARM_SECS..=20 {
-            if fast.observe(50, Duration::from_secs(t)).is_some() {
+        for t in fill..=fill + 10 {
+            if d.observe(100, Duration::from_secs(t)) != RateVerdict::Ok {
                 fired = true;
                 break;
             }
         }
-        assert!(fired, "на быстрой машине 50 тиков — это обрыв");
-        // А на медленной машине 50 тиков — норма, и 10 тиков уже нет.
-        let mut stopped = false;
-        for t in COLLAPSE_ARM_SECS..=20 {
-            if slow.observe(10, Duration::from_secs(t)).is_some() {
-                stopped = true;
+        assert!(
+            fired,
+            "падение в 50 раз относительно собственной медианы обязано ловиться \
+         без истории машины"
+        );
+    }
+
+    /// Заведомо консервативная схема: машина идёт ровно и медленно, но ВЫШЕ
+    /// половины собственной медианы.
+    ///
+    /// Прежнее правило сравнивало темп с абсолютной величиной из истории, и такая
+    /// схема получала тот же вердикт, что и сломанная: и то и другое уходило в
+    /// перманентный карантин с причиной «схема не тянет». Теперь это
+    /// `SlowButStable` — медленно, но верно, карантина нет.
+    #[test]
+    fn deliberately_slow_scheme_is_reported_not_rejected() {
+        // История машины: она раньше показывала 1000 тик/с. Ориентир «низкий» = 200.
+        let mut d = RateWatchdog::with_reference(Some(1000.0));
+        let fill = COLLAPSE_ARM_SECS + RATE_SAMPLES_FOR_MEDIAN as u64;
+        for t in COLLAPSE_ARM_SECS..fill {
+            assert_eq!(d.observe(100, Duration::from_secs(t)), RateVerdict::Ok);
+        }
+        assert_eq!(d.median_rate(), 100);
+        // Темп ровно 100 — это 100 % собственной медианы, то есть НЕ поломка.
+        let mut saw_slow = None;
+        let mut collapsed = false;
+        for t in fill..=fill + 30 {
+            match d.observe(100, Duration::from_secs(t)) {
+                RateVerdict::Ok => {}
+                RateVerdict::SlowButStable { ticks_per_sec, .. } => saw_slow = Some(ticks_per_sec),
+                RateVerdict::Collapsed { .. } => {
+                    collapsed = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            !collapsed,
+            "ровный темп на собственной медиане не может считаться поломкой"
+        );
+        assert_eq!(
+            saw_slow,
+            Some(100),
+            "медленная ровная машина обязана быть помечена как таковая"
+        );
+    }
+
+    /// Настоящая поломка: темп ПРОСАЛ относительно того, что машина только что
+    /// показывала. Это единственный случай, когда замер недостоверен.
+    #[test]
+    fn rate_watchdog_detects_a_real_collapse() {
+        let mut d = RateWatchdog::new();
+        for t in COLLAPSE_ARM_SECS..COLLAPSE_ARM_SECS + RATE_SAMPLES_FOR_MEDIAN as u64 {
+            assert_eq!(d.observe(5000, Duration::from_secs(t)), RateVerdict::Ok);
+        }
+        assert_eq!(d.median_rate(), 5000);
+        // Темп упал вчетверо и держится так.
+        let mut fired = None;
+        for t in (COLLAPSE_ARM_SECS + RATE_SAMPLES_FOR_MEDIAN as u64)..=40 {
+            if d.observe(1000, Duration::from_secs(t)) != RateVerdict::Ok {
+                fired = Some(t);
                 break;
             }
         }
-        assert!(stopped, "на медленной машине 10 тиков — это обрыв");
+        assert!(
+            fired.is_some(),
+            "падение вчетверо относительно собственной медианы обязано быть замечено"
+        );
     }
 
-    /// Реальный случай: план душит машину до единиц тиков в секунду.
+    /// Обрыв наступает не мгновенно: ровно через COLLAPSE_HOLD_SECS устойчивого
+    /// низкого темпа после разгона.
     #[test]
-    fn collapse_detector_stops_a_crawling_machine() {
-        let mut d = CollapseDetector::with_reference(Some(1000.0));
-        let mut stopped_at = None;
-        for t in COLLAPSE_ARM_SECS..=20 {
-            if d.observe(10, Duration::from_secs(t)).is_some() {
-                stopped_at = Some(t);
+    fn rate_watchdog_requires_a_sustained_drop() {
+        let mut d = RateWatchdog::new();
+        let fill = COLLAPSE_ARM_SECS + RATE_SAMPLES_FOR_MEDIAN as u64;
+        for t in COLLAPSE_ARM_SECS..fill {
+            assert_eq!(d.observe(4000, Duration::from_secs(t)), RateVerdict::Ok);
+        }
+        let mut fired_at = None;
+        for t in fill..=fill + 10 {
+            if d.observe(100, Duration::from_secs(t)) != RateVerdict::Ok {
+                fired_at = Some(t);
                 break;
             }
         }
         assert_eq!(
-            stopped_at,
-            Some(COLLAPSE_ARM_SECS + COLLAPSE_HOLD_SECS),
-            "обрыв должен наступить через {COLLAPSE_HOLD_SECS} с после разгона"
+            fired_at,
+            Some(fill + COLLAPSE_HOLD_SECS),
+            "обрыв должен наступить через {COLLAPSE_HOLD_SECS} с устойчивого провала"
         );
     }
 
     /// Единичный просад не обрывает замер: темп считается по одному батчу и
     /// сам скачет.
     #[test]
-    fn collapse_detector_survives_single_dip() {
-        let mut d = CollapseDetector::with_reference(Some(1000.0));
-        assert_eq!(d.observe(5000, Duration::from_secs(5)), None);
-        assert_eq!(d.observe(10, Duration::from_secs(6)), None);
+    fn rate_watchdog_survives_single_dip() {
+        let mut d = RateWatchdog::new();
+        let fill = COLLAPSE_ARM_SECS + RATE_SAMPLES_FOR_MEDIAN as u64;
+        for t in COLLAPSE_ARM_SECS..fill {
+            assert_eq!(d.observe(5000, Duration::from_secs(t)), RateVerdict::Ok);
+        }
+        assert_eq!(d.observe(10, Duration::from_secs(fill)), RateVerdict::Ok);
         // Темп вернулся — отсчёт сброшен, до упора держимся.
-        assert_eq!(d.observe(5000, Duration::from_secs(7)), None);
-        assert_eq!(d.observe(5000, Duration::from_secs(20)), None);
-    }
-
-    /// Здоровая машина с тиками тысячами не должна обрываться никогда.
-    #[test]
-    fn collapse_detector_stays_quiet_on_a_healthy_machine() {
-        let mut d = CollapseDetector::with_reference(Some(4000.0));
-        for t in 0..600 {
-            assert_eq!(d.observe(3000, Duration::from_secs(t)), None);
+        for t in fill..fill + 5 {
+            assert_eq!(d.observe(5000, Duration::from_secs(t)), RateVerdict::Ok);
         }
     }
 
+    /// Здоровая машина с темпом около своей медианы не должна вызывать НИ ОДНОГО
+    /// решения — ни поломки, ни медлительности.
+    #[test]
+    fn rate_watchdog_stays_quiet_on_a_healthy_machine() {
+        let mut d = RateWatchdog::new();
+        for t in COLLAPSE_ARM_SECS..600 {
+            let v = d.observe(3000, Duration::from_secs(t));
+            assert_eq!(
+                v,
+                RateVerdict::Ok,
+                "на здоровой машине решений быть не должно: {v:?}"
+            );
+        }
+    }
+
+    /// Медлительность сообщается ОДИН раз на фазу: иначе в журнал уходила бы
+    /// простыня одинаковых строк.
+    #[test]
+    fn slow_but_stable_is_reported_once() {
+        // С ориентиром из истории: машина раньше показывала 1000, порог 200.
+        let mut d = RateWatchdog::with_reference(Some(1000.0));
+        let fill = COLLAPSE_ARM_SECS + RATE_SAMPLES_FOR_MEDIAN as u64;
+        for t in COLLAPSE_ARM_SECS..fill {
+            assert_eq!(d.observe(100, Duration::from_secs(t)), RateVerdict::Ok);
+        }
+        let mut reports = 0;
+        for t in fill..=fill + 30 {
+            if matches!(
+                d.observe(100, Duration::from_secs(t)),
+                RateVerdict::SlowButStable { .. }
+            ) {
+                reports += 1;
+            }
+        }
+        assert_eq!(
+            reports, 1,
+            "медлительность обязана сообщаться ровно один раз"
+        );
+    }
     /// Порог устойчив к выбросам: считается по медианному абсолютному
     /// отклонению, а не по σ.
     #[test]
@@ -3242,6 +3589,7 @@ mod tests {
         let obs: Option<Arc<dyn TelemetryObserver>> = Some(Arc::new(TickRecorder {
             ticks: Arc::clone(&recorded),
         }));
+        let mut slow_note: Option<SlowPhaseNote> = None;
         let result = run_measured_phase(
             &mut engine,
             Arc::new(AtomicBool::new(false)),
@@ -3250,9 +3598,14 @@ mod tests {
             "фаза-тест",
             &monitor_map,
             obs,
+            &mut slow_note,
             None,
         );
         assert!(result.is_ok());
+        assert!(
+            slow_note.is_none(),
+            "здоровая машина не должна давать пометку о медлительности"
+        );
         let got = recorded.lock().unwrap().len();
         assert!(got >= 1, "ожидались тики телеметрии, получено {got}");
         assert!(!engine.progress_snapshot().running);

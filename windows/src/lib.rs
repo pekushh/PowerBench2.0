@@ -11,3 +11,5 @@ pub mod instance;
 pub mod monitor;
 pub mod power;
 pub mod powercfg;
+/// Приоритет процесса на время измерений (RAII, восстановление на Drop).
+pub mod priority;

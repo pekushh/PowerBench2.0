@@ -366,6 +366,11 @@ pub fn session_signature(engine: &Engine) -> CompatibilitySignature {
         timer_hz: powerbench_windows::power::qpc_frequency(),
         cpu_identifier: powerbench_windows::power::cpu_identifier(),
         diagnostics_version: powerbench_windows::power::diagnostics_version().to_string(),
+        // Привязка потоков к ядрам — часть сигнатуры: замер на физических
+        // P-ядрах и замер «на всех логических» — разные измерения, и их
+        // средние складывать нельзя.
+        affinity_mode: engine.affinity_mode().as_str().to_string(),
+        affinity_signature: engine.affinity_signature(),
     }
 }
 
@@ -692,6 +697,11 @@ fn run_measured_phase(
     observer: Option<Arc<dyn TelemetryObserver>>,
     baseline: Option<&crate::history::MachineBaseline>,
 ) -> Result<(RunReport, Vec<f64>), PhaseFailure> {
+    // Приоритет процесса поднимается ровно на время измеряемой фазы и
+    // снимается на Drop — до любой точки выхода, включая ошибку и отмену.
+    // Между фазами процесс остаётся в обычном классе, чтобы не мешать ни
+    // интерфейсу, ни фоновой службе.
+    let priority = powerbench_windows::priority::Guard::raise();
     if !engine.reset() {
         // Пул не затих: в буферы мог писать опоздавший воркер, и любые числа
         // отсюда недостоверны. Молчать об этом нельзя — иначе поломка всплывёт
@@ -771,6 +781,9 @@ fn run_measured_phase(
     if !engine.quiesce_pool() {
         return Err(PhaseFailure::LoadDidNotStop);
     }
+    // Приоритет возвращается исходному классу до выхода из функции: замер
+    // окончен, а процесс пользователя не должен остаться в HIGH.
+    drop(priority);
     match (result, verdict) {
         (Err(RunError::Cancelled), Some(WatchdogVerdict::Hung)) => Err(PhaseFailure::Hung {
             phase: label.to_string(),
@@ -1029,6 +1042,63 @@ pub fn run_session(
             schemes: n_schemes,
         },
     );
+
+    // --- Условия измерения, которые пользователь обязан знать ---
+    //
+    // Всё это либо напрямую меняет величину в отчёте, либо ослабляет саму
+    // защиту замера. Молчать о таком нельзя: тогда на вопрос «почему две
+    // сессии так разошлись» пришлось бы отвечать догадками. Сообщается
+    // один раз за сессию и только о проблемах — штатное состояние описано
+    // строкой старта у обоих фронтендов.
+
+    // 1. Привязка потоков к ядрам.
+    for failure in engine.affinity_failures() {
+        note(
+            &observer,
+            &mut events,
+            SessionEvent::Warn(format!(
+                "привязать поток к ядру не удалось ({failure}) — замер идёт без привязки, \
+                 разброс между прогонами будет выше обычного"
+            )),
+        );
+    }
+    if let Some(why) = engine.topology().error() {
+        note(
+            &observer,
+            &mut events,
+            SessionEvent::Warn(format!(
+                "топологию ядер разведать не удалось ({why}) — замер идёт без привязки"
+            )),
+        );
+    }
+    let clamp_note = engine.worker_count_note();
+    if !clamp_note.is_empty() {
+        note(
+            &observer,
+            &mut events,
+            SessionEvent::Warn(format!(
+                "{clamp_note}; фактически воркеров {}",
+                engine.worker_count()
+            )),
+        );
+    }
+
+    // 2. Приоритет процесса на время фаз: поднимается и сразу возвращается,
+    // поэтому служит здесь только проверкой «можно ли поднять».
+    {
+        let probe = powerbench_windows::priority::Guard::raise();
+        if let Some(why) = probe.not_raised_reason() {
+            note(
+                &observer,
+                &mut events,
+                SessionEvent::Warn(format!(
+                    "приоритет процесса на время замера не поднят ({why}) — \
+                     фоновые процессы смогут вытеснять потоки бенчмарка"
+                )),
+            );
+        }
+        drop(probe);
+    }
 
     // Гарантия ОС, которая не зависит от пути выхода.
     //

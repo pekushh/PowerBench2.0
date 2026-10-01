@@ -514,6 +514,8 @@ fn identity_of(engine: &Engine) -> IdentityJson {
         os_build: powerbench_windows::power::os_build(),
         memory_gib: powerbench_windows::power::memory_gib(),
         cpu_brand: powerbench_windows::power::cpu_brand(),
+        affinity_mode: sig.affinity_mode,
+        affinity_signature: sig.affinity_signature,
     }
 }
 

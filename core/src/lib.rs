@@ -17,6 +17,7 @@ pub mod engine;
 pub mod pool;
 pub mod prng;
 pub mod sample;
+pub mod topology;
 
 #[cfg(test)]
 mod tests;

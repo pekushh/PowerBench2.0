@@ -7,3 +7,12 @@ description = "Движок нагрузки GamingCpuV1: тик-процесс�
 
 [dependencies]
 sha2 = "0.10"
+
+# Топология процессора и привязка потоков к ядрам: нужны только на Windows,
+# на остальных платформах модуль `topology` собирается заглушкой.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }

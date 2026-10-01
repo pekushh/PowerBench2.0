@@ -109,6 +109,19 @@ pub struct IdentityJson {
     /// Брендовое имя CPU для человека («AMD Ryzen 7 5800X3D»).
     #[serde(default)]
     pub cpu_brand: String,
+    /// Режим привязки потоков к ядрам (`p-only` | `all-logical` | `off`).
+    ///
+    /// Часть идентичности, а не украшение отчёта: замер на физических P-ядрах
+    /// и замер «на всех логических» — разные измерения, и смешивать их в
+    /// базовой линии машины нельзя. На гибридной архитектуре разница между
+    /// ними измеряется десятками процентов. Пустое значение — запись сделана
+    /// до появления привязки; такие записи в ранжирование против новых не
+    /// попадают.
+    #[serde(default)]
+    pub affinity_mode: String,
+    /// Подпись раскладки потоков по ядрам (хэш списка (группа, индекс)).
+    #[serde(default)]
+    pub affinity_signature: String,
 }
 
 impl IdentityJson {
@@ -130,6 +143,8 @@ impl IdentityJson {
             os_build: String::new(),
             memory_gib: 0.0,
             cpu_brand: String::new(),
+            affinity_mode: sig.affinity_mode.clone(),
+            affinity_signature: sig.affinity_signature.clone(),
         }
     }
 }

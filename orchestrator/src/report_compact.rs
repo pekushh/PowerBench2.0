@@ -1470,6 +1470,8 @@ mod tests {
                 os_build: "26200.1".into(),
                 memory_gib: 32.0,
                 cpu_brand: "AMD Ryzen 5 7500F".into(),
+                affinity_mode: "p-only".into(),
+                affinity_signature: "p-only:test".into(),
             },
             schemes,
             recommendation: RecommendationJson {

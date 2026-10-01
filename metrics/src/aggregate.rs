@@ -54,6 +54,18 @@ pub struct CompatibilitySignature {
     pub cpu_identifier: String,
     /// Версия диагностики.
     pub diagnostics_version: String,
+    /// Режим привязки потоков к ядрам: `p-only` | `all-logical` | `off`.
+    ///
+    /// Часть сигнатуры не по формальности: замер на физических P-ядрах и замер
+    /// «на всех логических» — это разные измерения, и их средние складывать
+    /// нельзя. На гибридной архитектуре разница между ними измеряется
+    /// десятками процентов.
+    pub affinity_mode: String,
+    /// Подпись раскладки потоков по ядрам (хэш списка (группа, индекс)).
+    ///
+    /// Отличается, если машина или набор доступных ядер изменились: тот же
+    /// режим на другом наборе ядер — другой замер.
+    pub affinity_signature: String,
 }
 
 /// Подпись детерминизма GamingCpuV1: контрольные суммы фаз.
@@ -255,6 +267,8 @@ mod tests {
             timer_hz: 10_000_000,
             cpu_identifier: "test-cpu".to_string(),
             diagnostics_version: "0.1.0".to_string(),
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:test".to_string(),
         }
     }
 
@@ -441,10 +455,52 @@ mod tests {
             summary(100.0, 1, 1, s.clone(), 6),
         ];
         let err = aggregate_runs(&runs).unwrap_err();
-        assert_eq!(err, AggregateError::ChecksumMismatch);
+        assert!(matches!(err, AggregateError::ChecksumMismatch));
         assert_eq!(
             err.to_string(),
             "контрольная сумма различается между повторами"
         );
+    }
+
+    /// Привязка потоков к ядрам — часть сигнатуры: замер на физических
+    /// P-ядрах и замер «на всех логических» агрегировать нельзя. На
+    /// гибридной архитектуре разница между ними — десятки процентов, то есть
+    /// ровно величина, ради которой схемы и сравнивают.
+    #[test]
+    fn refuses_runs_with_different_affinity() {
+        let a = sig("GamingCpuV1", "AAA");
+
+        let mut b = a.clone();
+        b.affinity_mode = "all-logical".to_string();
+        let runs = [
+            summary(100.0, 1, 1, a.clone(), 5),
+            summary(100.0, 1, 1, b, 5),
+        ];
+        assert!(
+            matches!(
+                aggregate_runs(&runs),
+                Err(AggregateError::SignatureMismatch)
+            ),
+            "разный режим привязки обязан запрещать агрегацию"
+        );
+
+        let mut c = a.clone();
+        c.affinity_signature = "p-only:ffffffffffffffff".to_string();
+        let runs = [
+            summary(100.0, 1, 1, a.clone(), 5),
+            summary(100.0, 1, 1, c, 5),
+        ];
+        assert!(
+            matches!(
+                aggregate_runs(&runs),
+                Err(AggregateError::SignatureMismatch)
+            ),
+            "разная раскладка по ядрам обязана запрещать агрегацию"
+        );
+
+        // Одинаковая привязка — агрегация разрешена.
+        let d = a.clone();
+        let runs = [summary(100.0, 1, 1, a, 5), summary(100.0, 1, 1, d, 5)];
+        assert!(aggregate_runs(&runs).is_ok());
     }
 }

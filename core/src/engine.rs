@@ -20,6 +20,7 @@ use crate::config::{
 use crate::pool::{JobDescriptor, Pool};
 use crate::prng::wrap_position;
 use crate::sample::{SampleBuffer, capacity_for_ticks};
+use crate::topology::{AffinityMode, CpuTopology};
 
 /// Число тиков в коротких прогонах самопроверки ядра.
 const SELF_CHECK_TICKS: u64 = 32;
@@ -73,8 +74,15 @@ pub struct ProgressSnapshot {
     pub running: bool,
     pub ticks_done: u64,
     pub elapsed_secs: u64,
+    /// Время БАТЧА целиком: вычислительная часть плюс синхронизация пула.
+    /// По нему считается темп тиков — он отражает реальную скорость цикла.
     pub last_tick_ns: u64,
     pub current_ticks_per_sec: u64,
+    /// Время ВЫЧИСЛИТЕЛЬНОЙ части последнего тика — то, что пишется в замер.
+    pub last_compute_ns: u64,
+    /// Время батча целиком (дублирует `last_tick_ns` для пары счётчиков,
+    /// обновляемых в одном месте).
+    pub last_total_ns: u64,
 }
 
 /// Табло прогресса для UI (атомарные счётчики, опрос отдельным потоком).
@@ -86,6 +94,8 @@ pub struct Scoreboard {
     elapsed_secs: AtomicU64,
     last_tick_ns: AtomicU64,
     current_ticks_per_sec: AtomicU64,
+    last_compute_ns: AtomicU64,
+    last_total_ns: AtomicU64,
 }
 
 impl Scoreboard {
@@ -97,6 +107,8 @@ impl Scoreboard {
             elapsed_secs: self.elapsed_secs.load(Ordering::Relaxed),
             last_tick_ns: self.last_tick_ns.load(Ordering::Relaxed),
             current_ticks_per_sec: self.current_ticks_per_sec.load(Ordering::Relaxed),
+            last_compute_ns: self.last_compute_ns.load(Ordering::Relaxed),
+            last_total_ns: self.last_total_ns.load(Ordering::Relaxed),
         }
     }
 }
@@ -119,7 +131,12 @@ pub struct Engine {
     scoreboard: Arc<Scoreboard>,
     logical_cpus: usize,
     worker_count: usize,
+    /// Какое число воркеров просил вызывающий (`None` — «по умолчанию»).
+    /// Сохраняется, чтобы умещение можно было объяснить в журнале, а не
+    /// делать вид, что запрос был удовлетворён.
+    requested_worker_count: Option<usize>,
     config_hash: String,
+    topology: CpuTopology,
 }
 
 /// Резерв одного ядра под главный поток и одного под Windows/UI.
@@ -127,16 +144,54 @@ fn default_worker_count(logical_cpus: usize) -> usize {
     logical_cpus.saturating_sub(2).max(1)
 }
 
+/// Число воркеров с учётом трёх потолков.
+///
+/// `MAXIMUM_JOBS` ограничивает не «разум», а полезность: пул шире, чем задач
+/// на тик, не делает ничего — каждый лишний воркер всё равно просыпается на
+/// `notify_all`, берёт мьютекс и рапортует о завершении, то есть добавляет
+/// МЕРИМУЮ синхронизацию вместо вычислений. На сервере со 192 потоками без
+/// этого ограничения в тик входило бы больше сотни холостых пробуждений.
+///
+/// Потолок по числу слотов привязки обязателен в режимах с маской: воркер без
+/// ядра вернул бы в измерение ровно то, ради чего привязка и ставилась.
+fn worker_count_for(
+    logical_cpus: usize,
+    requested: Option<usize>,
+    topology: &CpuTopology,
+) -> usize {
+    let base = requested
+        .unwrap_or_else(|| default_worker_count(logical_cpus))
+        .max(1);
+    let cap = match topology.mode() {
+        // Привязка выключена или не разведана: ограничивать нечем.
+        AffinityMode::AffinityOff => MAXIMUM_JOBS,
+        _ => {
+            let slots = topology.slots();
+            if slots == 0 { MAXIMUM_JOBS } else { slots }
+        }
+    };
+    base.min(cap)
+}
+
 impl Engine {
-    /// Создать движок. `worker_count = None` → `max(1, logical_cpus − 2)`.
+    /// Создать движок в режиме привязки по умолчанию (P-ядра, либо режим из
+    /// `POWERBENCH_AFFINITY`). `worker_count = None` → `max(1, logical_cpus − 2)`,
+    /// дополнительно ограниченное `MAXIMUM_JOBS` и числом доступных ядер.
     /// Число воркеров фиксируется на запуск и сохраняется во все результаты.
     pub fn new(worker_count: Option<usize>) -> Self {
+        Self::new_with_affinity(worker_count, AffinityMode::resolve_default())
+    }
+
+    /// Создать движок с явно заданным режимом привязки потоков.
+    pub fn new_with_affinity(worker_count: Option<usize>, mode: AffinityMode) -> Self {
         let logical_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
-        let worker_count = worker_count.unwrap_or_else(|| default_worker_count(logical_cpus));
+        let topology = CpuTopology::detect(mode);
+        let requested = worker_count;
+        let worker_count = worker_count_for(logical_cpus, requested, &topology);
         let entities = Arc::new(RawShared::new(EntityBuffers::from_seed(SEED)));
-        let pool = Pool::new(worker_count, entities.clone());
+        let pool = Pool::new_with_affinity(worker_count, entities.clone(), Some(&topology));
         Self {
             entities,
             pool,
@@ -148,11 +203,76 @@ impl Engine {
                 elapsed_secs: AtomicU64::new(0),
                 last_tick_ns: AtomicU64::new(0),
                 current_ticks_per_sec: AtomicU64::new(0),
+                last_compute_ns: AtomicU64::new(0),
+                last_total_ns: AtomicU64::new(0),
             }),
             logical_cpus,
             worker_count,
+            requested_worker_count: requested,
             config_hash: config_hash().to_string(),
+            topology,
         }
+    }
+
+    /// Топология и режим привязки, под которыми работает движок.
+    pub fn topology(&self) -> &CpuTopology {
+        &self.topology
+    }
+
+    /// Режим привязки потоков.
+    pub fn affinity_mode(&self) -> AffinityMode {
+        self.topology.mode()
+    }
+
+    /// Подпись размещения для `CompatibilitySignature`.
+    pub fn affinity_signature(&self) -> String {
+        self.topology.signature()
+    }
+
+    /// Какое число воркеров просил вызывающий (`None` — «по умолчанию»).
+    pub fn requested_worker_count(&self) -> Option<usize> {
+        self.requested_worker_count
+    }
+
+    /// Число воркеров уменьшилось относительно запроса.
+    ///
+    /// Умещение — не ошибка, а требование к измеримости: лишний воркер не
+    /// получил бы своего ядра и добавил бы в измерение холостые пробуждения.
+    /// Но сказать об этом пользователю обязательно, иначе «7 воркеров» в
+    /// настройках молча превращаются в 6.
+    pub fn worker_count_clamped(&self) -> bool {
+        self.requested_worker_count
+            .is_some_and(|r| r != self.worker_count)
+    }
+
+    /// Пояснение к числу воркеров для журнала сессии (пусто — умещения не было).
+    pub fn worker_count_note(&self) -> String {
+        if !self.worker_count_clamped() {
+            return String::new();
+        }
+        let requested = self.requested_worker_count.unwrap_or(0);
+        format!(
+            "число воркеров уменьшено с {requested} до {}: {}",
+            self.worker_count,
+            match self.topology.mode() {
+                AffinityMode::AffinityOff =>
+                    format!("потолок MAXIMUM_JOBS={MAXIMUM_JOBS} (привязка выключена)"),
+                _ if self.topology.slots() == 0 => {
+                    "топология ядер не разведана, действует потолок по числу воркеров".to_string()
+                }
+                _ => format!(
+                    "в режиме «{}» доступно {} ядер",
+                    self.topology.mode().as_str(),
+                    self.topology.slots()
+                ),
+            }
+        )
+    }
+
+    /// Воркеры, которым ОС отказала в маске привязки (пусто — привязка
+    /// поставлена всем воркерам либо выключена).
+    pub fn affinity_failures(&self) -> &[String] {
+        self.pool.affinity_failures()
     }
 
     pub fn worker_count(&self) -> usize {
@@ -294,11 +414,27 @@ impl Engine {
             // вторая половина пула простаивает, и это и есть измеряемый режим.
             let active_workers = active_workers_for(phase, self.pool.worker_count());
 
-            // Время тика измеряется вокруг четырёх шагов (QPC/Instant).
+            // Измеряется ТОЛЬКО вычислительная часть тика.
+            //
+            // Вокруг `main_stage` не должно быть ни захватов мьютексов пула, ни
+            // построения дескрипторов, ни ожидания батча, ни финальной цепочки
+            // контрольных сумм: всё это — стоимость измерительного устройства,
+            // а не измеряемой работы. Такая константа одинакова для всех схем,
+            // поэтому она не портит сравнение схем между собой, но СЖИМАЕТ
+            // относительную разницу (реальные 5 % превращаются в меньшее), и
+            // главное — делает шум синхронизации сравнимым с шумом вычислений.
+            //
+            // Общее время батча (`total_ns`) считается отдельно и идёт в
+            // темп тиков и телеметрию: темп тиков — это скорость цикла, и он
+            // обязан включать синхронизацию, иначе детектор провала и «стоп»
+            // получили бы неверную величину.
             let tick_started = Instant::now();
 
             // 1. Main-стадия.
             let main_checksum = main_stage(&self.entities, &params);
+
+            // Замер вычислительной части закрыт ДО любой синхронизации.
+            let compute_elapsed = tick_started.elapsed();
 
             // 2. Диспетчер задач.
             let descriptors = build_descriptors(&params);
@@ -318,32 +454,46 @@ impl Engine {
                 crate::pool::BatchError::TimedOut => RunError::WorkerFailed,
             })?;
 
+            // Общее время батча: вычисление + построение дескрипторов +
+            // диспетчеризация + ожидание + снимок слотов + контрольные суммы.
+            let total_elapsed = tick_started.elapsed();
+
             // 4. Финализация: объединение слотов по возрастанию номера задачи.
             let slots = self.pool.job_slots_snapshot(params.worker_jobs);
             let mut tick_checksum = mix(main_checksum, phase_index);
             for slot in slots.iter().take(params.worker_jobs) {
                 tick_checksum = mix(tick_checksum, *slot);
             }
-            let run_elapsed = tick_started.elapsed();
             tick_checksum = finalize_tick(tick_checksum, global_tick);
             run_checksum = mix(run_checksum, tick_checksum);
             if first_tick_checksum.is_none() {
                 first_tick_checksum = Some(tick_checksum);
             }
 
-            buffer.push(run_elapsed.as_secs_f64() * 1000.0);
+            // Сэмпл — время вычислительной части, в миллисекундах.
+            buffer.push(compute_elapsed.as_secs_f64() * 1000.0);
 
-            let last_ns = run_elapsed.as_nanos() as u64;
+            let compute_ns = compute_elapsed.as_nanos() as u64;
+            let total_ns = total_elapsed.as_nanos() as u64;
             self.scoreboard
                 .ticks_done
                 .store(global_tick + 1, Ordering::Relaxed);
             self.scoreboard
+                .last_compute_ns
+                .store(compute_ns, Ordering::Relaxed);
+            self.scoreboard
+                .last_total_ns
+                .store(total_ns, Ordering::Relaxed);
+            self.scoreboard
                 .last_tick_ns
-                .store(last_ns, Ordering::Relaxed);
+                .store(total_ns, Ordering::Relaxed);
             self.scoreboard
                 .elapsed_secs
                 .store(started.elapsed().as_secs(), Ordering::Relaxed);
-            let tps = 1_000_000_000u64.checked_div(last_ns).unwrap_or(0);
+            // Темп тиков — по ОБЩЕМУ времени батча, а не по вычислению: темп
+            // характеризует скорость цикла, и подмена сделала бы детектор
+            // провала нечувствительным к зависанию пула.
+            let tps = 1_000_000_000u64.checked_div(total_ns).unwrap_or(0);
             self.scoreboard
                 .current_ticks_per_sec
                 .store(tps, Ordering::Relaxed);

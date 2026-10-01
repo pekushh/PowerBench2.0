@@ -45,6 +45,8 @@ fn snapshot_session(id: &str, median: f64, margin: f64) -> SessionJson {
             os_build: String::new(),
             memory_gib: 0.0,
             cpu_brand: String::new(),
+            affinity_mode: "p-only".into(),
+            affinity_signature: "p-only:test".into(),
         },
         schemes: vec![sch, second],
         recommendation: RecommendationJson {

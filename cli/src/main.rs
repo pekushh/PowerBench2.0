@@ -46,7 +46,13 @@ const WORKER_MATRIX: [usize; 3] = [1, 2, 4];
 #[derive(Serialize)]
 struct Check {
     name: String,
+    /// Нарушений не обнаружено.
     ok: bool,
+    /// Проверка способна упасть. `false` — пункт ничего не проверяет в этой
+    /// сборке и не должен входить в итоговый вердикт: иначе отчёт зелёный
+    /// благодаря проверке, которая не может стать красной ни при каких
+    /// обстоятельствах, и это читается как «всё хорошо».
+    measured: bool,
     detail: String,
 }
 
@@ -60,13 +66,28 @@ struct Report {
     logical_cpus: usize,
     default_workers: usize,
     checks: Vec<Check>,
+    /// Все ПРОВЕРЯЕМЫЕ пункты прошли.
     passed: bool,
+    /// Сколько пунктов в этой сборке проверить невозможно.
+    inconclusive: usize,
 }
 
 fn check(checks: &mut Vec<Check>, name: &str, ok: bool, detail: impl Into<String>) {
     checks.push(Check {
         name: name.to_string(),
         ok,
+        measured: true,
+        detail: detail.into(),
+    });
+}
+
+/// Пункт, который в этой сборке не измеряется: он попадает в отчёт, но не в
+/// вердикт. Так он честно виден и не может притвориться успешной проверкой.
+fn check_inconclusive(checks: &mut Vec<Check>, name: &str, detail: impl Into<String>) {
+    checks.push(Check {
+        name: name.to_string(),
+        ok: true,
+        measured: false,
         detail: detail.into(),
     });
 }
@@ -132,11 +153,26 @@ fn main() -> ExitCode {
     println!("воркеров (default): {}", report.default_workers);
     println!();
     for c in &report.checks {
-        let tag = if c.ok { "ok  " } else { "FAIL" };
+        // Непроверяемый пункт не должен выглядеть как успешная проверка:
+        // метка «SKIP» говорит, что падать ему нечему, и в вердикт он не входит.
+        let tag = if !c.measured {
+            "SKIP"
+        } else if c.ok {
+            "ok  "
+        } else {
+            "FAIL"
+        };
         println!("[{tag}] {}", c.name);
         println!("       {}", c.detail);
     }
     println!();
+    if report.inconclusive > 0 {
+        println!(
+            "Из {} пунктов {} в этой сборке проверить невозможно и в вердикт не входят.",
+            report.checks.len(),
+            report.inconclusive
+        );
+    }
     if report.passed {
         println!("Итог: PASS (код выхода 0)");
     } else {
@@ -434,27 +470,83 @@ fn run_validator() -> Report {
         ),
     );
 
-    // 8. Ноль аллокаций в главном цикле тиков.
+    // 8. Изоляция измерения: замер обязан быть КОРОЧЕ батча.
     //
-    // Счётчик измеряет только то, что прошло через `CountingAllocator`, а он
-    // стоит под `#[cfg(test)]` в core: в релизной сборке CLI `COUNT` всегда ноль,
-    // и проверка проходила бы, ничего не проверяя. Поэтому здесь она честно
-    // сообщает «не измеряется», а настоящая проверка живёт в тестах крейта
-    // (`zero_allocations_in_tick_loop`), где аллокатор установлен.
+    // Это проверяемое утверждение о строении движка, и оно ровно то, что
+    // ломается первым при правке цикла тика: если кто-то снова включит в
+    // измеряемый интервал ожидание пула или финальную цепочку контрольных
+    // сумм, `compute` станет равен `total`, и проверка упадёт. В отличие от
+    // счётчика аллокаций, здесь падать есть чему.
+    engine.reset();
+    let timing_run = engine.run_phase(Phase::Heavy, RunTarget::Ticks(SHORT_TICKS));
+    let snap = engine.progress_snapshot();
+    let isolation_ok = timing_run.is_ok()
+        && snap.last_compute_ns > 0
+        && snap.last_total_ns > 0
+        && snap.last_compute_ns <= snap.last_total_ns;
+    let sync_share = if snap.last_total_ns > 0 {
+        100.0 * (snap.last_total_ns - snap.last_compute_ns) as f64 / snap.last_total_ns as f64
+    } else {
+        0.0
+    };
+    check(
+        &mut checks,
+        "timing-isolation",
+        isolation_ok,
+        format!(
+            "вычисление {} нс из батча {} нс (синхронизация и обвязка — {sync_share:.1} %)",
+            snap.last_compute_ns, snap.last_total_ns
+        ),
+    );
+
+    // 9. Привязка потоков к ядрам действительно применена.
+    //
+    // Проверка ПРОВЕРЯЕМАЯ: `SetThreadAffinityMask` отказать может (политика
+    // домена, некоторые виртуализированные ЦП), и тогда замер идёт на
+    // произвольных ядрах — то есть результат перестаёт быть тем, чем
+    // подписан. Молчать об этом нельзя.
+    let failures = engine.affinity_failures();
+    check(
+        &mut checks,
+        "affinity-applied",
+        failures.is_empty(),
+        if failures.is_empty() {
+            engine.topology().describe()
+        } else {
+            format!(
+                "ОС отказала {} воркерам: {}",
+                failures.len(),
+                failures.join("; ")
+            )
+        },
+    );
+
+    // 10. Ноль аллокаций в главном цикле тиков — НЕ ПРОВЕРЯЕТСЯ в этой сборке.
+    //
+    // Счётчик живёт за `#[cfg(test)]` в core: в релизной сборке CLI `COUNT`
+    // всегда ноль, и проверка проходила бы, ничего не проверяя. Раньше она
+    // при этом входила в `passed`, то есть отчёт показывал зелёный статус
+    // благодаря пункту, который не может стать красным. Теперь такой пункт
+    // помечен `measured: false`, не влияет на вердикт и честно называет, где
+    // настоящая проверка: `powerbench-core::tests::zero_allocations_in_tick_loop`,
+    // где аллокатор действительно установлен.
     engine.reset();
     let warm = engine.run_phase(Phase::Heavy, RunTarget::Ticks(SHORT_TICKS));
     let measured = engine.run_phase(Phase::Heavy, RunTarget::Ticks(32));
-    check(
+    check_inconclusive(
         &mut checks,
         "zero-allocations",
-        warm.is_ok() && measured.is_ok(),
         format!(
-            "аллокации в релизной сборке не измеряются (счётчик только в тестах \
-             крейта): {}",
+            "в релизной сборке не измеряется (счётчик только в тестах крейта): \
+             прогон {} / {}, счётчик {}; настоящая проверка — \
+             powerbench-core::tests::zero_allocations_in_tick_loop",
+            warm.is_ok(),
+            measured.is_ok(),
             COUNT.load(Ordering::Relaxed)
         ),
     );
 
+    let inconclusive = checks.iter().filter(|c| !c.measured).count();
     Report {
         program: "powerbench-cli".to_string(),
         version: config::VERSION.to_string(),
@@ -462,7 +554,10 @@ fn run_validator() -> Report {
         config_hash: config::config_hash().to_string(),
         logical_cpus,
         default_workers,
-        passed: checks.iter().all(|c| c.ok),
+        // Вердикт считается ТОЛЬКО по проверяемым пунктам: непроверяемый
+        // пункт не имеет права сделать отчёт зелёным.
+        passed: checks.iter().all(|c| !c.measured || c.ok),
         checks,
+        inconclusive,
     }
 }

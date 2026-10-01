@@ -295,6 +295,8 @@ pub fn identity_of(engine: &Engine) -> IdentityJson {
         os_build: powerbench_windows::power::os_build(),
         memory_gib: powerbench_windows::power::memory_gib(),
         cpu_brand: powerbench_windows::power::cpu_brand(),
+        affinity_mode: sig.affinity_mode,
+        affinity_signature: sig.affinity_signature,
     }
 }
 
@@ -415,15 +417,16 @@ fn run_test(
     let _ = guard;
     // Параметры замера и идентичность движка пишем в журнал ДО старта сессии.
     // Именно этой строкой потом объясняется «контрольная сумма различается
-    // между повторами»: если хеш конфигурации или число воркеров отличаются
-    // от прошлой сессии, расхождение ожидаемо, а не дефект.
+    // между повторами»: если хэш конфигурации или число воркеров отличаются
+    // от прошлой сессии, расхождение ожидаемо, а не дефект. Топология и
+    // привязка — здесь же: они тоже часть идентичности замера.
     persist_log(
         &app,
         "info",
         &format!(
             "старт замера: план {}, схем {}, раундов {}, длительность прогона {} с, \
              разогрев {} с, охлаждение {} с, порог фона {} %; \
-             нагрузка {}, конфигурация {}, seed {:016X}, воркеров {}, ядер {}",
+             нагрузка {}, конфигурация {}, seed {:016X}, воркеров {}, ядер {}; {}",
             plan.plan_guid,
             plan.scheme_ids.len(),
             plan.repetitions,
@@ -436,6 +439,7 @@ fn run_test(
             engine.seed(),
             engine.worker_count(),
             engine.logical_cpus(),
+            engine.topology().describe(),
         ),
     );
     let observer = Arc::new(AppObserver {

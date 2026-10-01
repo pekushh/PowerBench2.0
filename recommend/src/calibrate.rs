@@ -115,6 +115,8 @@ fn scheme_from_runs(id: &str, avgs: &[f64]) -> SchemeAggregate {
             timer_hz: 10_000_000,
             cpu_identifier: "calibrator-cpu".to_string(),
             diagnostics_version: "0.1.0".to_string(),
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:test".to_string(),
         },
         determinism: DeterminismSignature::new(vec![42]),
         aggregate,

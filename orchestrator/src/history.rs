@@ -134,6 +134,13 @@ pub fn same_identity(a: &IdentityJson, b: &IdentityJson) -> bool {
         && a.timer_hz == b.timer_hz
         && a.cpu_identifier == b.cpu_identifier
         && a.diagnostics_version == b.diagnostics_version
+        // Привязка потоков к ядрам: замер на P-ядрах и замер на всех
+        // логических сопоставимы только при совпадении обоих полей. Пустая
+        // подпись означает запись, сделанную до появления привязки, —
+        // против новых она ранжироваться не должна.
+        && a.affinity_mode == b.affinity_mode
+        && a.affinity_signature == b.affinity_signature
+        && !a.affinity_signature.is_empty()
 }
 
 /// Записи, совместимые с базовой идентичностью (входят в сравнение).
@@ -506,6 +513,8 @@ mod tests {
                 os_build: String::new(),
                 memory_gib: 0.0,
                 cpu_brand: String::new(),
+                affinity_mode: "p-only".into(),
+                affinity_signature: "p-only:test".into(),
             },
             schemes: vec![SchemeJson::from_aggregate(
                 "s1".to_string(),

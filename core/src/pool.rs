@@ -10,6 +10,7 @@
 //! - остановка кооперативная и по времени ограниченная.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -18,6 +19,7 @@ use crate::buffers::{EntityBuffers, RawShared};
 use crate::checksum::mix;
 use crate::config::{ANIMATION_STEP, MAXIMUM_JOBS, VISIBILITY_MIX_CONSTANT};
 use crate::prng::unit_bits;
+use crate::topology::CpuTopology;
 
 /// Константа смешивания проб видимости (из спецификации).
 /// Период опроса при ожидании пробуждения.
@@ -123,6 +125,9 @@ pub struct Pool {
     /// счётчику, а не по `join`, чтобы зависший поток не держал выключение.
     live_workers: Arc<AtomicUsize>,
     worker_count: usize,
+    /// Воркеры, которым ОС отказала в маске привязки (пусто — привязка
+    /// поставлена всем или выключена).
+    affinity_failures: Vec<String>,
 }
 
 /// Снимает счётчик живых воркеров при любом выходе из цикла, включая панику.
@@ -236,6 +241,12 @@ fn process_jobs(
     }
 }
 
+/// Что воркеру нужно для привязки к ядру: топология и канал отчёта.
+type AffinityBind = (Arc<CpuTopology>, mpsc::Sender<(usize, Result<(), String>)>);
+
+// Сигнатура — полный перечень того, что нужно потоку воркера; группировать
+// ради счётчика аргументов значило бы спрятать зависимости в структуру.
+#[allow(clippy::too_many_arguments)]
 fn worker_loop(
     shared: Arc<PoolShared>,
     cancel: Arc<AtomicBool>,
@@ -244,8 +255,16 @@ fn worker_loop(
     worker_index: usize,
     worker_count: usize,
     entities: Arc<RawShared<EntityBuffers>>,
+    affinity: Option<AffinityBind>,
 ) {
     let _live = LiveWorkerGuard(live_workers);
+    // Привязка — первым делом в потоке и именно здесь, а не до `spawn`:
+    // маска принадлежит потоку, и поставленная до создания наследуется ВСЕМИ
+    // новыми потоками — то есть дала бы всем воркерам одно и то же ядро.
+    if let Some((topology, tx)) = affinity {
+        let outcome = topology.bind_current_thread(worker_index);
+        let _ = tx.send((worker_index, outcome));
+    }
     // Сентинел, отличный от любой эпохи: воркер ждёт первого настоящего батча.
     let mut last_epoch = u64::MAX;
 
@@ -304,18 +323,39 @@ fn worker_loop(
                 guard.busy = false;
             }
         }
-        shared.work_done.notify_all();
+        // Сигнал — ПОСЛЕ отпускания мьютекса. Notify под блокировкой будит
+        // ожидающих, которые тут же упрутся в тот же мьютекс: лишнее
+        // пробуждение и лишнее переключение контекста в самом горячем цикле.
         drop(guard);
+        shared.work_done.notify_all();
     }
 }
 
 impl Pool {
-    /// Создать пул из `worker_count` persistent-потоков.
+    /// Создать пул из `worker_count` persistent-потоков без привязки к ядрам.
+    ///
+    /// Используется тестами и путями, где привязка не нужна. Боевой путь —
+    /// [`Pool::new_with_affinity`].
     ///
     /// `worker_count == 0` — ошибка конфигурации, а не «пустой пул»: раньше
     /// это приводило к панике в горячем потоке. Если поток запустить не удалось,
     /// уже запущенные останавливаются, иначе они остались бы жить вечно.
     pub fn new(worker_count: usize, entities: Arc<RawShared<EntityBuffers>>) -> Self {
+        Self::new_with_affinity(worker_count, entities, None)
+    }
+
+    /// Создать пул, привязав воркер `i` к ядру `topology.slot(i)`.
+    ///
+    /// Отказ ОС в маске не является ошибкой запуска: замер продолжается в
+    /// обычном режиме, а неудачные привязки возвращаются в
+    /// [`Pool::affinity_failures`] и попадают в журнал сессии. Молча пропустить
+    /// их нельзя — тогда в отчёте появился бы замер, выполненный на
+    /// произвольных ядрах, помеченный как привязанный.
+    pub fn new_with_affinity(
+        worker_count: usize,
+        entities: Arc<RawShared<EntityBuffers>>,
+        topology: Option<&CpuTopology>,
+    ) -> Self {
         assert!(worker_count >= 1, "пул воркеров не может быть пустым");
         let shared = Arc::new(PoolShared {
             lock: Mutex::new(PoolInner {
@@ -337,6 +377,15 @@ impl Pool {
         // Счётчик растёт по мере успешного запуска, иначе при частичном
         // старте он навсегда остался бы больше числа живых потоков.
         let live_workers = Arc::new(AtomicUsize::new(0));
+        // Канал только для отчёта о привязке: каждый воркер шлёт ровно одно
+        // сообщение сразу при старте, до входа в цикл.
+        let (bind_tx, bind_rx, bind_topology) = match topology {
+            Some(t) => {
+                let (tx, rx) = mpsc::channel();
+                (Some(tx), Some(rx), Some(Arc::new(t.clone())))
+            }
+            None => (None, None, None),
+        };
 
         let mut handles = Vec::with_capacity(worker_count);
         for w in 0..worker_count {
@@ -350,6 +399,10 @@ impl Pool {
             let shutdown = shutdown.clone();
             let live_for_worker = live_workers.clone();
             let entities = entities.clone();
+            let affinity = match (&bind_topology, &bind_tx) {
+                (Some(t), Some(tx)) => Some((Arc::clone(t), tx.clone())),
+                _ => None,
+            };
             let spawned = std::thread::Builder::new()
                 .name(format!("powerbench-worker-{w}"))
                 .spawn(move || {
@@ -361,6 +414,7 @@ impl Pool {
                         w,
                         worker_count,
                         entities,
+                        affinity,
                     )
                 });
             match spawned {
@@ -383,6 +437,33 @@ impl Pool {
             }
         }
 
+        // Собираем отчёты о привязке. Воркер шлёт их до входа в цикл, поэтому
+        // ожидание короткое; потолок нужен лишь на случай, если поток не
+        // стартовал вовсе.
+        let mut affinity_failures = Vec::new();
+        if let Some(rx) = bind_rx {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for _ in 0..worker_count {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    affinity_failures.push("воркер не отчитался о привязке за 5 с".to_string());
+                    break;
+                }
+                match rx.recv_timeout(left) {
+                    Ok((idx, Ok(()))) => {
+                        debug_assert!(idx < worker_count, "отчёт о привязке от чужого воркера");
+                    }
+                    Ok((idx, Err(e))) => {
+                        affinity_failures.push(format!("воркер {idx}: {e}"));
+                    }
+                    Err(_) => {
+                        affinity_failures.push("отчёт о привязке не получен".to_string());
+                        break;
+                    }
+                }
+            }
+        }
+
         Self {
             shared,
             handles,
@@ -390,7 +471,14 @@ impl Pool {
             shutdown,
             live_workers,
             worker_count,
+            affinity_failures,
         }
+    }
+
+    /// Воркеры, которым ОС отказала в маске привязки. Пусто — привязка
+    /// поставлена всем воркерам либо выключена.
+    pub fn affinity_failures(&self) -> &[String] {
+        &self.affinity_failures
     }
 
     /// Сколько воркеров ещё работает (для диагностики и тестов остановки).

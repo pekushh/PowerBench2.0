@@ -426,8 +426,69 @@ fn metadata_is_fixed_at_startup() {
     let _g = lock();
     let engine = Engine::new(Some(7));
     assert_eq!(engine.seed(), crate::config::SEED);
-    assert_eq!(engine.worker_count(), 7);
     assert_ne!(engine.config_hash(), "");
     assert_eq!(engine.config_hash().len(), 64);
     assert_eq!(engine.version(), crate::config::VERSION);
+    // Запрошено 7 воркеров, но воркеров не больше, чем ядер в режиме
+    // привязки: на машине с шестью P-ядрами седьмому воркеру просто не на
+    // что встать, и без умещения он просыпался бы вхолостую, добавляя в
+    // измерение синхронизацию вместо работы.
+    let cap = match engine.affinity_mode() {
+        crate::topology::AffinityMode::AffinityOff => crate::config::MAXIMUM_JOBS,
+        _ => engine.topology().slots().max(1),
+    };
+    assert_eq!(engine.worker_count(), 7.min(cap));
+    assert_eq!(engine.requested_worker_count(), Some(7));
+    assert_eq!(engine.worker_count_clamped(), engine.worker_count() != 7);
+    if engine.worker_count_clamped() {
+        assert!(
+            !engine.worker_count_note().is_empty(),
+            "умещение числа воркеров обязано объясняться, иначе запрос тайно меняется"
+        );
+    }
+}
+
+/// Число воркеров всегда в пределах, при которых замер хоть что-то значит:
+/// хотя бы один, не больше потолка задач и не больше доступных ядер.
+#[test]
+fn worker_count_respects_every_cap() {
+    let _g = lock();
+    for requested in [None, Some(1), Some(3), Some(64), Some(256), Some(4096)] {
+        let engine = Engine::new(requested);
+        let n = engine.worker_count();
+        assert!(n >= 1, "запрошено {requested:?}: пустой пул недопустим");
+        assert!(
+            n <= crate::config::MAXIMUM_JOBS,
+            "запрошено {requested:?}: {n} воркеров при потолке {}",
+            crate::config::MAXIMUM_JOBS
+        );
+        assert!(
+            n <= engine.logical_cpus().max(1),
+            "{requested:?}: воркеров больше, чем CPU"
+        );
+        if engine.affinity_mode() != crate::topology::AffinityMode::AffinityOff {
+            let slots = engine.topology().slots();
+            if slots > 0 {
+                assert!(
+                    n <= slots,
+                    "запрошено {requested:?}: {n} воркеров при {slots} слотах"
+                );
+            }
+        }
+    }
+}
+
+/// Привязка выключена — воркерам не назначается ни одного слота, но пул
+/// остаётся рабочим: режим существует для машин, где маски запрещены.
+#[test]
+fn affinity_off_pool_still_runs() {
+    let _g = lock();
+    let mut engine = Engine::new_with_affinity(Some(4), crate::topology::AffinityMode::AffinityOff);
+    engine.reset();
+    let report = engine
+        .run_phase(Phase::Light, RunTarget::Ticks(16))
+        .expect("фаза обязана выполняться без привязки");
+    assert_eq!(report.ticks, 16);
+    assert!(engine.affinity_failures().is_empty());
+    assert!(engine.affinity_signature().starts_with("off:"));
 }

@@ -23,7 +23,15 @@ use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORY
 use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
 
 /// Версия диагностики (часть CompatibilitySignature).
-pub const DIAGNOSTICS_VERSION: &str = "0.1.0";
+///
+/// `0.2.0` — с этой версии измеряется **только вычислительная часть тика**
+/// (`main_stage`), а общее время батча с синхронизацией пула ушло в телеметрию
+/// и темп тиков. Это меняет величину результата примерно в 2-3 раза при той же
+/// самой нагрузке, поэтому версия поднята: без этого прогон, сделанный до и
+/// после изменения, считался бы сопоставимым, и базовая линия машины сложила
+/// бы две разные шкалы. `config_hash` здесь не помогает — он отражает объём
+/// работы, который не изменился, а меняется только то, что именно замеряется.
+pub const DIAGNOSTICS_VERSION: &str = "0.2.0";
 
 /// Ошибка работы с электропитанием.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -856,7 +864,11 @@ mod tests {
 
     #[test]
     fn diagnostics_version_is_fixed() {
-        assert_eq!(diagnostics_version(), "0.1.0");
+        assert_eq!(diagnostics_version(), "0.2.0");
+        // Версия диагностики входит в CompatibilitySignature: её смена
+        // обязана запрещать агрегацию прогонов, сделанных по разным
+        // правилам измерения. Поэтому она непуста и осмысленна.
+        assert!(diagnostics_version().split('.').count() == 3);
     }
 
     /// Смещение зоны обязано быть целым числом минут и правдоподобным по

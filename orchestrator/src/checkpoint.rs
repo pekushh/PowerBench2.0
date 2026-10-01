@@ -472,6 +472,8 @@ mod tests {
             timer_hz: 10_000_000,
             cpu_identifier: "cpu".to_string(),
             diagnostics_version: "0.1.0".to_string(),
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:test".to_string(),
         });
         assert_eq!(summary.stats.consistency_percent, 99.0);
         assert_eq!(summary.burst_retention_percent, 100.0);

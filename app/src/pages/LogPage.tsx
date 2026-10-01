@@ -9,8 +9,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { commands, onLog, type LoggerEntry } from "../api";
 import { SearchIcon } from "../components/icons";
+import { Page, PageHead } from "../components/Page";
 import { usePill } from "../components/usePill";
-import { useCascade } from "../components/useCascade";
 import { pushToast, setSectionDetail } from "../store";
 import { pluralish } from "../plural";
 
@@ -68,7 +68,6 @@ export default function LogPage({ active = true }: { active?: boolean }) {
   // По умолчанию скрываем: отчёт заведомо уходит вовне (в чат, в issues), а
   // логин и путь `C:\Users\…` для разбора ошибки ничего не дают.
   const [redact, setRedact] = useState(true);
-  const rootRef = useCascade<HTMLDivElement>(active);
   const [copied, setCopied] = useState(false);
   const nextKey = useRef(0);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -234,10 +233,10 @@ export default function LogPage({ active = true }: { active?: boolean }) {
   }, [all.length, counts.error]);
 
   return (
-    <div className="page fill logs-page" ref={rootRef}>
-      <div className="page-head">
-        <h1>Логи</h1>
-        <div className="actions">
+    <Page active={active} fill>
+      <PageHead
+        title="Логи"
+        actions={
           <div
             className="support-bar"
             title="В отчёт войдут журнал, конфигурация, состояние контрольной точки, карантин и последняя сессия"
@@ -260,8 +259,8 @@ export default function LogPage({ active = true }: { active?: boolean }) {
               {saving ? "Готовлю отчёт…" : "Сохранить отчёт для поддержки"}
             </button>
           </div>
-        </div>
-      </div>
+        }
+      />
 
       <div className="log-controls">
         <div className="search-box log-search">
@@ -357,6 +356,6 @@ export default function LogPage({ active = true }: { active?: boolean }) {
           </div>
         )}
       </div>
-    </div>
+    </Page>
   );
 }

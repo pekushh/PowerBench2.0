@@ -124,7 +124,11 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .titlebar-btn.narrow{min-width:36px}
 .titlebar .split{width:1px;height:20px;background:var(--line-2);margin:0 6px}
 .body{flex:1;display:flex;min-height:0;gap:10px}
-.sidebar{position:relative;flex:0 0 200px;display:flex;flex-direction:column;padding:12px 10px;gap:4px;background:var(--bg-1);border:1px solid var(--line-1);border-top:0;border-radius:0 0 var(--radius-lg) var(--radius-lg);transition:flex-basis var(--t-3) var(--e-out),width var(--t-3) var(--e-out);overflow:hidden}
+/* Ширина панели задаётся токеном `--side-w`, а не числом: раньше здесь стояло
+   `flex: 0 0 200px`, а `--side-w` из той же строки `:root` читался только для
+   сдвига колонки под центр окна. Правка токена двигала сдвиг, но не саму
+   панель, и поля вокруг колонки переставали быть симметричными. */
+.sidebar{position:relative;flex:0 0 var(--side-w);display:flex;flex-direction:column;padding:12px 10px;gap:4px;background:var(--bg-1);border:1px solid var(--line-1);border-top:0;border-radius:0 0 var(--radius-lg) var(--radius-lg);overflow:hidden;transition:flex-basis var(--t-3) var(--e-out)}
 .sidebar.collapsed{flex-basis:var(--rail-w)}
 .sidebar-nav{display:flex;flex-direction:column;gap:4px}
 .sidebar-foot{margin-top:auto;display:flex;flex-direction:column;gap:4px;border-top:1px solid var(--line-1);padding-top:8px}
@@ -145,7 +149,11 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .sidebar.collapsed .sidebar-foot{border-top:0;padding-top:8px}
 /* Отступы контента: по бокам адаптивный `--pad-x` (14–40 px), сверху и снизу
    смысловые интервалы `--sp-5` / `--sp-6` (ТЗ С-4, C.4). */
-.main{flex:1;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding:var(--sp-5) var(--pad-x) var(--sp-6);display:flex;flex-direction:column}
+/* Отступы контента — один стандарт для всех экранов: сверху и снизу
+   `--sp-5` (16–24 px), по бокам `--pad-x` (14–40 px). Раньше снизу стоял
+   `--sp-6` (20–32 px), и низ длинной страницы отходил от края окна сильнее,
+   чем верх. */
+.main{flex:1;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding:var(--sp-5) var(--pad-x);display:flex;flex-direction:column}
 .page-host{display:none}
 /* Обёртка страницы — flex-элемент `.main`. `1 1 auto` позволял ей сжаться до
    высоты окна: длинная страница тогда не росла, её низ уходил за пределы
@@ -182,20 +190,58 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
    Остаток — `scrollbar-gutter`: полоса прокрутки отнимается у `.main` только
    справа, поэтому при глобе 15 px (WebView2) центр сместится ещё на ~7 px.
    `both-edges` дал бы точность, но забрал бы лишние 30 px ширины на узких
-   окнах, поэтому оставлен `stable`. */
-.page{width:100%;max-width:var(--content-max);margin:0 auto;min-height:100%;display:flex;flex-direction:column;justify-content:safe center;gap:var(--sp-4);position:relative;left:calc(var(--rail-cur) / -2);flex:0 0 auto}
+   окнах, поэтому оставлен `stable`.
+
+   `justify-content: flex-start` — один для всех экранов. Раньше здесь стояло
+   `safe center`, и короткая страница (настройки, схемы) вставала по центру по
+   вертикали, а длинная (логи, результаты) прижималась к верху: при переходе
+   между вкладками содержимое прыгало на треть высоты окна, а заголовок — на
+   сотни пикселей. «Воздух» короткого экрана теперь просто пустое место под
+   содержимым, и оно одинаково на всех вкладках. */
+.page{width:100%;max-width:var(--content-max);margin:0 auto;min-height:100%;display:flex;flex-direction:column;justify-content:flex-start;gap:var(--sp-4);position:relative;left:calc(var(--rail-cur) / -2);flex:0 0 auto}
 /* Блоки страницы не сжимаются по высоте.
    `.page` — flex-контейнер, а у его детей `flex-shrink` по умолчанию равен 1.
    Если содержимое длиннее окна, карточки сжимались вместо того, чтобы страница
-   прокрутилась: на «Настройках» превью темы и переключатель «Тема»
+   прокручилась: на «Настройках» превью темы и переключатель «Тема»
    обрезались, а из пяти полей параметров теста оставались два. Прокручивать
    должен контейнер `.main`. */
 .page>*{flex:0 0 auto}
-/* ===== Экран «Бенчмарк»: шапка наверху, блоки забирают высоту =====
-   Шапка («Бенчмарк», этапы, полоса под ними) прижата к верху, а освободившаяся
-   высота распределяется между блоками. Остальные короткие экраны остаются по
-   центру — это свойство `.page`, а не этого экрана. */
-.benchmark-view{justify-content:flex-start}
+/* ===== Шапка страницы: одна на всех экранов =====
+   Заголовок, сводка и действия. Отступов сверху нет намеренно: верх шапки —
+   это ровно верх содержимого `.main`, поэтому Y заголовка одинаков на всех
+   вкладках независимо от того, что в шапке есть ещё.
+
+   Раньше у «Бенчмарка» была своя шапка `.wizard-header` с линией снизу и
+   отступом 20 px, а верхний отступ 4 px у `.page-head` поднимал заголовок
+   остальных экранов. Обе разметки теперь собирает `PageHead`, а правило ниже
+   одно.
+
+   `align-items: baseline` — заголовок и сводка встают на одну базовую линию.
+   При `flex-start` подпись «2 записи» прилипала к верхнему краю заголовка и
+   читалась как надстрочный индекс над «Результаты»; то же самое повторялось
+   на всех страницах. */
+.page-head{display:flex;align-items:flex-start;gap:var(--sp-3);flex-wrap:wrap;padding-bottom:var(--sp-4)}
+/* Заголовок прижат к верху шапки, остальное центрируется по её высоте.
+
+   Раньше стояло `align-items: baseline`, и заголовок вставал на общую
+   базовую линию со сводкой и кнопками. Отсюда и был главный дефект: чем выше
+   сосед — тем ниже заголовок. На «Бенчмарке» рядом степпер на 30 px выше
+   текста, и H1 уезжал вниз; на «Логах» — кнопка экспорта, и он уезжал иначе.
+   Замер показывал расхождение до 4 px между экранами, то есть ровно тот
+   «прыжок заголовка» при переключении вкладки, который и требовалось убрать.
+
+   Теперь верх заголовка — это верх шапки, и он одинаков на всех экранах при
+   любой высоте соседей. */
+.page-head h1{font-size:var(--fs-h1);font-weight:650;letter-spacing:var(--ls-tight);line-height:var(--lh-tight);flex:0 0 auto}
+.page-head .sub{color:var(--fg-dim);font-size:var(--fs-sm);align-self:center}
+/* Степпер и кнопки выравниваются по середине заголовка, а не по верху: блок
+   в 30 px на 19-пиксельной строке смотрелся бы приставленным к потолку. */
+.page-head .stepper,.page-head .actions{align-self:center}
+.page-head .actions{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
+/* ===== Экран «Бенчмарк»: блоки забирают высоту =====
+   Шапка и дальше идут от верха, как на всех остальных экранах: правило
+   `justify-content:flex-start` теперь общее у `.page`, и «Бенчмарк» больше не
+   отличается вертикальным положением содержимого. */
 /* Вся цепочка вниз — «расти можно, сжиматься нельзя» (`1 0 auto`).
    С `1 1 auto` каждый уровень ужимался до высоты окна: низ уходил за пределы
    блока, страница не росла и `.main` не видел высоты содержимого — прокручивать
@@ -215,10 +261,6 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
    поля остались бы прижаты к её верху. Свёрнутая (без `.open`) не растёт. */
 .adv-wrap.open{flex:1 1 auto;display:flex;flex-direction:column}
 .adv-wrap.open .adv-body{flex:1 1 auto}
-.page-head{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;padding:var(--sp-1) 0 var(--sp-2)}
-.page-head h1{font-size:var(--fs-h1);font-weight:650;letter-spacing:var(--ls-tight);line-height:var(--lh-tight)}
-.page-head .sub{color:var(--fg-dim);font-size:var(--fs-sm)}
-.page-head .actions{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
 .glass{background:var(--bg-2);border:1px solid var(--line-1);border-radius:var(--radius-lg);box-shadow:var(--shadow-card);padding:var(--sp-4)}
 .glass.lift{transition:border-color var(--dur) var(--ease),transform var(--dur-slow) var(--ease),box-shadow var(--dur-slow) var(--ease)}
 .glass.lift:hover{border-color:var(--line-2);transform:translateY(-2px);box-shadow:var(--shadow-lift)}
@@ -463,14 +505,12 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 .grid2>*,.run-grid>*,.mode-stats>*{min-width:0}
 .dd-item.on{font-weight:600}
 /* Экраны с собственной прокруткой (логи, результаты) занимают всю высоту:
-   центрировать их нельзя — прокручиваемый список должен начинаться под шапкой. */
-.page.fill{height:100%;min-height:0;justify-content:flex-start}
+   их список прокручивается внутри колонки и должен доходить до низа окна. */
+.page.fill{height:100%;min-height:0}
 .fill-list{flex:1 1 auto;min-height:160px;max-height:none}
-.section-title{font-size:var(--fs-h2);font-weight:650;margin:var(--sp-4) 0 2px;letter-spacing:-.1px}
+.section-title{font-size:var(--fs-h2);font-weight:650;margin:0 0 var(--sp-2);letter-spacing:-.1px}
 /* --- Настройки: раскладка «строка настройки» и карточки состояния --------- */
-.set-page{gap:var(--sp-2)}
-.set-sec{display:flex;flex-direction:column;gap:var(--sp-1)}
-.set-sec .section-head{margin-top:var(--sp-2)}
+.set-sec{display:flex;flex-direction:column;gap:var(--sp-3)}
 
 /* Кнопка каталога в шапке: приглушённая, с рамкой и значком. */
 /* Радиус 9px, а не общий `--radius-md` (14px): на кнопке высотой 34px он
@@ -537,7 +577,6 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 /* Адаптив. Окно можно тянуть мышью, поэтому строки складываются в одну
    колонку до того, как управление начнёт упираться в подпись. */
 @media (max-width:760px){
-.set-page-head{flex-wrap:wrap}
 .set-row{flex-direction:column;align-items:stretch;gap:var(--sp-2);padding:var(--sp-3)}
 .set-row .seg{width:100%}
 .set-row .seg button{flex:1 1 0;justify-content:center}
@@ -601,12 +640,6 @@ html.bench-running .pick-tile{
 .modal.wide{width:min(880px,94vw);max-height:min(86vh,820px)}
 .modal-body{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .modal-scrollx{overflow-x:auto;max-width:100%}
-/* ╨и╨░╨┐╨║╨░ ╤Б╤В╤А╨░╨╜╨╕╤Ж╤Л: ╨╕╨╜╤Д╨╛-╤Б╤В╤А╨╛╨║╨░ ╨╛╤В╨┤╨╡╨╗╤М╨╜╨╛╨╣ ╤Б╤В╤А╨╛╨║╨╛╨╣, ╤З╤В╨╛╨▒╤Л ╨╜╨╡ ╨╜╨░╨╡╨╖╨╢╨░╨╗╨░ ╨╜╨░ ╨║╨╜╨╛╨┐╨║╨╕. */
-/* Заголовок и соседний мелкий текст выравниваются по базовой линии, а не по
-   верху бокса. С `flex-start` подпись «2 записи» прилипала к верхнему краю
-   заголовка и читалась как надстрочный индекс над «Результаты» — то же самое
-   повторялось на всех страницах. */
-.page-head{align-items:baseline}
 /* Плитки прежнего выбора схем на этом шаге заменили горизонтальные карточки `.pick-card` из макета. */
 /* --- ╨б╨╛╨┤╨╡╤А╨╢╨╕╨╝╨╛╨╡ ╨╝╨╛╨┤╨░╨╗╨║╨╕ ╤А╨╡╨╖╤Г╨╗╤М╤В╨░╤В╨░ --- */
 /* Пять плиток (медиана, конфигурация, перевес, схемы, прогонов): четыре колонки
@@ -627,10 +660,10 @@ html.bench-running .pick-tile{
  mask-image:linear-gradient(to bottom,transparent 3px,#000 14px),linear-gradient(to bottom,#000 calc(100% - 14px),transparent calc(100% - 3px))}
 /* Строка с троттлингом частоты: результат замерялся в ограниченном режиме. */
 /* ===== Логи: фильтры, карточка журнала, строки ===== */
-/* Высоту задаёт `.logs-page` через `.page.fill`, а карточка растёт на
-   оставшееся место: журнал должен занимать окно целиком, а не полосу. */
-.logs-page{height:100%;min-height:0}
-.logs-page .page-head{flex:0 0 auto}
+/* Высоту задаёт `.page.fill`, а карточка растёт на оставшееся место: журнал
+   должен занимать окно целиком, а не полосу. Шапка не сжимается — иначе на
+   невысоком окне заголовок уходил под панель фильтров. */
+.page.fill>.page-head{flex:0 0 auto}
 
 /* Панель выгрузки отчёта для поддержки: в шапке, рядом с заголовком. Без
    своей рамки и фона — блок стоял «коробкой в коробке» рядом с кнопкой
@@ -694,8 +727,12 @@ html.bench-running .pick-tile{
 /* Пока журнал грузится, пустое состояние занимает карточку целиком. */
 .log-card>.empty-state{flex:1 1 auto}
 
-@media (max-width:720px){
-.logs-page{height:auto;min-height:0}
+/* Один порог для обоих экранов со своей прокруткой: раньше «Логи» теряли
+   высоту колонки на 720 px, а «Результаты» — только на 780 px, то есть между
+   этими ширинами один экран занимал окно целиком, а другой прокручивался
+   внутри `.main`. */
+@media (max-width:780px){
+.page.fill{height:auto;min-height:0}
 .log-controls{justify-content:stretch}
 .log-search{max-width:none}
 .support-bar{width:100%;justify-content:space-between;flex-wrap:wrap}
@@ -792,8 +829,6 @@ html.bench-running .pick-tile{
 .schemes-toolbar .toolbar-left{width:100%}
 }
 /* ===== Результаты: шапка, панель фильтров, карточки сессий ===== */
-.results-page{gap:var(--sp-3)}
-
 .results-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;flex:0 0 auto}
 .res-search{flex:1 1 220px;max-width:300px;width:auto}
 .res-search .search{padding:6.5px 12px 6.5px 32px;border-radius:9px;background:var(--bg-1);border-color:var(--line-1)}
@@ -841,7 +876,6 @@ html.bench-running .pick-tile{
 
 
 @media (max-width:780px){
-.results-page{height:auto;min-height:0}
 .session-card{grid-template-columns:1fr;gap:12px}
 .sc-metrics{border-left:0;border-right:0;border-top:1px solid var(--line-1);border-bottom:1px solid var(--line-1);padding:10px 0;justify-content:space-between}
 .m-col{align-items:flex-start}
@@ -858,8 +892,6 @@ html.bench-running .pick-tile{
 .mini-menu button{display:block;width:100%;text-align:left;padding:6px 9px;border:0;border-radius:6px;background:transparent;color:var(--fg-dim);font:inherit;font-size:var(--fs-sm);cursor:pointer}
 .mini-menu button:hover{background:var(--bg-2);color:var(--fg)}
 /* ===== Правки по «Результатам»: шапка, тулбар, бейджи, кнопка удаления ===== */
-/* Отступ между заголовком и счётчиком в строке шапки. */
-.results-page .page-head{gap:12px}
 /* Счётчик сессий переехал в строку заголовка, поэтому строка-разделитель
    больше не нужна. */
 .page-head .sub b{color:var(--fg);font-weight:600}
@@ -885,8 +917,6 @@ html.bench-running .pick-tile{
 .btn-del{width:34px;height:34px;border-radius:8px;border:1px solid var(--line-1);background:var(--bg-0);color:var(--fg-mute)}
 .btn-del:hover{color:var(--err);background:color-mix(in srgb,var(--err) 12%,transparent);border-color:var(--errline)}
 /* ===== Правки по «Схемам питания»: сводка, поиск, высота заголовков, табы ===== */
-/* Отступ между заголовком и сводкой в строке шапки. */
-.schemes-page .page-head{gap:14px}
 /* Плейсхолдер «Поиск по названию или GUID…» обрезался на «GU»: поле было
    уже, чем сам текст подсказки. */
 .sch-search{flex:1 1 265px;min-width:265px;max-width:320px}
@@ -1044,11 +1074,14 @@ tr.is-leader .score-bar i{background:var(--ok)}
    предстарт и живой дашборд ===== */
 /* Свой предел ширины убран: колонка должна быть одна (ТЗ С-1). */
 
-/* Единая шапка: заголовок + степпер + кнопки навигации */
-.wizard-header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-bottom:16px;margin-bottom:20px;border-bottom:1px solid var(--line-1)}
-.wh-left{display:flex;align-items:center;gap:24px;flex-wrap:wrap;min-width:0}
-.page-title{font-size:var(--fs-h1);font-weight:700;margin:0;letter-spacing:-.3px}
-.stepper{display:flex;align-items:center;gap:8px;background:var(--bg-1);border:1px solid var(--line-1);border-radius:10px;padding:4px 8px}
+/* Шапка «Бенчмарка» — та же `.page-head`, что и на остальных экранах: раньше
+   здесь была своя `.wizard-header` с линией снизу, отступом 20 px и
+   заголовком весом 700 вместо 650, и при переходе с этой вкладки на любую
+   другую содержимое подскакивало вверх.
+
+   Степпер — слот между заголовком и действиями, поэтому базовая линия
+   заголовка не зависит от его высоты. */
+.stepper{display:flex;align-items:center;gap:8px;background:var(--bg-1);border:1px solid var(--line-1);border-radius:10px;padding:4px 8px;align-self:center}
 .stepper .steps-group{display:inline-flex;align-items:center;gap:8px}
 .step-item{display:inline-flex;align-items:center;gap:7px;font:inherit;font-size:12.5px;font-weight:500;color:var(--fg-mute);background:transparent;border:0;padding:4px 8px;border-radius:7px;cursor:pointer;white-space:nowrap;transition:color var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease)}
 .step-item:hover:not(:disabled){color:var(--fg-dim);background:rgba(255,255,255,.03)}
@@ -1059,7 +1092,6 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .step-item.done{color:var(--fg-dim)}
 .step-item.done .step-badge{background:var(--okbg);color:var(--ok);border-color:var(--okline)}
 .step-line{width:16px;height:1px;background:var(--line-1);flex:0 0 auto}
-.wh-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
 .btn-back{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:9px;border:1px solid var(--line-1);background:var(--bg-1);color:var(--fg-dim);font:inherit;font-size:var(--fs-body);font-weight:600;cursor:pointer;white-space:nowrap;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
 .btn-back:hover:not(:disabled){background:var(--bg-2);border-color:var(--line-2);color:var(--fg)}
 .btn-back:disabled{opacity:.5;cursor:default}
@@ -1259,8 +1291,10 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .warn-banner b{color:var(--warn)}
 
 @media (max-width:860px){
-.benchmark-view{padding-left:var(--sp-3);padding-right:var(--sp-3)}
-.wh-actions{width:100%}
+/* Раньше здесь были свои горизонтальные отступы у `.benchmark-view`: на узком
+   окне отступы колонки съезжали с 14 px на 10–12 px только на этой вкладке, и
+   при переходе на неё содержимое сдвигалось. Теперь отступ у `.main` один. */
+.page-head .actions{width:100%}
 }
 @media (max-width:560px){
 .adv-summary{display:none}
@@ -1466,7 +1500,6 @@ html[data-motion="off"] *::after{
    Переезжающая полоска активного пункта не появляется заново, а меняет
    высоту и позицию за 320 мс пружиной. Сворачивание идёт по ширине с
    ограничением текста, а не через `display: none`, чтобы кадр не дёргался. */
-.sidebar{transition:width var(--t-3) var(--e-out)}
 .sidebar-nav{position:relative;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.14) transparent;min-height:0}
 .sidebar-nav::-webkit-scrollbar{width:9px}
 .sidebar-nav::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:999px;border:3px solid transparent;background-clip:content-box}
@@ -1564,8 +1597,8 @@ html[data-motion="off"] *::after{
 /* ===== Рельса: геометрия по замерам в пикселях =====
    Иконка была смещена влево на 11 px: пункт центрировался, но подпись в
    свёрнутом виде ещё занимала место и отжимала иконку. Теперь подпись убрана
-   полностью, квадрат строго 38×38 и центрирован, иконки единого размера. */
-.sidebar{transition:flex-basis var(--t-3) var(--e-out),width var(--t-3) var(--e-out)}
+   полностью, квадрат строго 38×38 и центрирован, иконки единого размера.
+   Переход ширины задан один раз — в правиле `.sidebar` выше. */
 .sidebar.collapsed{padding:10px 8px}
 .sidebar.collapsed .nav-item{width:38px;height:38px;margin:0 auto;padding:0;display:grid;place-items:center;gap:0;border-radius:10px}
 /* Подпись в свёрнутом виде убирается, а не сжимается: сжатая подпись
@@ -1639,10 +1672,9 @@ html[data-motion="off"] *::after{
 @media (max-width: 899px){
   .body{--rail-w:52px}
   .ph-grid,.kpi-strip,.set-status,.launch-grid,.mode-grid{grid-template-columns:1fr}
-  .wizard-header{gap:var(--sp-3)}
-  .wh-left{order:1;flex:1 1 100%}
-  .wh-actions{order:2;width:100%}
-  .wizard-header .wh-left .stepper{order:3}
+  /* Степпер уходит на свою строку: заголовок, этапы и кнопки в одну строку на
+     такой ширине уже не помещались. */
+  .page-head .stepper{order:3;flex:1 1 100%}
   .lh-metrics{grid-template-columns:repeat(2,auto);width:100%}
   .modal{width:100%;max-height:88vh}
 }

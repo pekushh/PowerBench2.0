@@ -16,7 +16,7 @@ import {
 } from "../api";
 import { Button, Glass, Spot } from "../components/ui";
 import { GearIcon } from "../components/icons";
-import { useCascade } from "../components/useCascade";
+import { Page, PageHead } from "../components/Page";
 import { pushToast, setRunning, setSectionDetail, useSession } from "../store";
 import { SchemePicker, filterEligible, sortSchemes } from "../components/SchemeTiles";
 
@@ -170,10 +170,9 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
   // Пользователь согласился на замер с завышенным фоном (ТЗ Д-7). Сбрасывается
   // при каждом новом замере фона: подтверждение относится к конкретной цифре.
   const [riskAccepted, setRiskAccepted] = useState(false);
-  // Каскад появления перезапускается при каждом открытии вкладки, а не один
-  // раз при монтировании: страницы смонтированы все сразу и переключаются
-  // классом, поэтому анимация иначе играла бы только в первый раз.
-  const rootRef = useCascade<HTMLDivElement>(active);
+  // Каскад появления живёт в `Page`: он перезапускается при каждом открытии
+  // вкладки, а не один раз при монтировании (страницы смонтированы все сразу и
+  // переключаются классом, поэтому анимация иначе играла бы только в первый раз).
   // Режим для крошки держим отдельно от остальной строки: он меняется
   // независимо от замера и схем.
   const [modeDetail, setModeDetail] = useState("");
@@ -722,59 +721,61 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
   };
 
   return (
-    <div className="page benchmark-view" ref={rootRef}>
-      {/* Единая шапка: заголовок, степпер и кнопки навигации. */}
-      <div className="wizard-header">
-        <div className="wh-left">
-          <h1 className="page-title">Бенчмарк</h1>
-          <nav className="stepper" aria-label="Этапы запуска">
-            {STAGES.map((s, idx) => {
-              const st = stepState(s.id);
-              return (
-                <span className="steps-group" key={s.id}>
-                  <button
-                    type="button"
-                    className={`step-item ${st}`}
-                    aria-current={st === "active" ? "step" : undefined}
-                    disabled={live}
-                    title={live ? "Во время замера шаги менять нельзя" : `К шагу «${s.label}»`}
-                    onClick={() => !live && go(s.id, s.id === stage ? "fwd" : "back")}
-                  >
-                    <span className="step-badge">{st === "done" ? "✓" : idx + 1}</span>
-                    <span>{s.label}</span>
-                  </button>
-                  {idx < STAGES.length - 1 ? <span className="step-line" /> : null}
-                </span>
-              );
-            })}
-          </nav>
-        </div>
-
-        <div className="wh-actions">
-          {stage === "mode" ? null : (
-            <button type="button" className="btn-back" disabled={live} onClick={back}>
-              ← Назад
-            </button>
-          )}
-          {stage === "mode" || stage === "schemes" ? (
-            <button
-              type="button"
-              className="btn-next"
-              disabled={stage === "schemes" && selected.size === 0}
-              onClick={next}
-            >
-              Далее →
-            </button>
-          ) : null}
-          {/* На предстарте кнопку запуска в шапке не дублируем: она одна,
-              в панели `.launch-cta-bar`, иначе два одинаковых вызова рядом. */}
-          {live ? (
-            <button type="button" className="btn-stop" disabled={stopping} onClick={stop}>
-              {stopping ? "■ Остановка…" : "■ Остановить тест"}
-            </button>
-          ) : null}
-        </div>
-      </div>
+    <Page active={active}>
+      {/* Шапка общая с остальными экранами: заголовок, этапы мастера и кнопки
+          навигации. Раньше здесь стояла своя `.wizard-header` с линией снизу и
+          отступом 20 px, из-за чего «Бенчмарк» стоял на 4 px выше остальных. */}
+      <PageHead
+        title="Бенчмарк"
+        actions={
+          <>
+            {stage === "mode" ? null : (
+              <button type="button" className="btn-back" disabled={live} onClick={back}>
+                ← Назад
+              </button>
+            )}
+            {stage === "mode" || stage === "schemes" ? (
+              <button
+                type="button"
+                className="btn-next"
+                disabled={stage === "schemes" && selected.size === 0}
+                onClick={next}
+              >
+                Далее →
+              </button>
+            ) : null}
+            {/* На предстарте кнопку запуска в шапке не дублируем: она одна,
+                в панели `.launch-cta-bar`, иначе два одинаковых вызова рядом. */}
+            {live ? (
+              <button type="button" className="btn-stop" disabled={stopping} onClick={stop}>
+                {stopping ? "■ Остановка…" : "■ Остановить тест"}
+              </button>
+            ) : null}
+          </>
+        }
+      >
+        <nav className="stepper" aria-label="Этапы запуска">
+          {STAGES.map((s, idx) => {
+            const st = stepState(s.id);
+            return (
+              <span className="steps-group" key={s.id}>
+                <button
+                  type="button"
+                  className={`step-item ${st}`}
+                  aria-current={st === "active" ? "step" : undefined}
+                  disabled={live}
+                  title={live ? "Во время замера шаги менять нельзя" : `К шагу «${s.label}»`}
+                  onClick={() => !live && go(s.id, s.id === stage ? "fwd" : "back")}
+                >
+                  <span className="step-badge">{st === "done" ? "✓" : idx + 1}</span>
+                  <span>{s.label}</span>
+                </button>
+                {idx < STAGES.length - 1 ? <span className="step-line" /> : null}
+              </span>
+            );
+          })}
+        </nav>
+      </PageHead>
 
       <div className="wizard">
         <div
@@ -1426,6 +1427,6 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
           ) : null}
         </div>
       </div>
-    </div>
+    </Page>
   );
 }

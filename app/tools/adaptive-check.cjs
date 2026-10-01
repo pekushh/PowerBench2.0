@@ -43,11 +43,16 @@ const get = (url) => new Promise((res, rej) => {
   http.get(url, (r) => { let d = ""; r.on("data", (c) => (d += c)); r.on("end", () => res(d)); }).on("error", rej);
 });
 
-// Изолированная страница для проверки вертикального центрирования: здесь в
-// колонке либо короткий блок, либо длинный. На общей странице стенда колонка
-// всегда длиннее окна, и центрирование нечего проверять.
+// Изолированная страница для проверки вертикального положения содержимого:
+// здесь в колонке либо короткий блок, либо длинный. На общей странице стенда
+// колонка всегда длиннее окна, и положение нечего проверять.
+//
+// Проверяется одно правило на всех экранах: содержимое начинается сразу под
+// верхним отступом `.main`. Раньше короткая страница центрировалась по
+// вертикали, а длинная прижималась к верху, поэтому переключение вкладки
+// сдвигало заголовок на сотни пикселей.
 const CENTER_PAGE = `<!DOCTYPE html><html lang="ru" data-theme="Graphite" data-mode="Dark" data-density="normal" data-text="m" data-motion="on">
-<meta charset="utf-8"><title>Центрирование</title>
+<meta charset="utf-8"><title>Положение содержимого</title>
 <link rel="stylesheet" href="/assets/${cssHref}">
 <style>html,body{margin:0;height:100%}</style>
 <body>
@@ -64,8 +69,6 @@ const CENTER_PAGE = `<!DOCTYPE html><html lang="ru" data-theme="Graphite" data-m
   </div>
 </div>
 <script>
-// Короткий экран должен встать по центру по вертикали, длинный — прижаться
-// к верху, иначе верхняя его часть уходит за область прокрутки.
 // Прячем именно display: у карточек задано display:flex авторским правилом,
 // оно сильнее браузерного [hidden]{display:none}, и «скрытый» блок продолжал
 // занимать место в раскладке.
@@ -95,16 +98,76 @@ window.measureCentering = () => {
   const m = main.getBoundingClientRect();
   const kids = [...pageEl.children].filter((el) => el.style.display !== "none" && el.offsetParent);
   const r0 = kids[0].getBoundingClientRect();
-  const rN = kids[kids.length - 1].getBoundingClientRect();
+  // Отступ от ВНУТРЕННЕЙ границы .main: у .main есть верхний отступ
+  // --sp-5, и сравнивать с рамкой дало бы ложные 19–20 px.
+  const top = m.top + parseFloat(getComputedStyle(main).paddingTop);
   return {
-    // Центр всего содержимого, а не первой карточки: блоков на странице
-    // несколько, и по одной карточке равенство не проверить.
-    shortOffset: (r0.top + rN.bottom) / 2 - (p.top + p.height / 2),
-    // Отступ от ВНУТРЕННЕЙ границы .main: у .main есть верхний отступ
-    // --sp-5, и сравнивать с рамкой дало бы ложные 19–20 px.
-    tallOffset: r0.top - (m.top + parseFloat(getComputedStyle(main).paddingTop)),
+    // Короткий экран: расстояние от отступа до первого блока. Раньше он
+    // стоял по центру, и это число равнялось половине свободного места.
+    // Дробная часть сверстана: вёрстка кеглей и отступов даёт полупиксели, и
+    // сравнивать их с нулём бессмысленно — важен сдвиг целиком, а не дробь.
+    shortTop: r0.top - top,
+    // Длинный экран: то же самое. Должно совпадать с shortTop до пикселя.
+    tallTop: r0.top - top,
+    pageTop: p.top - top,
     pageScroll: pageEl.scrollHeight - pageEl.clientHeight,
   };
+};
+</script></body></html>`;
+
+// Пять настоящих шапок — по одной с каждого экрана, — в одной колонке. Меряется
+// положение заголовка: после правок макета оно обязано совпадать до пикселя,
+// иначе при переключении вкладки заголовок прыгает.
+const HEAD_PAGE = `<!DOCTYPE html><html lang="ru" data-theme="Graphite" data-mode="Dark" data-density="normal" data-text="m" data-motion="on">
+<meta charset="utf-8"><title>Шапки экранов</title>
+<link rel="stylesheet" href="/assets/${cssHref}">
+<style>html,body{margin:0;height:100%}</style>
+<body>
+<div class="shell rail-collapsed">
+  <div class="body">
+    <aside class="sidebar collapsed"><nav class="sidebar-nav"><button class="nav-item active"><span class="nav-glyph"><svg viewBox="0 0 24 24"></svg></span><span class="nav-label">Бенчмарк</span></button></nav></aside>
+    <main class="main">
+      <div class="page">
+        <div class="page-host on"><div class="page" id="p1"><div class="page-head"><h1>Бенчмарк</h1><nav class="stepper"><span class="step">1 Режим и настройки</span></nav><div class="actions"><span class="btn btn-primary">Далее →</span></div></div><div class="wizard"><div class="wizard-stage centered"><div class="mode-grid"><div class="mode-card selected"><div class="mc-pill"><small>Повторов</small><b>5 раундов</b></div></div><div class="mode-card"><div class="mc-pill"><small>Повторов</small><b>1 раунд</b></div></div></div></div></div></div></div>
+        <div class="page-host on"><div class="page" id="p2"><div class="page-head"><h1>Схемы питания</h1><span class="sub">96 схем</span><div class="actions"><span class="act-primary">Импорт</span></div></div><div class="schemes-grid"><div class="scheme-card"><div class="sc-name">Схема</div></div></div></div></div>
+        <div class="page-host on"><div class="page fill" id="p3"><div class="page-head"><h1>Результаты</h1><span class="sub">24 сессии</span><div class="actions"><span class="act-secondary">Обновить</span></div></div><div class="session-list fill-list"><article class="session-card"><div class="sc-main"><div class="sc-top"><span class="sc-title">Схема</span></div></div></article></div></div></div>
+        <div class="page-host on"><div class="page fill" id="p4"><div class="page-head"><h1>Логи</h1><div class="actions"><span class="export-btn">Сохранить</span></div></div><div class="log-controls"><div class="filter-tabs pb-pill-host"><button class="ftab active">Все</button></div></div><div class="log-card"><div class="log-list"><div class="log-row"><span class="l-time">14:19:02</span><span class="l-badge info">Инфо</span><span class="l-msg">Схема применена</span></div></div></div></div></div>
+        <div class="page-host on"><div class="page set-page" id="p5"><div class="page-head"><h1>Настройки</h1><div class="actions"><span class="folder-btn">Папка результатов</span></div></div><section class="set-sec"><div class="section-head"><h2 class="section-title">Внешний вид</h2></div><div class="set-group"><div class="set-row"><div class="set-left"><span class="set-icon"></span><div class="set-text"><div class="set-title">Тема оформления</div></div></div><div class="seg"><button class="on">Тёмная</button><button>Светлая</button></div></div></div></div></section></div></div>
+      </div>
+    </main>
+  </div>
+</div>
+<script>
+// Положение заголовка каждого экрана относительно верхнего отступа .main
+// и одинаковые метрики самого заголовка: вес и межбуквенный интервал
+// раньше различались (700 / −0.3 px против 650 / −0.2 px).
+window.measureHeads = () => {
+  const main = document.querySelector(".main");
+  const out = {};
+  for (const id of ["p1", "p2", "p3", "p4", "p5"]) {
+    const page = document.querySelector("#" + id);
+    const h1 = page.querySelector(".page-head h1");
+    const cs = getComputedStyle(h1);
+    const r = h1.getBoundingClientRect();
+    // Отсчёт от верхнего отступа СВОЕЙ колонки: на стенде все пять шапок
+    // стоят друг за другом, и отступ от верха .main у них разный по
+    // определению. Проверяем ровно то, что требуется от макета: заголовок
+    // находится на одном расстоянии от начала своей страницы.
+    const pageTop = page.getBoundingClientRect().top + parseFloat(getComputedStyle(page).paddingTop);
+    out[id] = {
+      top: Math.round((r.top - pageTop) * 100) / 100,
+      left: Math.round((r.left - page.getBoundingClientRect().left) * 100) / 100,
+      weight: cs.fontWeight,
+      spacing: cs.letterSpacing,
+      size: cs.fontSize,
+      // Ширина шапки: последний блок (кнопки) не должен заезжать за правый
+      // край колонки — при переносе он вылезал за границу фрейма.
+      headRight: Math.round(page.querySelector(".page-head").getBoundingClientRect().right * 100) / 100,
+      pageRight: Math.round(page.getBoundingClientRect().right * 100) / 100,
+      overflow: main.scrollWidth - main.clientWidth,
+    };
+  }
+  return out;
 };
 </script></body></html>`;
 
@@ -127,8 +190,8 @@ const SKELETON = `
       <div class="sidebar-foot"><button class="nav-item"><span class="nav-glyph">${'<svg viewBox="0 0 24 24"><path d="M4 6h16" stroke="currentColor" fill="none"/></svg>'}</span><span class="nav-label">Настройки</span></button></div>
     </aside>
     <main class="main">
-      <div class="page benchmark-view">
-        <div class="page-head"><h1 class="page-title">Бенчмарк</h1><div class="sub">режим и настройки</div></div>
+      <div class="page">
+        <div class="page-head"><h1>Бенчмарк</h1><span class="sub">режим и настройки</span></div>
         <div class="mode-grid"><div class="mode-card selected"><div class="mc-pill"><small>Повторов</small><b>5 раундов</b></div></div><div class="mode-card"><div class="mc-pill time"><small>Одна схема</small><b>≈ 7 мин 11 с</b></div></div></div>
         <div class="schemes-grid" id="schemes">${Array.from({ length: 12 }, (_, i) => `<div class="scheme-card"><div class="sc-name">Схема ${i + 1}</div></div>`).join("")}</div>
         <div class="kpi-strip" id="kpis"><div class="kpi-card"><span class="kpi-name">Время тика</span><span class="kpi-val">0.971<small>мс</small></span></div><div class="kpi-card"><span class="kpi-name">Тиков в фазе</span><span class="kpi-val">2 719</span></div><div class="kpi-card"><span class="kpi-name">Фон CPU</span><span class="kpi-val">2.1<small>%</small></span></div></div>
@@ -250,12 +313,11 @@ const BENCH_PAGE = `<!DOCTYPE html><html lang="ru" data-theme="Graphite" data-mo
     <aside class="sidebar collapsed"><nav class="sidebar-nav"><button class="nav-item active"><span class="nav-glyph"><svg viewBox="0 0 24 24"></svg></span><span class="nav-label">Бенчмарк</span></button></nav></aside>
     <main class="main">
       <div class="page-host on" id="host">
-      <div class="page benchmark-view" id="page">
-        <div class="wizard-header" id="hdr">
-          <div class="wh-left"><h1 class="page-title">Бенчмарк</h1>
-            <div class="stepper"><span class="step active">1 Режим и настройки</span><span class="step">2 Схемы питания</span><span class="step">3 Запуск</span></div>
-          </div>
-          <div class="wh-actions"><button class="btn btn-primary" type="button">Далее →</button></div>
+      <div class="page" id="page">
+        <div class="page-head" id="hdr">
+          <h1>Бенчмарк</h1>
+          <div class="stepper"><span class="step active">1 Режим и настройки</span><span class="step">2 Схемы питания</span><span class="step">3 Запуск</span></div>
+          <div class="actions"><button class="btn btn-primary" type="button">Далее →</button></div>
         </div>
         <div class="wizard" id="wizard">
           <div class="wizard-stage centered" id="stage">
@@ -332,6 +394,10 @@ window.measureBench = (open) => {
     if (url === "/center") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       return res.end(CENTER_PAGE);
+    }
+    if (url === "/heads") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      return res.end(HEAD_PAGE);
     }
     if (url === "/bench") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -453,8 +519,9 @@ window.measureBench = (open) => {
   console.log(`  развёрнутая рельса: иконка ${exp2.navGlyph}, панель ${px(exp2.railWidth)}  ${cp2.length ? "✗ " + cp2.join("; ") : "ok"}`);
   await evalJs("window.collapse(true)");
 
-  // Вертикальное центрирование на отдельной странице: короткий экран стоит
-  // по центру, длинный прижат к верху и не уводит верх за область прокрутки.
+// Положение содержимого на отдельной странице: и короткий, и длинный экран
+  // начинаются сразу под верхним отступом `.main`. Разница между ними должна
+  // быть нулевой — раньше короткий экран центрировался и прыгал на пол-окна.
   const cc = [];
   await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/center` });
   await new Promise((r) => setTimeout(r, 1200));
@@ -466,8 +533,10 @@ window.measureBench = (open) => {
     await evalJs("window.show('tall')");
     await new Promise((r) => setTimeout(r, 250));
     const t = await evalJs("window.measureCentering()");
-    if (Math.abs(s.shortOffset) > 8) cc.push(`${w}×${h}: короткий экран смещён на ${px(s.shortOffset)} px`);
-    if (Math.abs(t.tallOffset) > 2) cc.push(`${w}×${h}: длинный экран не прижат к верху (${px(t.tallOffset)} px)`);
+    if (Math.abs(s.shortTop) > 1) cc.push(`${w}×${h}: короткий экран опущен на ${px(s.shortTop)} px`);
+    if (Math.abs(t.tallTop) > 1) cc.push(`${w}×${h}: длинный экран опущен на ${px(t.tallTop)} px`);
+    if (Math.abs(s.shortTop - t.tallTop) > 1) cc.push(`${w}×${h}: короткий и длинный экраны расходятся на ${px(s.shortTop - t.tallTop)} px`);
+    if (Math.abs(s.pageTop) > 1) cc.push(`${w}×${h}: колонка смещена на ${px(s.pageTop)} px`);
     if (t.pageScroll < 0) cc.push(`${w}×${h}: длинный экран вылез вверх за прокрутку на ${px(-t.pageScroll)} px`);
     // Ничего не обрезано по высоте.
     for (const which of ["short", "tall"]) {
@@ -479,10 +548,40 @@ window.measureBench = (open) => {
     await evalJs("window.show('short')");
   }
   if (cc.length) bad++;
-  console.log(`\n  центрирование по вертикали на 1440×900 и 1180×720  ${cc.length ? "✗ " + cc.join("; ") : "ok"}`);
+  console.log(`\n  положение содержимого на 1440×900 и 1180×720  ${cc.length ? "✗ " + cc.join("; ") : "ok"}`);
+
+  // Пять шапок в одной колонке: заголовок обязан стоять на одной высоте и с
+  // одинаковыми метриками на всех экранах — иначе переключение вкладки
+  // заметно дёргает заголовок.
+  const hc = [];
+  console.log("\n  заголовок на всех пяти экранах (должен совпадать до пикселя):");
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/heads` });
+  await new Promise((r) => setTimeout(r, 1200));
+  for (const [h, w] of [[900, 1920], [900, 1440], [720, 1180]]) {
+    await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false });
+    await new Promise((r) => setTimeout(r, 350));
+    const hs = await evalJs("window.measureHeads()");
+    const ids = ["p1", "p2", "p3", "p4", "p5"];
+    const base = hs[ids[0]];
+    for (const id of ids) {
+      const m = hs[id];
+      // Допуск 1 px: вёрстка кеглей даёт полупиксельные координаты, и на
+      // соседних ширинах округление `--fs-h1` по-разному ложится на сетку.
+      // Всё, что крупнее, — настоящий скачок макета.
+      if (Math.abs(Math.round(m.top) - Math.round(base.top)) > 1) hc.push(`${w}×${h} ${id}: заголовок на ${px(m.top)} px вместо ${px(base.top)}`);
+      if (m.left !== base.left) hc.push(`${w}×${h} ${id}: левый край ${px(m.left)} вместо ${px(base.left)}`);
+      if (m.weight !== base.weight) hc.push(`${w}×${h} ${id}: вес ${m.weight} вместо ${base.weight}`);
+      if (m.spacing !== base.spacing) hc.push(`${w}×${h} ${id}: интервал ${m.spacing} вместо ${base.spacing}`);
+      if (m.headRight > m.pageRight + 1) hc.push(`${w}×${h} ${id}: шапка вылезла за колонку на ${px(m.headRight - m.pageRight)} px`);
+      if (m.overflow > 2) hc.push(`${w}×${h} ${id}: переполнение .main ${m.overflow}`);
+    }
+    console.log(`    ${String(w).padStart(4)}×${h}: ` + ids.map((id) => `${id} ${px(hs[id].top)}`).join("  ") + `  ${base.weight} / ${base.spacing}`);
+  }
+  if (hc.length) bad++;
+  console.log(`    ${hc.length ? "✗ " + hc.join("; ") : "совпадает"}`);
 
   // Поля вокруг колонки меряются на общей странице стенда, поэтому сначала
-  // возвращаемся на неё с изолированной страницы центрирования.
+  // возвращаемся на неё с изолированных страниц.
   await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/` });
   await new Promise((r) => setTimeout(r, 1400));
 

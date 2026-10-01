@@ -6,7 +6,7 @@ import { commands, type SchemeRow, type SettingsDto } from "../api";
 import { Badge, Button, Modal } from "../components/ui";
 import { ExportIcon, PlusIcon, RestoreIcon } from "../components/icons";
 import SchemeTiles from "../components/SchemeTiles";
-import { useCascade } from "../components/useCascade";
+import { Page, PageHead } from "../components/Page";
 import { pushToast, setSectionDetail, useSession } from "../store";
 import { pluralish } from "../plural";
 
@@ -20,8 +20,7 @@ export default function SchemesPage({ active = true }: { active?: boolean }) {
   const [exportTarget, setExportTarget] = useState<string | null>(null);
   const [askRestore, setAskRestore] = useState(false);
   const [busy, setBusy] = useState(false);
-  const { running } = useSession();
-  const rootRef = useCascade<HTMLDivElement>(active);
+const { running } = useSession();
   const admin = isAdmin === true;
 
   const refresh = () => {
@@ -130,45 +129,49 @@ export default function SchemesPage({ active = true }: { active?: boolean }) {
   }, [schemes]);
 
   return (
-      <div className="page schemes-page" ref={rootRef}>
-      <div className="page-head">
-        <h1>Схемы питания</h1>
-        {/* Сводка в строке заголовка: отдельной строкой она отодвигала поиск
-            на лишний отступ сверху. */}
-        <span className="sub">
-          <b>{schemes.length}</b>{" "}
-          {schemes.length % 10 === 1 && schemes.length % 100 !== 11
-            ? "схема"
-            : schemes.length % 10 >= 2 &&
-                schemes.length % 10 <= 4 &&
-                !(schemes.length % 100 >= 12 && schemes.length % 100 <= 14)
-              ? "схемы"
-              : "схем"}{" "}
-          · дубликатов по имени: <b>{dupCount}</b>
-        </span>
-        <div className="actions">
-          <button
-            type="button"
-            className="act-primary"
-            disabled={busy || !admin}
-            title={admin ? "Импортировать схему питания из файла .pow" : "Требуются права администратора"}
-            onClick={() => void importScheme()}
-          >
-            <PlusIcon />
-            Импорт .pow
-          </button>
-          <button
-            type="button"
-            className="act-secondary"
-            disabled={busy || !admin}
-            title={admin ? "Восстановить стандартные схемы Windows" : "Требуются права администратора"}
-            onClick={() => setAskRestore(true)}
-          >
-            <RestoreIcon />
-            Вернуть стандартные схемы
-          </button>
-        </div>
-      </div>
+<Page active={active}>
+      <PageHead
+        title="Схемы питания"
+        // Сводка в строке заголовка: отдельной строкой она отодвигала поиск
+        // на лишний отступ сверху.
+        sub={
+          <>
+            <b>{schemes.length}</b>{" "}
+            {schemes.length % 10 === 1 && schemes.length % 100 !== 11
+              ? "схема"
+              : schemes.length % 10 >= 2 &&
+                  schemes.length % 10 <= 4 &&
+                  !(schemes.length % 100 >= 12 && schemes.length % 100 <= 14)
+                ? "схемы"
+                : "схем"}{" "}
+            · дубликатов по имени: <b>{dupCount}</b>
+          </>
+        }
+        actions={
+          <>
+            <button
+              type="button"
+              className="act-primary"
+              disabled={busy || !admin}
+              title={admin ? "Импортировать схему питания из файла .pow" : "Требуются права администратора"}
+              onClick={() => void importScheme()}
+            >
+              <PlusIcon />
+              Импорт .pow
+            </button>
+            <button
+              type="button"
+              className="act-secondary"
+              disabled={busy || !admin}
+              title={admin ? "Восстановить стандартные схемы Windows" : "Требуются права администратора"}
+              onClick={() => setAskRestore(true)}
+            >
+              <RestoreIcon />
+              Вернуть стандартные схемы
+            </button>
+          </>
+        }
+      />
       {isAdmin === false ? (
         <div className="hint" style={{ marginBottom: 4 }}>
           {/* Без точки: это короткая метка-подсказка, а не предложение. */}
@@ -219,7 +222,7 @@ export default function SchemesPage({ active = true }: { active?: boolean }) {
         }
       >
         <p className="hint">Восстановить стандартные схемы Windows? Активной станет системная по умолчанию.</p>
-      </Modal>
-    </div>
+</Modal>
+    </Page>
   );
 }

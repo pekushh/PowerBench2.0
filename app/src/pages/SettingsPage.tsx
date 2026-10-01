@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import { commands, type SettingsDto } from "../api";
 import { Button, Glass, Seg, Switch } from "../components/ui";
-import { useCascade } from "../components/useCascade";
+import { Page, PageHead } from "../components/Page";
 import { setSectionDetail } from "../store";
 import { FolderIcon, GridIcon, MotionIcon, ShieldIcon, SocketIcon, ThemeIcon } from "../components/icons";
 import { pushToast } from "../store";
@@ -56,7 +56,6 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
     return mode === "Light" ? "светлая" : "тёмная";
   }
   const [st, setSt] = useState<SettingsDto | null>(null);
-  const rootRef = useCascade<HTMLDivElement>(active);
   // Состояние для крошки в шапке: тема и режим движения.
   useEffect(() => {
     if (!st) return;
@@ -92,8 +91,12 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
   // настроек…»: ни сообщения, ни кнопки повтора. Пользователь не понимал,
   // что произошло, и думал, что приложение зависло.
   if (!st) {
+    // Тот же каркас и та же шапка, что у загруженного состояния: раньше здесь
+    // был голый `<div className="page">` без `set-page` и без заголовка, и
+    // при разборе неполадок экран выглядел как другой раздел приложения.
     return (
-      <div className="page">
+      <Page active={active} className="set-page">
+        <PageHead title="Настройки" />
         <Glass className="inset">
           <div className="card-title">Не удалось прочитать настройки</div>
           <div className="hint">{loadError ?? "Ответ приложения не получен."}</div>
@@ -112,7 +115,7 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
             </Button>
           </div>
         </Glass>
-      </div>
+      </Page>
     );
   }
 
@@ -154,36 +157,38 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
   };
 
   return (
-    <div className="page tight set-page" ref={rootRef}>
-      <div className="page-head">
-        <h1>Настройки</h1>
-        <div className="actions">
-          <button
-            type="button"
-            className="folder-btn"
-            disabled={!dataDir}
-            title={dataDir || "Каталог ещё не известен"}
-            onClick={() => {
-              if (dataDir) commands.openFolder(dataDir).catch((e) => pushToast("err", String(e)));
-            }}
-          >
-            <FolderIcon />
-            Папка результатов
-          </button>
-          <button
-            type="button"
-            className="folder-btn"
-            disabled={!cfgDir}
-            title={cfgDir || "Каталог ещё не известен"}
-            onClick={() => {
-              if (cfgDir) commands.openFolder(cfgDir).catch((e) => pushToast("err", String(e)));
-            }}
-          >
-            <FolderIcon />
-            Папка настроек
-          </button>
-        </div>
-      </div>
+    <Page active={active} className="set-page">
+      <PageHead
+        title="Настройки"
+        actions={
+          <>
+            <button
+              type="button"
+              className="folder-btn"
+              disabled={!dataDir}
+              title={dataDir || "Каталог ещё не известен"}
+              onClick={() => {
+                if (dataDir) commands.openFolder(dataDir).catch((e) => pushToast("err", String(e)));
+              }}
+            >
+              <FolderIcon />
+              Папка результатов
+            </button>
+            <button
+              type="button"
+              className="folder-btn"
+              disabled={!cfgDir}
+              title={cfgDir || "Каталог ещё не известен"}
+              onClick={() => {
+                if (cfgDir) commands.openFolder(cfgDir).catch((e) => pushToast("err", String(e)));
+              }}
+            >
+              <FolderIcon />
+              Папка настроек
+            </button>
+          </>
+        }
+      />
 
       <section className="set-sec">
         <div className="section-head">
@@ -343,7 +348,7 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
           </div>
         </Glass>
       </section>
-    </div>
+    </Page>
   );
 }
 

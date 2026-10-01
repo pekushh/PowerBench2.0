@@ -23,7 +23,8 @@ import {
 } from "../components/icons";
 import { pushToast, setSectionDetail } from "../store";
 import { usePill } from "../components/usePill";
-import { useCascade, usePopOnFilter } from "../components/useCascade";
+import { Page, PageHead } from "../components/Page";
+import { usePopOnFilter } from "../components/useCascade";
 
 type SortKey = "started" | "level" | "margin" | "stability";
 
@@ -187,7 +188,6 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
   );
   const busy = useRef(false);
   const reportBusy = useRef(false);
-  const rootRef = useCascade<HTMLDivElement>(active);
   // «Оживление» списка после паузы в наборе: на каждый символ перерисовывать
   // анимацию нельзя, список мигает.
   const popRef = usePopOnFilter<HTMLDivElement>(`${query}|${mode}|${sort}`);
@@ -432,83 +432,87 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
   }, [sorted, mode, query, schemeNames]);
 
   return (
-    <div className="page fill results-page" ref={rootRef}>
-      <div className="page-head">
-        <h1>Результаты</h1>
-        {/* Счётчик живёт в строке заголовка: отдельной строкой он занимал
-            высоту и отодвигал тулбар вниз на пустом месте. */}
-        <span className="sub">
-          <b>{rows.length}</b>
-          {stats && stats.max_sessions > 0 ? ` из ${stats.max_sessions}` : ""} сессий
-          {stats ? ` · ${fmtBytes(stats.history_bytes)}` : ""}
-        </span>
-        <div className="actions">
-          {lowDisk ? <Badge kind="warn">Место на диске заканчивается</Badge> : null}
-          <div className="split-act" ref={fmtRef}>
+    <Page active={active} fill>
+      <PageHead
+        title="Результаты"
+        // Счётчик живёт в строке заголовка: отдельной строкой он занимал
+        // высоту и отодвигал тулбар вниз на пустом месте.
+        sub={
+          <>
+            <b>{rows.length}</b>
+            {stats && stats.max_sessions > 0 ? ` из ${stats.max_sessions}` : ""} сессий
+            {stats ? ` · ${fmtBytes(stats.history_bytes)}` : ""}
+          </>
+        }
+        actions={
+          <>
+            {lowDisk ? <Badge kind="warn">Место на диске заканчивается</Badge> : null}
+            <div className="split-act" ref={fmtRef}>
+              <button
+                type="button"
+                className="act-secondary"
+                title="Экспортировать результаты в JSON"
+                onClick={() => void exportAll("json")}
+              >
+                <ExportIcon />
+                Экспорт…
+              </button>
+              <button
+                type="button"
+                className="act-secondary caret"
+                title="Выбрать формат экспорта"
+                aria-label="Формат экспорта"
+                aria-expanded={fmtOpen}
+                onClick={() => setFmtOpen((v) => !v)}
+              >
+                <ChevronIcon />
+              </button>
+              {fmtOpen ? (
+                <div className="mini-menu" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setFmtOpen(false);
+                      void exportAll("json");
+                    }}
+                  >
+                    JSON
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setFmtOpen(false);
+                      void exportAll("csv");
+                    }}
+                  >
+                    CSV
+                  </button>
+                </div>
+              ) : null}
+            </div>
             <button
               type="button"
               className="act-secondary"
-              title="Экспортировать результаты в JSON"
-              onClick={() => void exportAll("json")}
+              title="Открыть папку с отчётами в Проводнике"
+              onClick={() => commands.historyOpenFolder().catch((e) => pushToast("err", String(e)))}
             >
-              <ExportIcon />
-              Экспорт…
+              <FolderIcon />
+              Папка
             </button>
             <button
               type="button"
-              className="act-secondary caret"
-              title="Выбрать формат экспорта"
-              aria-label="Формат экспорта"
-              aria-expanded={fmtOpen}
-              onClick={() => setFmtOpen((v) => !v)}
+              className="act-secondary"
+              title="Пересканировать папку результатов"
+              onClick={refresh}
             >
-              <ChevronIcon />
+              <RestoreIcon />
+              Обновить
             </button>
-            {fmtOpen ? (
-              <div className="mini-menu" role="menu">
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setFmtOpen(false);
-                    void exportAll("json");
-                  }}
-                >
-                  JSON
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setFmtOpen(false);
-                    void exportAll("csv");
-                  }}
-                >
-                  CSV
-                </button>
-              </div>
-            ) : null}
-          </div>
-          <button
-            type="button"
-            className="act-secondary"
-            title="Открыть папку с отчётами в Проводнике"
-            onClick={() => commands.historyOpenFolder().catch((e) => pushToast("err", String(e)))}
-          >
-            <FolderIcon />
-            Папка
-          </button>
-          <button
-            type="button"
-            className="act-secondary"
-            title="Пересканировать папку результатов"
-            onClick={refresh}
-          >
-            <RestoreIcon />
-            Обновить
-          </button>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       <div className="results-toolbar">
         <div className="search-box res-search">
@@ -709,7 +713,7 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
       >
         {detail ? <SessionDetail s={detail} schemeNames={schemeNames} /> : null}
       </Modal>
-    </div>
+    </Page>
   );
 }
 

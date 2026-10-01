@@ -78,6 +78,10 @@ export interface SettingsDto {
   mode: string;
   reduce_motion: boolean;
   sidebar_collapsed: boolean;
+  /** Плотность интерфейса: «compact» · «normal» · «roomy» (CSS `--k`). */
+  density: string;
+  /** Масштаб текста: «s» · «m» · «l» (CSS `--kt`). */
+  text_scale: string;
   favorite_schemes: string[];
   excluded_schemes: string[];
   // Веса убраны из интерфейса вместе с весовым баллом: категории в отчёте
@@ -151,6 +155,32 @@ export interface HistoryRow {
   /** GUID лидера сессии — нужен, чтобы показать название схемы, если в файле
    *  сохранился только идентификатор. */
   leader_scheme_guid: string;
+}
+
+/**
+ * Сколько прогонов одной схемы нужно, чтобы показывать доверительный
+ * интервал, «уверенность» и перевес.
+ *
+ * При меньшем числе движок отдаёт `margin: 0.0`, а на экране это читалось как
+ * идеальная точность: «Погрешность ±0.0» и «Уверенность 100 %» при одном
+ * прогоне. Тот же порог стоит в тексте предупреждения о сессии-скрининге
+ * («нужно от 3 прогонов»), поэтому здесь ровно три.
+ */
+export const MARGIN_MIN_RUNS = 3;
+
+/** Хватает ли прогонов одной схеме, чтобы показать доверительный интервал. */
+export function marginAvailable(runs: number, margin: number | null): boolean {
+  return runs >= MARGIN_MIN_RUNS && margin != null && Number.isFinite(margin);
+}
+
+/** То же для сессии: интервал показывается, когда его есть у всех замерянных схем. */
+export function sessionMarginAvailable(
+  schemes: ReadonlyArray<{ runs: number }>,
+  margin: number | null,
+): boolean {
+  const measured = schemes.filter((s) => s.runs > 0);
+  if (measured.length === 0) return false;
+  return marginAvailable(Math.min(...measured.map((s) => s.runs)), margin);
 }
 
 /** Статистика прогона в одном диапазоне (зеркало `checkpoint::RunStats`). */

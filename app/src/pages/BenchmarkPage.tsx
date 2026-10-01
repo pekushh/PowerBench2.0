@@ -167,6 +167,9 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryMsg | null>(null);
   const [starting, setStarting] = useState(false);
+  // Пользователь согласился на замер с завышенным фоном (ТЗ Д-7). Сбрасывается
+  // при каждом новом замере фона: подтверждение относится к конкретной цифре.
+  const [riskAccepted, setRiskAccepted] = useState(false);
   // Каскад появления перезапускается при каждом открытии вкладки, а не один
   // раз при монтировании: страницы смонтированы все сразу и переключаются
   // классом, поэтому анимация иначе играла бы только в первый раз.
@@ -323,13 +326,7 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
   // при которых заведомо не получится замер (нет прав, нет сети, недоступен
   // powercfg, мало места). Показывать баннер и давать кнопку — значит
   // отправлять пользователя в заведомо падающую сессию.
-  const readinessBlocksStart = !!readiness && !readiness.ok && !running;
-  const startBlockedReason =
-    selected.size === 0
-      ? "Выберите хотя бы одну схему питания"
-      : readiness && !readiness.ok
-        ? "Окружение не готово к замеру — исправьте условия ниже"
-        : undefined;
+const readinessBlocksStart = !!readiness && !readiness.ok && !running;
 
   // «Осталось» = полная оценка сессии минус уже прошедшее время.
   const [remainingEstimate, setRemainingEstimate] = useState("—");
@@ -461,6 +458,22 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
     () => sortSchemes(schemes.filter((s) => selected.has(s.guid))),
     [schemes, selected],
   );
+
+  // Порядок *измерения*: активная схема идёт первой, дальше показанный
+  // порядок. Так же её считает бэкенд (`config::canonical_scheme_order`).
+  //
+  // Раньше карточка «Очередь тестирования» нумеровала схемы по порядку
+  // показа (алфавит), а замер шёл по этому порядку со сдвинутой первой
+  // позицией: на экране стояло «#1 1usmus», а подпись обещала, что первой
+  // пойдёт активная. Номера в очереди должны совпадать с порядком запуска.
+  const queueSchemes = useMemo(() => {
+    const active = selSchemes.find((s) => s.active);
+    if (!active) return selSchemes;
+    return [active, ...selSchemes.filter((s) => s.guid !== active.guid)];
+  }, [selSchemes]);
+
+  /** Активная схема в очереди — на неё ссылается подпись под кнопкой запуска. */
+  const activeInQueue = queueSchemes.find((s) => s.active) ?? null;
 
   // На время замера — один таймер раз в секунду на весь прогресс.
   //
@@ -630,10 +643,37 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
       .backgroundSample()
       .then((v) => alive && setBgSample(Number.isFinite(v) ? v : null))
       .catch(() => alive && setBgSample(null));
+    // Новый замер — старое согласие больше не действует.
+    setRiskAccepted(false);
     return () => {
       alive = false;
     };
   }, [stage, live]);
+
+  // Фон: во время сессии — телеметрия, на предстарте — замер перед запуском.
+  const bgNow =
+    telemetry?.background_percent != null
+      ? telemetry.background_percent
+      : live && telemetry == null
+        ? null
+        : bgSample;
+  /** Фон выше порога: замер будет искажён, и об этом надо сказать явно. */
+  const bgAbove = bgNow != null && bgNow > backgroundThreshold;
+
+  /**
+   * Старт при фоне выше порога требует явного подтверждения (ТЗ Д-7):
+   * раньше кнопка просто запускала замер молча, и результат оказывался
+   * занижен без единого предупреждения.
+   */
+  const needsRiskConsent = !running && bgAbove && !riskAccepted;
+  const startBlockedReason =
+    selected.size === 0
+      ? "Выберите хотя бы одну схему"
+      : readiness && !readiness.ok
+        ? "Окружение не готово - вернитесь и исправьте"
+        : needsRiskConsent
+          ? `Фон ${tf(bgNow, 1)} % выше порога ${tf(backgroundThreshold, 1)} % — нужен явный выбор`
+          : undefined;
 
   /** Переключить схему в списке сравнения с проверкой ограничений. */
   const toggleScheme = (guid: string, on?: boolean) => {
@@ -867,7 +907,7 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                   <span className="adv-toggle-right">
                     <span className="adv-summary">
                       Прогон {duration} с · Разогрев {warmup} с · Охлаждение {cooling} с ·
-                      Повторов {reps} · Фон ≤ {tf(backgroundThreshold, 1)}%
+                      Повторов {reps} · порог фона {tf(backgroundThreshold, 1)} %
                     </span>
                     <span className="adv-chevron">
                       {expanded ? "Свернуть" : "Настроить"} <i>▾</i>
@@ -1073,15 +1113,13 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                       {telemetry ? (
                         <>
                           <span>
-                            Прогон <b>{telemetry.run_index}</b> / {telemetry.run_total}
+                            Прогон <b>{telemetry.run_index}</b> из {telemetry.run_total} · раунд{" "}
+                            <b>{telemetry.round + 1}</b> из {reps}
                           </span>
-                          <span className="muted">·</span>
-                          <span>
-                            Раунд <b>{telemetry.round + 1}</b> из {reps}
-                          </span>
-                          <span className="muted">·</span>
-                          <span>
-                            Схема: <b>{telemetry.scheme_name || "—"}</b>
+                          {/* Имя схемы — отдельной строкой: в одной строке с
+                              прогрессом длинное название выдавливало числа. */}
+                          <span className="lh-scheme" title={telemetry.scheme_name || "—"}>
+                            {telemetry.scheme_name || "—"}
                           </span>
                         </>
                       ) : (
@@ -1131,8 +1169,11 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                       <small>мс</small>
                     </span>
                   </div>
-                  <div className="kpi-card">
-                    <span className="kpi-name">Накоплено тиков</span>
+                  <div
+                    className="kpi-card"
+                    title="Счётчик движка обнуляется на каждой фазе (core/src/engine.rs), поэтому здесь тики текущей фазы, а не всей сессии. Скорость и время тика считаются по той же фазе."
+                  >
+                    <span className="kpi-name">Тиков в фазе</span>
                     <span className="kpi-val">{telemetry ? telemetry.ticks_done : "—"}</span>
                   </div>
                   <div
@@ -1176,23 +1217,44 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                             <span>
                               {i + 1}. {p.name}
                             </span>
-                            <span className="phi-pct">{pct.toFixed(0)}%</span>
+                            {/* Секунды фазы рядом с процентом: сам процент
+                                считается от времени фазы, а не от времени
+                                сессии, и без них «Прошло 13 с» рядом с «14 %»
+                                читается как противоречие. */}
+                            <span className="phi-pct">
+                              {active && telemetry
+                                ? `${Math.floor(telemetry.phase_elapsed_ms / 1000)} / ${p.seconds} с`
+                                : `${p.seconds} с`}
+                            </span>
                           </div>
                           <div className="phi-bar">
                             <i style={{ width: `${pct}%` }} />
                           </div>
+                          <span className="phi-frac">{pct.toFixed(0)}%</span>
                         </div>
                       );
                     })}
                   </div>
                 </div>
 
-                {telemetry?.background_noisy && telemetry.background_percent != null ? (
+                {/* Баннер по фону. Приложение не пытается снижать фоновую нагрузку, поэтому
+                    и формулировки не обещают этого: во время сессии мы только
+                    сообщаем измеренное число и его влияние на результат, до
+                    запуска — предлагаем выбор. */}
+                {running && bgAbove && bgNow != null ? (
                   <div className="warn-banner">
                     <span>
-                      <b>Фон загружен — {tf(telemetry.background_percent, 1)}% CPU.</b> Закройте
-                      ресурсоёмкие программы и повторите замер, иначе результат может быть
-                      занижен.
+                      <b>Фон {tf(bgNow, 1)} % выше порога {tf(backgroundThreshold, 1)} %.</b>{" "}
+                      Результат может быть занижен — верьте сравнению схем, а не
+                      абсолютному числу.
+                    </span>
+                  </div>
+                ) : null}
+                {!running && bgAbove && bgNow != null ? (
+                  <div className="warn-banner">
+                    <span>
+                      <b>Фон {tf(bgNow, 1)} % выше порога {tf(backgroundThreshold, 1)} %.</b>{" "}
+                      Закройте ресурсоёмкие программы или запустите замер с риском.
                     </span>
                   </div>
                 ) : null}
@@ -1217,7 +1279,7 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                       </button>
                     </div>
                     <div className="part-list">
-                      {selSchemes.map((s, i) => (
+                      {queueSchemes.map((s, i) => (
                         <div className="part-item" key={s.guid}>
                           <span className="pi-name">
                             <span className="pi-num">#{i + 1}</span>
@@ -1282,11 +1344,11 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                           <span className="kv-pill">измеряется…</span>
                         ) : bgSample > backgroundThreshold ? (
                           <span className="kv-status-bad">
-                            ● {tf(bgSample, 1)}% (выше порога {tf(backgroundThreshold, 1)}%)
+                            ● {tf(bgSample, 1)} % (выше порога {tf(backgroundThreshold, 1)} %)
                           </span>
                         ) : (
                           <span className="kv-status-ok">
-                            ● {tf(bgSample, 1)}% (в норме ≤ {tf(backgroundThreshold, 1)}%)
+                            ● {tf(bgSample, 1)} % (в норме ≤ {tf(backgroundThreshold, 1)} %)
                           </span>
                         )}
                       </div>
@@ -1315,20 +1377,49 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
                       Расчётное время сессии: <b>около {estimate}</b>
                     </div>
                     <div className="lcb-sub">
-                      {selSchemes.some((s) => s.active)
-                        ? `Активная схема «${selSchemes.find((s) => s.active)?.name ?? ""}» протестируется первой и автоматически восстановится после завершения.`
-                        : "Исходная схема питания восстановится автоматически после завершения."}
+                      {needsRiskConsent
+                        ? `Фон ${tf(bgNow, 1)} % выше порога запуска ${tf(backgroundThreshold, 1)} % — результат может быть занижен.`
+                        : activeInQueue
+                          ? `Активная схема «${activeInQueue.name || "без названия"}» протестируется первой и восстановится автоматически после завершения.`
+                          : "Исходная схема питания восстановится автоматически после завершения."}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    className="btn-launch-main"
-                    disabled={starting || selected.size === 0 || readinessBlocksStart}
-                    title={startBlockedReason}
-                    onClick={() => start(false)}
-                  >
-                    {starting ? "Запуск…" : "▶ Запустить тест"}
-                  </button>
+                  <div className="launch-actions">
+                    {needsRiskConsent ? (
+                      <>
+                        {/* Явный выбор вместо молчаливого старта (ТЗ Д-7,
+                            XIII.4): «Продолжить с риском» и «Прервать». */}
+                        <button
+                          type="button"
+                          className="btn danger"
+                          disabled={starting || selected.size === 0 || readinessBlocksStart}
+                          onClick={() => {
+                            setRiskAccepted(true);
+                            start(false);
+                          }}
+                        >
+                          Продолжить с риском
+                        </button>
+                        <button
+                          type="button"
+                          className="btn ghost"
+                          onClick={() => setRiskAccepted(false)}
+                        >
+                          Прервать
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn-launch-main"
+                        disabled={starting || selected.size === 0 || readinessBlocksStart}
+                        title={startBlockedReason}
+                        onClick={() => start(false)}
+                      >
+                        {starting ? "Запуск…" : "▶ Запустить тест"}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </>
             )

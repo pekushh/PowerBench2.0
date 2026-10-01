@@ -13,7 +13,8 @@ import LogPage from "./pages/LogPage";
 import ResultsPage from "./pages/ResultsPage";
 import SchemesPage from "./pages/SchemesPage";
 import SettingsPage from "./pages/SettingsPage";
-import { applyMotion } from "./motion";
+import { applyMotion, applyDensity } from "./motion";
+import { toggleFullscreen } from "./windowState";
 import "./styles.css";
 
 export type PageId = "test" | "schemes" | "results" | "log" | "settings";
@@ -39,6 +40,9 @@ function applyAppearance(s: SettingsDto) {
   // Один выключатель моторики на всё приложение: он же гасит анимации по
   // системному правилу `html[data-motion="off"]`.
   applyMotion(s.reduce_motion);
+  // Плотность и масштаб текста — два независимых множителя в CSS (`--k` и
+  // `--kt`); интерфейс только ставит атрибуты.
+  applyDensity(s.density, s.text_scale);
 }
 
 export default function App() {
@@ -86,6 +90,22 @@ export default function App() {
     root.classList.toggle("bench-running", sessionRunning);
     return () => root.classList.remove("bench-running");
   }, [sessionRunning]);
+
+  // F11 — полный экран: на время замера и для показа. При выходе из полного
+  // экрана окно возвращается к прежнему размеру само.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "F11" || e.repeat) return;
+      // В поле ввода F11 всё равно не должен перехватываться: проверяем, что
+      // пользователь не правит текст.
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      e.preventDefault();
+      void toggleFullscreen();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     if (!appearance) return;
@@ -221,7 +241,7 @@ export default function App() {
   }, [appearance]);
 
   return (
-    <div className="shell">
+    <div className={`shell ${collapsed ? "rail-collapsed" : ""}`}>
       <TitleBar
         collapsed={collapsed}
         onToggleCollapse={toggleCollapse}
@@ -230,7 +250,6 @@ export default function App() {
         status={sectionDetail}
         hardware={hwChip}
         hardwareFull={hwFull}
-        quietOn={sessionRunning}
       />
       <div className="body">
         <aside ref={sidebarRef} className={`sidebar fade-in ${collapsed ? "collapsed" : ""}`}>
@@ -306,7 +325,10 @@ export default function App() {
         </main>
       </div>
       <div className="toasts" role="status" aria-live="polite">
-        {toasts.map((t) => (
+        {/* Во время замера тосты схлопываются в один (ТЗ XIII.5): стопка
+            сообщений поверх идущего замера и запись в журнал сама по себе
+            нагружает интерфейс. Показываем последний — самый свежий. */}
+        {(sessionRunning ? toasts.slice(-1) : toasts).map((t) => (
           <div key={t.id} className={`toast glass float ${t.kind}`}>
             {t.text}
           </div>

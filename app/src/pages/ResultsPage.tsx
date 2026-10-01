@@ -5,6 +5,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   commands,
   onTestFinished,
+  marginAvailable,
+  sessionMarginAvailable,
+  MARGIN_MIN_RUNS,
   type HistoryRow,
   type SessionJson,
 } from "../api";
@@ -262,8 +265,8 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
           // измерен. При одном прогоне на схему доверительный интервал не
           // строится, `margin` равен 0.0, и сортировка ставила такую сессию
           // первой — как будто у неё идеальная точность. Такие уходят в конец.
-          const aHas = a.rounds_completed >= 2 && Number.isFinite(a.margin);
-          const bHas = b.rounds_completed >= 2 && Number.isFinite(b.margin);
+          const aHas = marginAvailable(a.rounds_completed, a.margin);
+          const bHas = marginAvailable(b.rounds_completed, b.margin);
           if (aHas !== bHas) return aHas ? -1 : 1;
           return numAsc(a.margin) - numAsc(b.margin);
         });
@@ -335,8 +338,13 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
   // Режим замера различаем по числу завершённых раундов, а не по строке
   // уровня: при одном прогоне на схему доверительный интервал не строится, и
   // такой результат ничего не утверждает, даже если уровень называется иначе.
+  // Порог тот же, что у интервала (MARGIN_MIN_RUNS): иначе плашка «Скрининг»
+  // и надпись «Погрешность ±X» противоречили бы друг другу.
   const modeOf = (r: HistoryRow): "screening" | "full" =>
-    r.rounds_completed >= 2 ? "full" : "screening";
+    r.rounds_completed >= MARGIN_MIN_RUNS ? "full" : "screening";
+
+  /** Показывать ли погрешность в карточке сессии. */
+  const rowHasMargin = (r: HistoryRow): boolean => marginAvailable(r.rounds_completed, r.margin);
 
   /** Есть ли у сессии итоговый результат. */
   const hasResult = (r: HistoryRow): boolean =>
@@ -623,12 +631,18 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
                   <span className="m-label">Схем</span>
                   <span className="m-val">{r.schemes}</span>
                 </div>
-                <div className="m-col" title="Доверительный интервал (разброс оценки)">
+                <div
+                  className="m-col"
+                  title={
+                    rowHasMargin(r)
+                      ? "Доверительный интервал (разброс оценки)"
+                      : `Мало данных: доверительный интервал считается от ${MARGIN_MIN_RUNS} прогонов, выполнено ${r.rounds_completed}`
+                  }
+                >
                   <span className="m-label">Погрешность</span>
                   <span className="m-val">
-                    {r.margin != null && Number.isFinite(r.margin)
-                      ? `±${r.margin.toFixed(1)}`
-                      : "—"}
+                    {rowHasMargin(r) ? `±${r.margin!.toFixed(1)}` : "—"}
+                    {rowHasMargin(r) ? null : <small>мало данных</small>}
                   </span>
                 </div>
               </div>
@@ -815,11 +829,24 @@ function SessionDetail({
       `Схема ${leader.scheme_id.slice(0, 8)}…`)
     : (rec.level_label ?? "—");
   const margin = rec.expected_margin_percent;
+  // Перевес движок считает по среднему throughput прогонов, а таблица ниже
+  // показывает медиану, поэтому число не сходится ни с одной парой в таблице.
+  // Показываем его только когда интервал построен, и прямо говорим, на чём он
+  // посчитан.
+  const measuredSchemes = s.schemes.filter((x) => x.runs > 0);
+  const minRuns = measuredSchemes.length
+    ? Math.min(...measuredSchemes.map((x) => x.runs))
+    : 0;
+  const enoughRuns = minRuns >= MARGIN_MIN_RUNS;
   const marginText =
-    margin != null && Number.isFinite(margin)
+    margin != null && Number.isFinite(margin) && sessionMarginAvailable(s.schemes, margin)
       ? `${margin >= 0 ? "+" : ""}${margin.toFixed(2)}%`
       : "—";
-  const marginGreen = margin != null && Number.isFinite(margin) && margin >= 1;
+  const marginGreen =
+    margin != null && Number.isFinite(margin) && sessionMarginAvailable(s.schemes, margin) && margin >= 1;
+  const marginTitle = enoughRuns
+    ? "Перевес лидера над вторым местом по среднему throughput прогонов (не по медиане из таблицы ниже)."
+    : `Мало данных: перевес считается от ${MARGIN_MIN_RUNS} прогонов, минимум по схеме — ${minRuns}.`;
 
   // Таблица: лидер первым, затем остальные по убыванию медианы; забракованные — в конце.
   const tableRows = [...s.schemes].sort((a, b) => {
@@ -929,21 +956,34 @@ function SessionDetail({
               {tie ? "★ Ничья" : leader ? "★ Лидер сессии" : "★ Лидер не определён"}
             </span>
             <span className="badge-pill">
-              {modeName} · {s.rounds_completed}/{s.rounds_planned} раунд
+              {/* Словарь ТЗ XII: одна форма «Скрининг, 1 прогон» вместо
+                  разнобоя «Скрининг (1 прогон)» и «1/1 раунд». */}
+              {modeName}, {s.rounds_completed}{" "}
+              {s.rounds_completed % 10 === 1 && s.rounds_completed % 100 !== 11
+                ? "прогон"
+                : s.rounds_completed % 10 >= 2 && s.rounds_completed % 10 <= 4 && (s.rounds_completed % 100 < 10 || s.rounds_completed % 100 >= 20)
+                  ? "прогона"
+                  : "прогонов"}
             </span>
             {probs ? (
               // Вердикт убрали из отдельного бейджа: у скрининга он совпадал с
               // режимом, и рядом стояли два одинаковых «Скрининг». Остался
               // здесь, в подсказке, вместе с вероятностями.
+              //
+              // Уверенность — тоже функция числа прогонов: при одном прогоне
+              // движок отдаёт P(лучший) = 1, и на экране стояло «Уверенность
+              // 100 %» рядом с предупреждением «нужно от 3 прогонов».
               <span
                 className="badge-pill"
-                title={`Вердикт: ${rec.level_label ?? rec.level}. ${
-                  probs
-                    ? `P(лучший)=${f1(probs[0], 2)} · P(перевес>1%)=${f1(probs[2], 2)}`
-                    : ""
-                }`}
+                title={
+                  enoughRuns
+                    ? `Вердикт: ${rec.level_label ?? rec.level}. P(лучший)=${f1(probs[0], 2)} · P(перевес>1%)=${f1(probs[2], 2)}`
+                    : `Мало данных: P(лучший) посчитан по ${minRuns} прогону, для оценки нужно от ${MARGIN_MIN_RUNS}`
+                }
               >
-                Уверенность {Math.round(Math.min(1, Math.max(0, probs[0])) * 100)}%
+                {enoughRuns
+                  ? `Уверенность ${Math.round(Math.min(1, Math.max(0, probs[0])) * 100)}%`
+                  : "Уверенность: н/д"}
               </span>
             ) : null}
           </div>
@@ -958,7 +998,7 @@ function SessionDetail({
             </b>
             {leaderMedian > 0 ? <span>тик/с</span> : null}
           </div>
-          <div className="m-box">
+          <div className="m-box" title={marginTitle}>
             <small>Перевес</small>
             <b className={marginGreen ? "green" : ""}>{marginText}</b>
           </div>

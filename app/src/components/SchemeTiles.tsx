@@ -394,7 +394,7 @@ export function SchemePicker({
                     <button
                       type="button"
                       className={`mini-ic${isEx ? " on ex" : ""}`}
-                      title={isEx ? "Включить в бенчмарк" : "Исключить из бенчмарка"}
+                      title={isEx ? "Вернуть в тест" : "Исключить из теста"}
                       aria-label={
                         isEx
                           ? `Вернуть «${s.name || s.guid}» в бенчмарк`
@@ -767,7 +767,7 @@ export default function SchemeTiles({
                     <button
                       type="button"
                       className={`ic-btn excl${isEx ? " on" : ""}`}
-                      title={isEx ? "Включить в бенчмарк" : "Исключить из бенчмарка"}
+                      title={isEx ? "Вернуть в тест" : "Исключить из теста"}
                       aria-label={
                         isEx
                           ? `Вернуть «${s.name || s.guid}» в бенчмарк`

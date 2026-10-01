@@ -12,7 +12,6 @@ export default function TitleBar({
   status,
   hardware,
   hardwareFull,
-  quietOn,
 }: {
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -27,7 +26,6 @@ export default function TitleBar({
   hardware?: string;
   /** Полное название для подсказки. */
   hardwareFull?: string;
-  quietOn?: boolean;
 }) {
   // Смена состояния: ключ по тексту пересоздаёт узел, и кросс-фейд
   // (уход вверх, приход снизу) проигрывается снова. Без ключа текст
@@ -116,15 +114,10 @@ export default function TitleBar({
         </span>
       ) : null}
       <div className="titlebar-chips" data-tauri-drag-region>
-        <span
-          className={`titlebar-chip${quietOn ? " on" : ""}`}
-          title={quietOn ? "Тихий режим включён" : "Тихий режим выключен"}
-        >
-          <span className="dot-live" />
-          {quietOn ? "Тихий режим: вкл" : "Тихий режим: выкл"}
-        </span>
+        {/* Чип железа — самый длинный, поэтому у него `data-prio="1"`:
+            при узком окне он прячется первым. */}
         {hardware ? (
-          <span className="titlebar-chip trunc" title={hardwareFull ?? hardware}>
+          <span className="titlebar-chip trunc" data-prio="1" title={hardwareFull ?? hardware}>
             {hardware}
           </span>
         ) : null}
@@ -135,6 +128,7 @@ export default function TitleBar({
         <button
           type="button"
           className={`titlebar-toggle${motionOff ? " off" : ""}`}
+          data-prio="2"
           onClick={onToggleMotion}
         >
           <MotionIcon width={12} height={12} />

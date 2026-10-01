@@ -10,8 +10,86 @@
 [data-mode=Light][data-theme=Ocean]{--accent: #1e8fb8;--info: #1d84b4}
 [data-mode=Light][data-theme=Violet]{--accent: #6d5ae0;--info: #5b5fd0}
 :root{--text-primary: var(--fg);--text-secondary: var(--fg-dim);--text-muted: var(--fg-mute);--surface: var(--bg-2);--surface-hover: var(--bg-3);--surface-active: var(--bg-3);--border-subtle: var(--line-1);--border-default: var(--line-2);--border-strong: color-mix(in srgb, var(--fg) 26%, var(--line-2));--success: var(--ok);--warning: var(--warn);--error: var(--err);--accent-hover: color-mix(in srgb, var(--accent) 78%, var(--fg));--accent-active: color-mix(in srgb, var(--accent) 66%, var(--fg))}
-:root{--fs-display: 24px;--fs-h1: 22px;--fs-h2: 16px;--fs-h3: 15px;--fs-body: 14px;--fs-sm: 13px;--fs-xs: 12px;--fs-hero: var(--fs-h1);--fs-title: var(--fs-h2);--fs-caption: var(--fs-sm);--fs-meta: var(--fs-xs);--lh-tight: 1.25;--lh-body: 1.55;--ls-tight: -.2px;--sp-1: 4px;--sp-2: 8px;--sp-3: 12px;--sp-4: 16px;--sp-5: 20px;--sp-6: 24px;--sp-7: 28px;--sp-8: 32px;--space-1: var(--sp-1);--space-2: var(--sp-2);--space-3: var(--sp-3);--space-4: var(--sp-4);--space-5: var(--sp-5);--space-6: var(--sp-6);--radius-xs: 8px;--radius-sm: 10px;--radius-md: 14px;--radius-lg: 18px;--radius-full: 999px;--ctrl-h: 34px;--ctrl-sm: 28px;--input-h: 34px;--icon-btn: 30px;--icon-s: 16px;--chart-h: 120px;--shadow-card: 0 14px 34px -26px rgba(0, 0, 0, .65);--shadow-float: 0 20px 50px -22px rgba(0, 0, 0, .7);--shadow-modal: 0 26px 70px -26px rgba(0, 0, 0, .75);--shadow-pop: 0 12px 30px -14px rgba(0, 0, 0, .75);--shadow-lift: 0 20px 48px -26px rgba(0, 0, 0, .85);--shadow-accent: 0 12px 30px -12px color-mix(in srgb, var(--accent) 60%, transparent);--ring: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);--ring-strong: 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent);--ease: cubic-bezier(.22, 1, .36, 1);--spring: cubic-bezier(.34, 1.56, .64, 1);--dur-fast: .12s;--dur: .18s;--dur-slow:.26s;--motion-page:var(--dur);--motion-stage:var(--dur-slow);--motion-rise:var(--dur);--motion-pop:var(--dur-slow);--motion-slide:var(--dur-fast);--motion-pulse:1.6s}
+/* ===== Адаптивная система (ТЗ, часть II и Приложение C.1) =====
+   Все размеры считаются от ширины ОКНА приложения: контейнер `.shell`
+   объявлен ниже как `container-type: inline-size`, поэтому `cqw` в этих
+   формулах — процент от ширины окна, а не монитора.
+
+   Два множителя пользователя:
+     --k  — плотность (compact .92 · normal 1 · roomy 1.1): отступы, высоты
+            контролов, размер иконок в меню;
+     --kt — масштаб текста (s .94 · m 1 · l 1.08): ТОЛЬКО кегли, геометрия
+            не трогается.
+   Настройки независимы: «крупный текст + компактная плотность» валидная
+   комбинация. */
+:root{
+  --k: 1;
+  --kt: 1;
+
+  /* Раскладка окна. */
+  --rail-w: 64px; --side-w: 200px;
+  --pad-x: clamp(14px, 2.6cqw, 40px);
+  --content-max: 1120px;
+  --content-w: min(var(--content-max), 100%);
+
+  /* Отступы: 10–12 · 12–16 · 16–24 · 20–32. */
+  --sp-1: 4px;  --sp-2: 8px;
+  --sp-3: calc(var(--k) * clamp(10px,  .2cqw  + 8px,   12px));
+  --sp-4: calc(var(--k) * clamp(12px,  .3cqw  + 9px,   16px));
+  --sp-5: calc(var(--k) * clamp(16px,  .8cqw  + 8px,   24px));
+  --sp-6: calc(var(--k) * clamp(20px, 1.1cqw  + 10px,  32px));
+
+  /* Типографика. Кегль никогда не ниже 10 px: мельче перестаёт читаться. */
+  --fs-caps: calc(var(--kt) * clamp(10px,   .12cqw + 8.4px,  11px));
+  --fs-meta: calc(var(--kt) * clamp(11.5px, .15cqw + 9.6px, 12.5px));
+  --fs-log:  calc(var(--kt) * clamp(12.5px, .18cqw + 10.3px, 14px));
+  --fs-body: calc(var(--kt) * clamp(13px,   .22cqw + 10.4px, 14.5px));
+  --fs-card: calc(var(--kt) * clamp(15px,   .25cqw + 11.8px, 18px));
+  --fs-h1:   calc(var(--kt) * clamp(19px,   .55cqw + 12px,   24px));
+  --fs-num:  calc(var(--kt) * clamp(26px,  1.1cqw  + 13px,    34px));
+
+  /* Геометрия контролов и сеток. */
+  --ctrl-h:   calc(var(--k) * clamp(30px, .5cqw  + 24px, 36px));
+  --badge-h:  calc(var(--k) * clamp(20px, .35cqw + 16px, 24px));
+  --icon-btn: calc(var(--k) * clamp(30px, .4cqw  + 26px, 34px));
+  --topbar-h: calc(var(--k) * clamp(38px, .6cqw  + 30px, 44px));
+  --gap:      calc(var(--k) * clamp(8px,  .35cqw + 4.2px, 12px));
+  --card-pad: calc(var(--k) * clamp(12px, .6cqw  + 7.5px, 16px));
+
+  /* Колонки строк логов. */
+  --log-time: clamp(52px, 5.2cqw, 68px);
+  --log-badge: minmax(clamp(70px, 6.4cqw, 84px), max-content);
+  /* Максимальная высота прокручиваемого списка: низ не режется краем окна. */
+  --list-max: min(40vh, 320px);
+}
+html[data-density="compact"]{--k: .92}
+html[data-density="roomy"]{--k: 1.1}
+html[data-text="s"]{--kt: .94}
+html[data-text="l"]{--kt: 1.08}
+
+/* Псевдонимы для старых имён: правила ниже не переписываются, но получают
+   адаптивные значения. Объявлены ПОСЛЕ формул, иначе статичные значения
+   перебили бы их. Новые компоненты берут `--fs-body`, `--fs-meta`, `--gap`,
+   `--card-pad` напрямую.
+   Иконка в меню остаётся 16 px при любой плотности: это норма II-2
+   (единая оптическая масса пунктов), плотность меняет квадрат пункта. */
+:root{
+  --fs-display: var(--fs-num);--fs-h2: var(--fs-card);--fs-h3: var(--fs-card);--fs-sm: var(--fs-log);--fs-xs: var(--fs-meta);
+  --fs-hero: var(--fs-num);--fs-title: var(--fs-card);--fs-caption: var(--fs-log);
+  --lh-tight: 1.25;--lh-body: 1.55;--ls-tight: -.2px;
+  --sp-1: 4px;--sp-2: 8px;--sp-7: 28px;--sp-8: 32px;
+  --space-1: var(--sp-1);--space-2: var(--sp-2);--space-3: var(--sp-3);--space-4: var(--sp-4);--space-5: var(--sp-5);--space-6: var(--sp-6);
+  --radius-xs: 8px;--radius-sm: 10px;--radius-md: 14px;--radius-lg: 18px;--radius-full: 999px;
+  --ctrl-sm: 28px;--input-h: var(--ctrl-h);--icon-s: 16px;--chart-h: 120px;
+  --shadow-card: 0 14px 34px -26px rgba(0, 0, 0, .65);--shadow-float: 0 20px 50px -22px rgba(0, 0, 0, .7);--shadow-modal: 0 26px 70px -26px rgba(0, 0, 0, .75);--shadow-pop: 0 12px 30px -14px rgba(0, 0, 0, .75);--shadow-lift: 0 20px 48px -26px rgba(0, 0, 0, .85);--shadow-accent: 0 12px 30px -12px color-mix(in srgb, var(--accent) 60%, transparent);--ring: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);--ring-strong: 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent);
+  --ease: cubic-bezier(.22, 1, .36, 1);--spring: cubic-bezier(.34, 1.56, .64, 1);
+  --dur-fast: .12s;--dur: .18s;--dur-slow:.26s;--motion-page:var(--dur);--motion-stage:var(--dur-slow);--motion-rise:var(--dur);--motion-pop:var(--dur-slow);--motion-slide:var(--dur-fast);--motion-pulse:1.6s
+}
 *{box-sizing:border-box}
+/* Контейнер приложения: `cqw` и `@container` считают от ширины ОКНА, а не
+   монитора (окно можно перенести на второй экран) и не от `.shell` с его
+   отступами — иначе пороги 1280/1080/900 съехали бы на 20 px. */
+html{container-type:inline-size;container-name:app}
 html,body,#root{height:100%}
 body{margin:0;background:var(--bg-0);color:var(--fg);font-family:Inter Variable,Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;font-size:var(--fs-body);line-height:var(--lh-body);overflow:hidden;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
 button,input,select{font:inherit;color:inherit}
@@ -23,7 +101,15 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 *::-webkit-scrollbar-thumb{background:var(--bg-3);border:3px solid transparent;background-clip:content-box;border-radius:var(--radius-full)}
 *::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--fg) 18%,var(--bg-3));border:3px solid transparent;background-clip:content-box}
 *::-webkit-scrollbar-corner{background:transparent}
+/* `.shell` — каркас окна. Контейнер для формул и порогов — `<html>`: его ширина
+   равна ширине ОКНА, а у `.shell` есть отступы 10 px, и пороги сдвинулись бы на
+   них (1280 превратился бы в 1260). */
 .shell{height:100vh;display:flex;flex-direction:column;gap:0;padding:10px;background:var(--bg-0)}
+/* Текущая ширина рельсы нужна `.page` для компенсации (см. `.page`), поэтому она
+   объявляется на `.body` — общем предке рельсы и рабочей области: и `.sidebar`
+   берёт оттуда `flex-basis`, и `.page` — сдвиг под центровку в окне. */
+.shell .body{--rail-cur:var(--side-w)}
+.shell.rail-collapsed .body{--rail-cur:var(--rail-w)}
 .titlebar{flex:0 0 48px;display:flex;align-items:center;gap:4px;padding:0 10px 0 16px;background:var(--bg-1);border:1px solid var(--line-1);border-bottom:0;border-radius:var(--radius-lg) var(--radius-lg) var(--radius-lg) 0;-webkit-user-select:none;user-select:none}
 /* Бренд не тянется: иначе `flex: 1` съедал всё свободное место и название
    раздела с чипами прижимались к кнопкам окна вплотную. */
@@ -39,7 +125,7 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .titlebar .split{width:1px;height:20px;background:var(--line-2);margin:0 6px}
 .body{flex:1;display:flex;min-height:0;gap:10px}
 .sidebar{position:relative;flex:0 0 200px;display:flex;flex-direction:column;padding:12px 10px;gap:4px;background:var(--bg-1);border:1px solid var(--line-1);border-top:0;border-radius:0 0 var(--radius-lg) var(--radius-lg);transition:flex-basis var(--t-3) var(--e-out),width var(--t-3) var(--e-out);overflow:hidden}
-.sidebar.collapsed{flex-basis:64px}
+.sidebar.collapsed{flex-basis:var(--rail-w)}
 .sidebar-nav{display:flex;flex-direction:column;gap:4px}
 .sidebar-foot{margin-top:auto;display:flex;flex-direction:column;gap:4px;border-top:1px solid var(--line-1);padding-top:8px}
 .nav-item{position:relative;display:flex;align-items:center;justify-content:center;gap:10px;padding:10px 12px;text-align:center;border-radius:var(--radius-md);color:var(--fg-dim);font-size:var(--fs-body);font-weight:500;cursor:pointer;white-space:nowrap;background:transparent;border:0;font-family:inherit;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease)}
@@ -51,26 +137,21 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .nav-item.active{background:rgba(255,255,255,.06);border-color:var(--line-2);color:var(--fg)}
 .nav-item.active .nav-glyph{color:var(--accent)}
 .nav-glyph{flex:0 0 auto;display:grid;place-items:center;width:22px;height:22px;color:var(--fg-mute)}
-.nav-glyph svg{width:20px;height:20px}
 .nav-item .icon-btn{margin-left:auto}
-/* Свёрнутый сайдбар.
-   Раньше кнопки оставались шириной во всю колонку, а полоса-акцент (3 px
-   у левого края) попадала внутрь квадрата и читалась как случайный штрих.
-   Теперь это ровные квадраты, состояние показывают фон и цвет иконки, а
-   нижний блок настроек не отделяется линией и выравнивается по той же
-   сетке, что и остальные пункты. Подписи не выключаются через `display`:
-   кадр после сворачивания дёргался бы, панель гаснет плавно. */
-.sidebar.collapsed{padding:12px 8px}
-.sidebar.collapsed .nav-item{
-  justify-content:center;padding:0;width:40px;height:40px;margin:0 auto;
-  border-radius:var(--radius-md)
-}
-.sidebar.collapsed .nav-item:before{display:none}
+/* Свёрнутый сайдбар: ровные квадраты, состояние показывают фон и цвет иконки.
+   Геометрия свёрнутого вида задана ниже, в блоке «Рельса: геометрия по
+   замерам в пикселях»; здесь только нижний блок настроек, который не должен
+   отделяться линией, и общая ширина панели. */
 .sidebar.collapsed .sidebar-foot{border-top:0;padding-top:8px}
-.sidebar.collapsed .nav-glyph svg{width:18px;height:18px}
-.main{flex:1;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding:var(--sp-4) var(--sp-5) var(--sp-7);display:flex;flex-direction:column}
+/* Отступы контента: по бокам адаптивный `--pad-x` (14–40 px), сверху и снизу
+   смысловые интервалы `--sp-5` / `--sp-6` (ТЗ С-4, C.4). */
+.main{flex:1;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding:var(--sp-5) var(--pad-x) var(--sp-6);display:flex;flex-direction:column}
 .page-host{display:none}
-.page-host.on{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
+/* Обёртка страницы — flex-элемент `.main`. `1 1 auto` позволял ей сжаться до
+   высоты окна: длинная страница тогда не росла, её низ уходил за пределы
+   обёртки, и `.main` не видел высоты содержимого — прокручивать было нечего.
+   `1 0 auto`: расти можно (страница длиннее окна), сжиматься нельзя. */
+.page-host.on{display:flex;flex-direction:column;flex:1 0 auto;min-height:0}
 /* Появление страницы перезапускается классом: без него анимация играла один
    раз при монтировании, и возврат на «Бенчмарк» (единственная вкладка, которая
    не размонтируется) был бы без анимации. */
@@ -82,19 +163,58 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
    отключают растягивание: блок сжимался по содержимому и центрировался.
    Из-за этого на пустых и коротких списках заголовок и панели «уезжали» в
    центр, а на длинных растягивались — интерфейс дёргался при смене вкладки. */
-.page{width:100%;max-width:1120px;margin:0 auto;min-height:100%;display:flex;flex-direction:column;gap:var(--sp-4)}
+/* Контентная колонка одна на всех экранах (ТЗ С-1). Раньше у «Бенчмарка» был
+   свой предел 1080 px, и при переходе между экранами левый край контента
+   прыгал на 20 px.
+
+   `justify-content: safe center` — короткий экран (мастер запуска, настройки)
+   стоит по центру по вертикали, а длинный (логи, результаты) прижимается к
+   верху. `safe` здесь обязателен: без него flexbox центрирует и слишком
+   высокий блок, и верхняя его часть становится недоступной для прокрутки.
+
+   `left: -рельса / 2` — сдвиг под горизонтальный центр ОКНА. `margin: 0 auto`
+   центрирует колонку внутри области ПОСЛЕ рельсы, поэтому её центр уезжает
+   вправо на половину ширины рельсы (замер на окне 1440: 192 px слева против
+   128 px справа). Сдвиг на половину рельсы даёт равные поля. Именно сдвиг, а не
+   `margin-right` у `.main`: сужение области на 74 px роняло сетку схем с трёх
+   колонок до двух на окне 1120.
+
+   Остаток — `scrollbar-gutter`: полоса прокрутки отнимается у `.main` только
+   справа, поэтому при глобе 15 px (WebView2) центр сместится ещё на ~7 px.
+   `both-edges` дал бы точность, но забрал бы лишние 30 px ширины на узких
+   окнах, поэтому оставлен `stable`. */
+.page{width:100%;max-width:var(--content-max);margin:0 auto;min-height:100%;display:flex;flex-direction:column;justify-content:safe center;gap:var(--sp-4);position:relative;left:calc(var(--rail-cur) / -2);flex:0 0 auto}
 /* Блоки страницы не сжимаются по высоте.
-   `.page` — flex-контейнер с ограниченной высотой (окно), а у его детей
-   `flex-shrink` по умолчанию равен 1. Если содержимое длиннее окна, карточки
-   сжимались вместо того, чтобы страница прокрутилась: на «Настройках»
-   превью темы и переключатель «Тема» обрезались, а из пяти полей параметров
-   теста оставались два. Прокручивать должен контейн��р `.main`. */
+   `.page` — flex-контейнер, а у его детей `flex-shrink` по умолчанию равен 1.
+   Если содержимое длиннее окна, карточки сжимались вместо того, чтобы страница
+   прокрутилась: на «Настройках» превью темы и переключатель «Тема»
+   обрезались, а из пяти полей параметров теста оставались два. Прокручивать
+   должен контейнер `.main`. */
 .page>*{flex:0 0 auto}
-/* Блок шага занимает всю ширину и остаётся прижат к верху: вертикальные
-   auto-отступы центрировали его по высоте окна, и список плиток то прижимался к
-   верху, то прыгал в середину — в зависимости от числа схем. Положение шага
-   теперь зависит только от самого шага, а не от длины списка. */
-.wizard{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:var(--sp-4)}
+/* ===== Экран «Бенчмарк»: шапка наверху, блоки забирают высоту =====
+   Шапка («Бенчмарк», этапы, полоса под ними) прижата к верху, а освободившаяся
+   высота распределяется между блоками. Остальные короткие экраны остаются по
+   центру — это свойство `.page`, а не этого экрана. */
+.benchmark-view{justify-content:flex-start}
+/* Вся цепочка вниз — «расти можно, сжиматься нельзя» (`1 0 auto`).
+   С `1 1 auto` каждый уровень ужимался до высоты окна: низ уходил за пределы
+   блока, страница не росла и `.main` не видел высоты содержимого — прокручивать
+   было нечего. Растягивать нужно `.wizard-stage`: внутри `.wizard` он
+   единственный, и без `flex` оставался в своей природной высоте. */
+.wizard{flex:1 0 auto;display:flex;flex-direction:column;gap:var(--sp-4)}
+.wizard>*,.wizard-stage>*{flex:0 0 auto}
+/* Правило ниже, а не выше: у `.wizard > *` и `.wizard-stage` одинаковая
+   специфичность, и объявленный раньше рост был бы перебит. */
+.wizard-stage{flex:1 0 auto}
+/* Карточки «Быстро»/«Детально» тянутся вниз, но не на всю окно: потолок
+   оставляет между ними и панелью параметров воздух, а не превращает карточку
+   в пустой прямоугольник. */
+.mode-grid{flex:1 1 auto;max-height:min(52vh,420px)}
+/* Раскрытая панель параметров забирает свою долю высоты и растягивается
+   изнутри: `.adv-body` — единая строка `1fr`, иначе карточка выросла бы, а
+   поля остались бы прижаты к её верху. Свёрнутая (без `.open`) не растёт. */
+.adv-wrap.open{flex:1 1 auto;display:flex;flex-direction:column}
+.adv-wrap.open .adv-body{flex:1 1 auto}
 .page-head{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;padding:var(--sp-1) 0 var(--sp-2)}
 .page-head h1{font-size:var(--fs-h1);font-weight:650;letter-spacing:var(--ls-tight);line-height:var(--lh-tight)}
 .page-head .sub{color:var(--fg-dim);font-size:var(--fs-sm)}
@@ -281,11 +401,11 @@ table.grid.results td{overflow:hidden;text-overflow:ellipsis}
    (см. `:root`), здесь только сами формы. Раньше было десять почти одинаковых
    `@keyframes` с разными сдвигами (4/10/12/30 px) и ручными длительностями —
    интерфейс «дышал» неравномерно, и любая правка тянула за собой весь список. */
-@keyframes pageIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
-@keyframes stageIn{from{opacity:0;transform:translateX(30px)}to{opacity:1;transform:none}}
+/* Остался только `stageInBack` — возврат к предыдущей стадии (смена стадии
+   назад). Остальные кадры этого поколения (`pageIn`, `stageIn`, `riseIn`,
+   `modalIn`, `toastIn`) не используются ни одним правилом и удалены —
+   именно из-за них в файле держалось второе поколение анимаций. */
 @keyframes stageInBack{from{opacity:0;transform:translateX(-30px)}to{opacity:1;transform:none}}
-@keyframes riseIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-@keyframes modalIn{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:none}}
 .fade-in{animation:var(--motion-page) var(--ease) both}
 html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{transition:none!important;animation:none!important}
 /* Системная настройка ОС применяется так же — полным отключением. */
@@ -342,7 +462,9 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 .stat .value{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .grid2>*,.run-grid>*,.mode-stats>*{min-width:0}
 .dd-item.on{font-weight:600}
-.page.fill{height:100%;min-height:0}
+/* Экраны с собственной прокруткой (логи, результаты) занимают всю высоту:
+   центрировать их нельзя — прокручиваемый список должен начинаться под шапкой. */
+.page.fill{height:100%;min-height:0;justify-content:flex-start}
 .fill-list{flex:1 1 auto;min-height:160px;max-height:none}
 .section-title{font-size:var(--fs-h2);font-weight:650;margin:var(--sp-4) 0 2px;letter-spacing:-.1px}
 /* --- Настройки: раскладка «строка настройки» и карточки состояния --------- */
@@ -377,7 +499,7 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 .set-page .seg button{border-radius:7px;padding:5px 14px;min-height:0}
 
 /* Карточки состояния: две колонки, значок + текст слева, метка справа. */
-.set-status{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-3)}
+.set-status{display:grid;grid-template-columns:repeat(auto-fit,minmax(calc(var(--k)*420px),1fr));gap:var(--gap)}
 .status-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:var(--radius-lg);padding:var(--sp-3) var(--sp-4);display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);min-width:0}
 .st-left{display:flex;align-items:center;gap:12px;min-width:0}
 .st-icon{width:34px;height:34px;border-radius:9px;display:inline-grid;place-items:center;flex:0 0 auto;background:var(--bg-2);border:1px solid var(--line-1);color:var(--fg-dim)}
@@ -414,9 +536,6 @@ html.reduce-motion *,html.reduce-motion *:before,html.reduce-motion *:after{tran
 
 /* Адаптив. Окно можно тянуть мышью, поэтому строки складываются в одну
    колонку до того, как управление начнёт упираться в подпись. */
-@media (max-width:900px){
-.set-status{grid-template-columns:1fr}
-}
 @media (max-width:760px){
 .set-page-head{flex-wrap:wrap}
 .set-row{flex-direction:column;align-items:stretch;gap:var(--sp-2);padding:var(--sp-3)}
@@ -608,7 +727,10 @@ html.bench-running .pick-tile{
 .vbtn:hover{color:var(--fg-dim)}
 .vbtn.active{background:var(--bg-2);color:var(--fg);border-color:var(--line-2)}
 
-.schemes-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+/* Сетка карточек схем. Колонки считает сама (`auto-fill`), поэтому перечислять
+   брейкпоинты для них не нужно: при 1120 px три колонки, при 909 — две, при
+   761 — тоже две. Порог 300 px — тот же, что в ТЗ III.2. */
+.schemes-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(calc(var(--k)*300px),1fr));gap:var(--gap)}
 .scheme-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:13px;padding:12px 14px;display:flex;flex-direction:column;justify-content:space-between;gap:10px;min-width:0;transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease)}
 .scheme-card:hover{border-color:var(--line-2);background:color-mix(in srgb,var(--bg-2) 70%,var(--bg-1))}
 .scheme-card.is-active{border-color:color-mix(in srgb,var(--ok) 42%,transparent);background:linear-gradient(180deg,color-mix(in srgb,var(--ok) 6%,transparent),var(--bg-1) 65%)}
@@ -660,11 +782,12 @@ html.bench-running .pick-tile{
 
 .schemes-grid.list-mode>*{animation:none}
 
-@media (max-width:920px){
-.schemes-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+/* Минимум карточки 310 px: на 1080–1279 три колонки уже не помещались, и
+   карточки сжимались ниже читаемой ширины. */
+@container app (max-width: 1279px){
+.schemes-grid{grid-template-columns:repeat(auto-fill,minmax(calc(var(--k)*310px),1fr))}
 }
 @media (max-width:620px){
-.schemes-grid{grid-template-columns:1fr}
 .sch-search{max-width:none}
 .schemes-toolbar .toolbar-left{width:100%}
 }
@@ -793,7 +916,10 @@ html.bench-running .pick-tile{
 /* Шапка и подвал красят собственные фоны в прямоугольник: без обрезки они
    закрывали скруглённые углы окна, и оно выглядело квадратным, а вокруг
    оставалась рамка контейнера. */
-.modal.session-modal{background:#161616;width:min(920px,94vw);max-height:min(86vh,880px);border-radius:16px;overflow:hidden}
+/* Модалка результата сессии (ТЗ М-1 и 3.4): 960 px, потолок по высоте 82 % —
+   читается как диалог, а не как разворот отчёта; шапка и подвал закреплены,
+   скроллится только тело. */
+.modal.session-modal{background:#161616;width:min(960px,100%);max-height:min(82vh,760px);border-radius:16px;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.6)}
 .modal.session-modal .modal-head{padding:14px 20px;border-bottom:1px solid var(--line-1);background:var(--bg-1);flex:0 0 auto;align-items:center}
 .modal.session-modal .modal-title{font-size:16px;font-weight:700;min-width:0}
 .modal.session-modal .modal-close{width:30px;height:30px;border-radius:8px;border:1px solid var(--line-1);background:var(--bg-2);color:var(--fg-dim);font-size:15px;flex:0 0 auto}
@@ -841,6 +967,14 @@ html.bench-running .pick-tile{
 /* Таблица фаз */
 .phases-tbl{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 .phases-tbl th{text-align:right;font-size:11px;font-weight:600;color:var(--fg-mute);padding:5px 12px;border-bottom:1px solid var(--line-1);white-space:nowrap}
+/* Первая колонка таблиц прижата: при горизонтальной прокрутке на узком окне
+   названия схем и фаз не уезжали за край (ТЗ 3.4). */
+.phases-tbl th:first-child,.schemes-tbl th:first-child{position:sticky;left:0;z-index:1}
+.phases-tbl th:first-child{background:var(--bg-1)}
+.phases-tbl td:first-child{position:sticky;left:0;background:#161616}
+.schemes-tbl th:first-child{background:#1c1c1c;z-index:2}
+.schemes-tbl td:first-child{position:sticky;left:0;background:#161616}
+.schemes-tbl td:first-child{text-align:left;font-weight:600}
 .phases-tbl th:first-child{text-align:left}
 .phases-tbl td{text-align:right;padding:5px 12px;font-size:12.5px;border-bottom:1px solid rgba(255,255,255,.04)}
 .phases-tbl tr:last-child td{border-bottom:0}
@@ -868,7 +1002,6 @@ html.bench-running .pick-tile{
 .schemes-tbl thead th:first-child{text-align:left}
 .schemes-tbl td{text-align:right;padding:7.5px 14px;font-size:12.5px;border-bottom:1px solid rgba(255,255,255,.04)}
 .schemes-tbl tr:last-child td{border-bottom:0}
-.schemes-tbl td:first-child{text-align:left;font-weight:600}
 .schemes-tbl td.mut{color:var(--fg-mute)}
 .schemes-tbl tr.is-leader{background:color-mix(in srgb,var(--ok) 7%,transparent)}
 .schemes-tbl tr.is-untested{opacity:.55}
@@ -909,7 +1042,7 @@ tr.is-leader .score-bar i{background:var(--ok)}
 }
 /* ===== Экран «Бенчмарк» по макету: шапка со степпером, режимы, схемы,
    предстарт и живой дашборд ===== */
-.benchmark-view{max-width:1080px}
+/* Свой предел ширины убран: колонка должна быть одна (ТЗ С-1). */
 
 /* Единая шапка: заголовок + степпер + кнопки навигации */
 .wizard-header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-bottom:16px;margin-bottom:20px;border-bottom:1px solid var(--line-1)}
@@ -938,7 +1071,7 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .btn-stop:disabled{opacity:.6;cursor:default}
 
 /* Шаг 1: две карточки режимов рядом */
-.mode-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.mode-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(calc(var(--k)*420px),1fr));gap:var(--gap)}
 .mode-card{background:var(--bg-1);border:1.5px solid var(--line-1);border-radius:14px;padding:18px 20px;cursor:pointer;display:flex;flex-direction:column;justify-content:space-between;gap:16px;transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease)}
 .mode-card:hover{border-color:var(--line-2);background:#202020}
 .mode-card.selected{border-color:var(--fg-dim);background:linear-gradient(180deg,rgba(255,255,255,.04),var(--bg-1) 65%)}
@@ -971,7 +1104,7 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .adv-wrap.open .adv-chevron i{transform:rotate(180deg)}
 .adv-body{display:none;padding:16px 18px;border-top:1px solid var(--line-1);background:rgba(0,0,0,.18)}
 .adv-wrap.open .adv-body{display:block}
-.param-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+.param-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(calc(var(--k)*150px),1fr));gap:var(--gap)}
 .p-field{background:var(--bg-1);border:1px solid var(--line-1);border-radius:10px;padding:9px 12px;min-width:0}
 .p-field label{display:block;font-size:11.5px;color:var(--fg-mute);margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .p-input-wrap{display:flex;align-items:center;justify-content:space-between;background:var(--bg-0);border:1px solid var(--line-1);border-radius:7px;padding:5px 10px;height:34px}
@@ -1003,7 +1136,7 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .sel-summary-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .sel-summary-strip .est{color:var(--ok);font-weight:650;font-variant-numeric:tabular-nums}
 .time-tip{font-size:11.5px;color:var(--warn);background:var(--warnbg);border:1px solid var(--warnline);padding:2px 8px;border-radius:6px}
-.pick-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.pick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(calc(var(--k)*300px),1fr));gap:var(--gap)}
 .pick-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:10px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;user-select:none;min-width:0;transition:border-color var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease)}
 .pick-card:hover{border-color:var(--line-2);background:#202020}
 .pick-card.checked{border-color:rgba(255,255,255,.24);background:var(--bg-2)}
@@ -1025,7 +1158,11 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .mini-ic.warn{color:var(--err)}
 
 /* Шаг 3 (предстарт): очередь и параметры рядом */
-.launch-grid{display:grid;grid-template-columns:1.18fr 1fr;gap:14px;margin-bottom:14px}
+/* Шаг 3: очередь и параметры, минимум карточки 440 px (ТЗ III.2).
+   Колонки равные и считаются сами: прежнее `1.18fr 1fr` не умело схлопнуться
+   в одну колонку, из-за чего на 1080 px очередь и параметты ужимались. */
+.launch-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(calc(var(--k)*440px),1fr));gap:var(--gap);margin-bottom:var(--sp-4)}
+.launch-grid>*{min-width:0}
 .summary-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:14px;padding:16px 18px;display:flex;flex-direction:column;min-width:0}
 .sc-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
 .sc-title-wrap{display:flex;align-items:baseline;gap:8px;min-width:0}
@@ -1033,7 +1170,11 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .sc-count{font-size:12px;color:var(--fg-mute);white-space:nowrap}
 .sc-edit-link{background:transparent;border:1px solid var(--line-1);color:var(--fg-dim);border-radius:6px;padding:3px 8px;font:inherit;font-size:11.5px;cursor:pointer;white-space:nowrap;flex:0 0 auto}
 .sc-edit-link:hover{border-color:var(--line-2);color:var(--fg);background:var(--bg-2)}
-.part-list{display:flex;flex-direction:column;max-height:215px;overflow-y:auto;overscroll-behavior:contain;border-top:1px solid var(--line-1)}
+/* Очередь: своя прокрутка внутри карточки (ТЗ 3.4) и растворение у нижней
+   границы — иначе список обрывается краем карточки, и кажется, что он кончился
+   на шестой строке. */
+.part-list{display:flex;flex-direction:column;max-height:var(--list-max);overflow-y:auto;overscroll-behavior:contain;border-top:1px solid var(--line-1);position:relative}
+.part-list::after{content:"";position:sticky;bottom:0;display:block;height:24px;margin-top:-24px;background:linear-gradient(transparent,var(--bg-1))}
 .part-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 4px;border-bottom:1px solid rgba(255,255,255,.04);font-size:13px}
 .part-item:last-child{border-bottom:0}
 .pi-name{display:flex;align-items:center;gap:8px;font-weight:500;color:var(--fg-dim);min-width:0}
@@ -1054,6 +1195,8 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .lcb-title{font-size:15px;font-weight:700;margin-bottom:3px}
 .lcb-title b{color:var(--ok)}
 .lcb-sub{font-size:12.5px;color:var(--fg-mute)}
+/* Две кнопки вместо одной: «Продолжить с риском» и «Прервать». */
+.launch-actions{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
 .btn-launch-main{display:inline-flex;align-items:center;gap:8px;padding:10px 22px;border-radius:9px;border:0;background:var(--accent);color:#111;font:inherit;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;transition:opacity var(--dur-fast) var(--ease)}
 .btn-launch-main:hover{opacity:.92}
 .btn-launch-main:disabled{opacity:.5;cursor:default}
@@ -1071,6 +1214,8 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .lh-speed small{font-size:14px;font-weight:500;color:var(--fg-mute);letter-spacing:0;margin-left:6px}
 .lh-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:var(--fs-body);color:var(--fg-dim);font-variant-numeric:tabular-nums}
 .lh-meta span.muted{color:var(--fg-mute)}
+/* Имя схемы занимает всю строку под прогрессом и обрезается многоточием. */
+.lh-scheme{flex:1 0 100%;min-width:0;color:var(--fg-mute);font-size:var(--fs-sm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ring-wrap{display:flex;align-items:center;gap:14px;flex:0 0 auto}
 .ring-eta{text-align:right;font-size:12px;color:var(--fg-mute);line-height:1.4;font-variant-numeric:tabular-nums}
 .ring-eta b{display:block;color:var(--fg-dim);font-size:12.5px}
@@ -1081,7 +1226,7 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .ring-text{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.1}
 .ring-text b{font-size:14.5px;font-variant-numeric:tabular-nums}
 .ring-text small{font-size:10px;color:var(--fg-mute);margin-top:2px}
-.kpi-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px}
+.kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(calc(var(--k)*300px),1fr));gap:var(--gap);margin-bottom:var(--sp-4)}
 .kpi-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:13px;padding:12px 16px;display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0}
 .kpi-card.warn-border{border-color:var(--warnline);background:linear-gradient(90deg,rgba(228,180,111,.06),var(--bg-1))}
 .kpi-name{font-size:12px;color:var(--fg-mute)}
@@ -1093,7 +1238,7 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .ph-title{font-size:14px;font-weight:700;margin:0}
 .ph-eta{font-size:12px;color:var(--fg-mute);font-variant-numeric:tabular-nums}
 .ph-eta b{color:var(--fg-dim)}
-.ph-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.ph-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(calc(var(--k)*240px),1fr));gap:var(--gap)}
 .ph-item{background:var(--bg-0);border:1px solid var(--line-1);border-radius:10px;padding:10px 12px;min-width:0}
 .ph-item.active{border-color:var(--fg-mute);background:rgba(255,255,255,.03)}
 .ph-item.done{border-color:var(--okline)}
@@ -1102,6 +1247,11 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .phi-pct{font-size:12px;color:var(--fg-mute);font-variant-numeric:tabular-nums;flex:0 0 auto}
 .ph-item.active .phi-pct{color:var(--fg);font-weight:700}
 .ph-item.done .phi-pct{color:var(--ok);font-weight:700}
+/* Процент фазы вынесен под полоску: в шапке карточки теперь секунды фазы
+   («13 / 36 с»), и процент на своём месте не спорит с ними за место. */
+.phi-frac{display:block;margin-top:5px;font-size:11px;color:var(--fg-mute);font-variant-numeric:tabular-nums}
+.ph-item.active .phi-frac{color:var(--fg-dim);font-weight:600}
+.ph-item.done .phi-frac{color:var(--ok)}
 .phi-bar{height:4px;border-radius:999px;background:var(--bg-2);overflow:hidden}
 .phi-bar i{display:block;height:100%;background:var(--accent);border-radius:999px;transition:width .4s linear}
 .ph-item.done .phi-bar i{background:var(--ok)}
@@ -1110,12 +1260,9 @@ tr.is-leader .score-bar i{background:var(--ok)}
 
 @media (max-width:860px){
 .benchmark-view{padding-left:var(--sp-3);padding-right:var(--sp-3)}
-.mode-grid,.launch-grid,.kpi-strip{grid-template-columns:1fr}
-.param-grid,.pick-grid,.ph-grid{grid-template-columns:repeat(2,1fr)}
 .wh-actions{width:100%}
 }
 @media (max-width:560px){
-.param-grid,.pick-grid,.ph-grid{grid-template-columns:1fr}
 .adv-summary{display:none}
 }
 /* ===== Система моторики «Graphite Fresh» =====
@@ -1144,12 +1291,12 @@ tr.is-leader .score-bar i{background:var(--ok)}
 
 /* --- Ключевые кадры --- */
 @keyframes pb-fade-up   { from { opacity: 0; transform: translate3d(0, 10px, 0); } to { opacity: 1; transform: none; } }
-@keyframes pb-fade-in   { from { opacity: 0; } to { opacity: 1; } }
+/* `pb-fade-in`, `pb-slide-in-l`, `pb-overlay-out` и `pb-veil-in` удалены:
+   ни одно правило их не вызывало. Появление и уход оверлея сейчас играет
+   `pb-overlay-in` (появление) и снятие класса (уход). */
 @keyframes pb-pop-in    { 0% { opacity: 0; transform: scale(.965); } 62% { opacity: 1; transform: scale(1.008); } 100% { opacity: 1; transform: scale(1); } }
 @keyframes pb-slide-in-r{ from { opacity: 0; transform: translate3d(14px, 0, 0); } to { opacity: 1; transform: none; } }
-@keyframes pb-slide-in-l{ from { opacity: 0; transform: translate3d(-14px, 0, 0); } to { opacity: 1; transform: none; } }
 @keyframes pb-overlay-in{ from { opacity: 0; transform: translate3d(0, 22px, 0) scale(.985); } to { opacity: 1; transform: none; } }
-@keyframes pb-overlay-out{ from { opacity: 1; transform: none; } to { opacity: 0; transform: translate3d(0, 12px, 0) scale(.99); } }
 @keyframes pb-ripple    { from { transform: scale(0); opacity: .30; } to { transform: scale(2.4); opacity: 0; } }
 @keyframes pb-flash     { from { background-color: rgba(255, 255, 255, .10); } to { background-color: transparent; } }
 @keyframes pb-roll-up   { from { opacity: .18; transform: translateY(7px); } to { opacity: 1; transform: none; } }
@@ -1161,11 +1308,12 @@ tr.is-leader .score-bar i{background:var(--ok)}
 @keyframes pb-draw      { from { stroke-dasharray: 24; stroke-dashoffset: 24; } to { stroke-dasharray: 24; stroke-dashoffset: 0; } }
 @keyframes pb-toast-in  { from { opacity: 0; transform: translate3d(0, 14px, 0) scale(.97); } to { opacity: 1; transform: none; } }
 @keyframes pb-toast-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translate3d(0, 8px, 0) scale(.98); } }
-@keyframes pb-veil-in   { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pb-ring-glow { 0%, 100% { filter: none; } 50% { filter: drop-shadow(0 0 6px rgba(111, 208, 160, .45)); } }
 
 /* --- Готовые классы (метки ставятся из разметки) --- */
-.pb-in  { animation: pb-fade-up var(--t-4) var(--e-out) both; animation-delay: calc(var(--i, 0) * var(--pb-stagger)); }
+/* `.pb-in` и `.pb-cascade.list-cascade` удалены: первый не ставился ни одним
+   компонентом, второй — вариант, который так и не подключили. Для списков
+   после фильтрации работает `pb-pop-list` (18 мс, ≤10 элементов). */
 .pb-pop { animation: pb-pop-in 260ms var(--e-out) both; animation-delay: calc(var(--i, 0) * 22ms); }
 .pb-rise{ animation: pb-fade-up var(--t-3) var(--e-out) both; }
 .pb-slide-r { animation: pb-slide-in-r var(--t-3) var(--e-out) both; animation-delay: calc(var(--i, 0) * 26ms); }
@@ -1259,8 +1407,6 @@ html[data-motion="off"] *::after{
    интерфейс, поэтому дальше элементы появляются без задержки. */
 .pb-cascade>*{animation:pb-fade-up var(--t-3) var(--e-out) backwards;animation-delay:calc(var(--i, 0) * var(--pb-stagger))}
 .pb-cascade>*:nth-child(n+15){animation:none}
-.pb-cascade.list-cascade>*{animation:pb-pop-in 260ms var(--e-out) backwards;animation-delay:calc(var(--i, 0) * 22ms)}
-.pb-cascade.list-cascade>*:nth-child(n+13){animation:none}
 /* Строка, чьи данные изменились: короткая вспышка без прыжка габаритов. */
 .pb-flash{background-color:rgba(255,255,255,.10)}
 /* Каскад строк внутри списков. Прямые дети страницы уже оживают каскадом
@@ -1329,19 +1475,6 @@ html[data-motion="off"] *::after{
 .nav-item{position:relative;overflow:hidden;transition:background-color var(--t-2) var(--e-out),border-color var(--t-2) var(--e-out),color var(--t-2) var(--e-out),transform var(--dur-fast) var(--e-out)}
 .nav-item:active{transform:scale(.985)}
 .nav-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;transition:opacity var(--t-2) var(--e-out)}
-.nav-glyph{flex:0 0 auto;display:grid;place-items:center}
-
-/* Полоска активного пункта: 3 px, едет между пунктами. Рисуется поверх
-   пунктов: у активного пункта своя заливка, и полоска под ней пропадала бы.
-   Из правила подъёма пунктов она исключена: иначе `position: relative`
-   перебивал `position: absolute`, и полоска становилась обычным элементом
-   списка — от этого всё меню съезжало вниз на её высоту. */
-
-/* Сворачивание: подписи схлопываются шириной, группа и палитра исчезают в
-   конце. Пунктов меню с подписями групп и палитрой в приложении пока нет,
-   правило оставлено на будущее и не ломает текущую разметку. */
-.sidebar.collapsed .nav-label{opacity:0;max-width:0}
-.sidebar.collapsed .nav-item{width:40px;height:40px;padding:0;justify-content:center}
 
 /* Уходящая вкладка: вниз на 6 px и гаснет. */
 .page-host.leaving{animation:pb-slide-out 150ms var(--e-in-out) both}
@@ -1354,11 +1487,10 @@ html[data-motion="off"] *::after{
 .titlebar-section-name{font-size:var(--fs-sm);color:var(--fg-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .titlebar-section-detail{font-size:var(--fs-meta);color:var(--fg-mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
-/* Чипы шапки: «Тихий режим» и железо. */
+/* Чипы шапки: короткое имя железа. */
 .titlebar-chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 9px;border-radius:var(--radius-full);border:1px solid var(--line-1);background:var(--bg-1);color:var(--fg-mute);font-size:var(--fs-meta);white-space:nowrap;transition:background var(--t-3) var(--e-out),border-color var(--t-3) var(--e-out),color var(--t-3) var(--e-out)}
 .titlebar-chip.on{color:var(--ok);background:var(--okbg);border-color:var(--okline);box-shadow:0 0 0 4px rgba(111,208,160,.07)}
 .titlebar-chip .dot-live{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
-.titlebar-chip.on .dot-live{animation:pb-breathe 1.5s var(--e-in-out) infinite}
 .titlebar-btn.close:hover{background:rgba(229,121,121,.92);color:#161616;border-color:transparent}
 /* ===== Шапка и меню по разбору оболочки =====
    Знак приложения — плитка с молнией, кнопка меню — слева, кнопки окна — в
@@ -1397,7 +1529,13 @@ html[data-motion="off"] *::after{
 
 /* Индикатор активного пункта: один на всё меню, лежит в сайдбаре.
    В покое у него нулевая высота и `visibility: hidden` — раньше полоски
-   прятались одной прозрачностью, и любая перерисовка возвращала их. */
+   прятались одной прозрачностью, и любая перерисовка возвращала их.
+   Полоска нарисована поверх пунктов (у активного пункта своя заливка, и под
+   ней полоска пропадала бы) и обязана оставаться вне правила подъёма
+   пунктов: `transform` из `:hover` перебил бы `position: absolute`, и
+   полоска стала бы обычным элементом списка — всё меню съезжало вниз на
+   её высоту. Поэтому подъём задан на `.nav-item`, а не на общем селекторе
+   с индикатором. */
 .pb-nav-ind{position:absolute;left:0;top:0;width:3px;height:0;border-radius:0 3px 3px 0;background:var(--accent);opacity:0;visibility:hidden;pointer-events:none;z-index:2;transition:transform var(--t-3) var(--e-spring),height var(--t-3) var(--e-spring),opacity var(--t-2) var(--e-out),visibility 0s linear var(--t-2)}
 .pb-nav-ind.is-on{opacity:1;visibility:visible;transition:transform var(--t-3) var(--e-spring),height var(--t-3) var(--e-spring),opacity var(--t-2) var(--e-out)}
 /* После смены раскладки полоска встаёт на место сразу, без пролёта. */
@@ -1420,10 +1558,6 @@ html[data-motion="off"] *::after{
 .mode-card:not(.selected):hover .mc-radio{border-color:var(--fg-mute);color:color-mix(in srgb,var(--ok) 45%,transparent)}
 .mode-card.selected .mc-radio .chk{animation:pb-draw 260ms var(--e-out) both}
 
-/* Активный пункт в свёрнутом меню: квадрат тоже залит, иначе состояние
-   читалось только по полоске слева. */
-.sidebar.collapsed .nav-item.active{background:rgba(255,255,255,.06);border-color:var(--line-2)}
-
 /* Полоса прокрутки не должна наезжать на иконки пунктов. */
 .sidebar-nav{padding-right:4px}
 .sidebar.collapsed .sidebar-nav{padding-right:0}
@@ -1438,10 +1572,12 @@ html[data-motion="off"] *::after{
    оставалась в потоке и сдвигала иконку влево. Скругление и ширина панели
    анимируются, поэтому кадр не дёргается. */
 .sidebar.collapsed .nav-label,.sidebar.collapsed .nav-glyph+.nav-label{display:none}
-.sidebar.collapsed .nav-glyph{width:16px;height:16px}
-/* Единая оптическая масса иконок: 16 px и одна обводка во всех пунктах. */
+/* Размер иконки задан на самом `svg`, а не на обёртке `.nav-glyph`:
+   правило для `svg` перебивает правило для обёртки по специфичности, и
+   иконка в свёрнутом виде рендерилась 18 px вместо 16 — набор пунктов
+   «прыгал» при переключении. Отступ от квадрата 38 px до иконки 16 px
+   получается 11 px. */
 .nav-glyph svg{width:16px;height:16px}
-.nav-glyph{display:grid;place-items:center}
 .sidebar.collapsed .nav-item.active{background:rgba(255,255,255,.06);border-color:var(--line-2);color:var(--fg)}
 
 /* Индикатор отодвинут от края окна на 4 px: у самого края его срезало
@@ -1462,3 +1598,94 @@ html[data-motion="off"] *::after{
 
 /* Бейдж ручной правки на выбранной карточке. */
 .mc-tag.edited{color:var(--warn);background:var(--warnbg);border-color:var(--warnline)}
+
+/* ===== Фолбэк для движка без контейнерных запросов (Приложение C.2) =====
+   Старый WebView2 / Electron < 25 не знает `cqw`: формулы выше посчитают
+   `clamp()` с неподдерживаемой единицей и возьмут нижнюю границу. Поэтому
+   весь токенный слой и три порога повторяются на `vw` и медиазапросах —
+   логика правил та же, отличается только источник ширины. */
+@supports not (container-type: inline-size){
+:root{
+  --pad-x: clamp(14px, 2.6vw, 40px);
+  --sp-3: calc(var(--k) * clamp(10px,  .2vw  + 8px,   12px));
+  --sp-4: calc(var(--k) * clamp(12px,  .3vw  + 9px,   16px));
+  --sp-5: calc(var(--k) * clamp(16px,  .8vw  + 8px,   24px));
+  --sp-6: calc(var(--k) * clamp(20px, 1.1vw  + 10px,  32px));
+  --fs-caps: calc(var(--kt) * clamp(10px,   .12vw + 8.4px,  11px));
+  --fs-meta: calc(var(--kt) * clamp(11.5px, .15vw + 9.6px, 12.5px));
+  --fs-log:  calc(var(--kt) * clamp(12.5px, .18vw + 10.3px, 14px));
+  --fs-body: calc(var(--kt) * clamp(13px,   .22vw + 10.4px, 14.5px));
+  --fs-card: calc(var(--kt) * clamp(15px,   .25vw + 11.8px, 18px));
+  --fs-h1:   calc(var(--kt) * clamp(19px,   .55vw + 12px,   24px));
+  --fs-num:  calc(var(--kt) * clamp(26px,  1.1vw  + 13px,    34px));
+  --ctrl-h:   calc(var(--k) * clamp(30px, .5vw  + 24px, 36px));
+  --badge-h:  calc(var(--k) * clamp(20px, .35vw + 16px, 24px));
+  --icon-btn: calc(var(--k) * clamp(30px, .4vw  + 26px, 34px));
+  --topbar-h: calc(var(--k) * clamp(38px, .6vw  + 30px, 44px));
+  --gap:      calc(var(--k) * clamp(8px,  .35vw + 4.2px, 12px));
+  --card-pad: calc(var(--k) * clamp(12px, .6vw  + 7.5px, 16px));
+  --log-time: clamp(52px, 5.2vw, 68px);
+}
+@media (max-width: 1279px){
+  [data-prio="2"]{display:none}
+}
+@media (max-width: 1079px){
+  .body{--rail-w:56px}
+  [data-prio="1"]{display:none}
+  .log-row{grid-template-columns:var(--log-time) minmax(0,1fr)}
+  .l-badge{grid-column:2;justify-self:start}
+  .support-bar{width:100%;justify-content:space-between;flex-wrap:wrap}
+}
+@media (max-width: 899px){
+  .body{--rail-w:52px}
+  .ph-grid,.kpi-strip,.set-status,.launch-grid,.mode-grid{grid-template-columns:1fr}
+  .wizard-header{gap:var(--sp-3)}
+  .wh-left{order:1;flex:1 1 100%}
+  .wh-actions{order:2;width:100%}
+  .wizard-header .wh-left .stepper{order:3}
+  .lh-metrics{grid-template-columns:repeat(2,auto);width:100%}
+  .modal{width:100%;max-height:88vh}
+}
+/* Ширина окна в этом режиме совпадает с шириной экрана (окно обычно
+   развёрнуто), поэтому `auto-fit` с минимальной карточкой в px остаётся
+   корректным без переопределений. */
+}
+
+/* ===== Структурные пороги по ширине ОКНА (ТЗ III.3) =====
+   Пороги смотрят на контейнер `<html>`, а не на экран: окно можно перенести на
+   второй монитор, и медиазапрос по ширине экрана тогда считает не то. Колонки
+   сеток не перечислены — их считает `auto-fit` с минимумом карточки.
+
+   Переменные порогов задаются на `.body` — общем предке рельсы и рабочей
+   области: ширина рельсы нужна обеим (`.sidebar` — свой `flex-basis`, `.main` —
+   компенсация под центровку в окне). */
+@container app (max-width: 1279px){
+/* Кнопка «Анимации» — самая узкая из необязательных. */
+[data-prio="2"]{display:none}
+}
+@container app (max-width: 1079px){
+.body{--rail-w:56px}
+/* Железо — самый длинный чип (148 px). */
+[data-prio="1"]{display:none}
+/* Строка лога в две колонки: бейдж уходит под текст, иначе три колонки
+   оставляли под сообщение треть ширины окна. */
+.log-row{grid-template-columns:var(--log-time) minmax(0,1fr)}
+.l-badge{grid-column:2;justify-self:start}
+/* Панель инструментов логов — во всю ширину, кнопки переносятся. */
+.support-bar{width:100%;justify-content:space-between;flex-wrap:wrap}
+}
+@container app (max-width: 899px){
+.body{--rail-w:52px}
+/* Сетки, которые по ТЗ III.3 идут в одну колонку. */
+.ph-grid,.kpi-strip,.set-status,.launch-grid,.mode-grid{grid-template-columns:1fr}
+/* Шапка экрана Бенчмарка: заголовок, затем кнопки во всю ширину, степпер —
+   последней строкой (order 3). На 1024 px шапка была 1078 px и не влезала. */
+.wizard-header{gap:var(--sp-3)}
+.wh-left{order:1;flex:1 1 100%}
+.wh-actions{order:2;width:100%}
+.wizard-header .wh-left .stepper{order:3}
+/* Метрики лидера в модалке — строкой «подпись — значение». */
+.lh-metrics{grid-template-columns:repeat(2,auto);width:100%}
+/* Модалка на всю ширину окна. */
+.modal{width:100%;max-height:88vh}
+}

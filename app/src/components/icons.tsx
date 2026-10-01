@@ -23,8 +23,8 @@ export function HomeIcon(props: SVGProps<SVGSVGElement>) {
 export function PowerIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <path d="M12 3.5v8.5" />
-      <path d="M7.2 6.6a7.25 7.25 0 1 0 9.6 0" />
+      <path d="M12 4.11v8.5" />
+      <path d="M7.2 7.21a7.25 7.25 0 1 0 9.6 0" />
     </Base>
   );
 }
@@ -72,7 +72,7 @@ export function GearIcon(props: SVGProps<SVGSVGElement>) {
 export function MinusIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" {...props}>
-      <path d="M5 12h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" fill="none" />
+          <path d="M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
     </svg>
   );
 }
@@ -84,7 +84,7 @@ export function CloseIcon(props: SVGProps<SVGSVGElement>) {
       <path
         d="M7 7l10 10M17 7L7 17"
         stroke="currentColor"
-        strokeWidth="2.2"
+            strokeWidth="2"
         strokeLinecap="round"
         fill="none"
       />
@@ -102,7 +102,7 @@ export function ChevronIcon({ flip = false, ...rest }: SVGProps<SVGSVGElement> &
       {...rest}
     >
       <path
-        d="m15 5-7 7 7 7"
+        d="m15.5 5-7 7 7 7"
         stroke="currentColor"
         strokeWidth="2"
         strokeLinecap="round"
@@ -117,7 +117,7 @@ export function ChevronIcon({ flip = false, ...rest }: SVGProps<SVGSVGElement> &
 export function StarOutlineIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <Base {...props}>
-      <path d="M12 2.9l2.58 5.23 5.77.84-4.18 4.07.99 5.74L12 16.07l-5.16 2.71.99-5.74L3.65 8.97l5.77-.84L12 2.9Zm0 2.7 1.8 3.65 4.03.59-2.92 2.85.69 4.01L12 14.8l-3.6 1.9.69-4.01-2.92-2.85 4.03-.59L12 5.6Z" />
+      <path d="M12 4.06l2.58 5.23 5.77.84-4.18 4.07.99 5.74L12 17.23l-5.16 2.71.99-5.74L3.65 10.13l5.77-.84L12 4.06Zm0 2.7 1.8 3.65 4.03.59-2.92 2.85.69 4.01L12 15.96l-3.6 1.9.69-4.01-2.92-2.85 4.03-.59L12 6.76Z" />
     </Base>
   );
 }
@@ -126,7 +126,7 @@ export function StarOutlineIcon(props: SVGProps<SVGSVGElement>) {
 export function StarFilledIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <Base {...props}>
-      <path d="M12 2.9l2.58 5.23 5.77.84-4.18 4.07.99 5.74L12 16.07l-5.16 2.71.99-5.74L3.65 8.97l5.77-.84L12 2.9Z" />
+      <path d="M12 4.06l2.58 5.23 5.77.84-4.18 4.07.99 5.74L12 17.23l-5.16 2.71.99-5.74L3.65 10.13l5.77-.84L12 4.06Z" />
     </Base>
   );
 }
@@ -177,9 +177,9 @@ export function MotionIcon(props: SVGProps<SVGSVGElement>) {
 export function GaugeIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <Base fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <path d="M4.6 16a8 8 0 1 1 14.8 0" />
-      <path d="M12 16l4.2-4.8" />
-      <circle cx="12" cy="16" r="1.3" />
+      <path d="M4.6 16.87a8 8 0 1 1 14.8 0" />
+      <path d="M12 16.87l4.2-4.8" />
+      <circle cx="12" cy="16.87" r="1.3" />
     </Base>
   );
 }
@@ -220,7 +220,7 @@ export function LogLinesIcon(props: SVGProps<SVGSVGElement>) {
 /** Меню (свернуть/развернуть боковую панель). */
 export function MenuIcon(props: SVGProps<SVGSVGElement>) {
   return (
-    <Base fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" {...props}>
+    <Base fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" {...props}>
       <path d="M4 6h16M4 12h10M4 18h16" />
     </Base>
   );
@@ -239,8 +239,8 @@ export function SquareIcon(props: SVGProps<SVGSVGElement>) {
 export function SquaresIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <Base fill="none" stroke="currentColor" strokeWidth={1.3} strokeLinecap="round" {...props}>
-      <rect x="3" y="7" width="13" height="13" rx="2.2" />
-      <path d="M8.5 7V5.4A2.4 2.4 0 0 1 10.9 3H18.6A2.4 2.4 0 0 1 21 5.4v7.7A2.4 2.4 0 0 1 18.6 15.5H17" />
+      <rect x="3" y="7.5" width="13" height="13" rx="2.2" />
+      <path d="M8.5 7.5V5.9A2.4 2.4 0 0 1 10.9 3.5H18.6A2.4 2.4 0 0 1 21 5.9v7.7A2.4 2.4 0 0 1 18.6 16H17" />
     </Base>
   );
 }
@@ -257,18 +257,18 @@ export function CrossIcon(props: SVGProps<SVGSVGElement>) {
 /** Корзина (удалить). */
 export function TrashIcon(props: SVGProps<SVGSVGElement>) {
   return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" {...props}>
-      <path d="M5.5 6h9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M8 3.75h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...props}>
+      <path d="M6.6 7.2h10.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M9.6 4.5h4.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       <path
-        d="M6.25 6 7 15.25a1.25 1.25 0 0 0 1.24 1.15h3.52A1.25 1.25 0 0 0 13 15.25L13.75 6"
+        d="M7.5 7.2 8.4 18.3a1.5 1.5 0 0 0 1.49 1.38h4.22A1.5 1.5 0 0 0 15.6 18.3L16.5 7.2"
         stroke="currentColor"
-        strokeWidth="1.5"
+        strokeWidth="1.8"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <path d="M8.75 8.75v4.25" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M11.25 8.75v4.25" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M10.5 10.5v5.1" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M13.5 10.5v5.1" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }
@@ -306,13 +306,14 @@ export function ExportIcon(props: SVGProps<SVGSVGElement>) {
 
 /** Лупа (поиск). */
 export function SearchIcon(props: SVGProps<SVGSVGElement>) {
-  return (    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" {...props}>
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...props}>
       <path
-        d="M8.75 3.5a5.25 5.25 0 1 0 0 10.5a5.25 5.25 0 0 0 0-10.5Z"
+        d="M10.5 4.2a6.3 6.3 0 1 0 0 12.6a6.3 6.3 0 0 0 0-12.6Z"
         stroke="currentColor"
-        strokeWidth="1.7"
+        strokeWidth="1.8"
       />
-      <path d="m12.5 12.5 4 4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      <path d="m15 15 4.8 4.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }
@@ -329,9 +330,9 @@ export function PlusIcon(props: SVGProps<SVGSVGElement>) {
 /** Круговая стрелка (вернуть стандартные схемы, обновить список). */
 export function RestoreIcon(props: SVGProps<SVGSVGElement>) {
   return (
-    <Base fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <path d="M3 4.5V11h6.5" />
-      <path d="M4.6 12.2A8.5 8.5 0 1 0 7 5.6L3 9.5" />
+    <Base fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M2.7 5V11.5h6.5" />
+      <path d="M4.3 12.7A8.5 8.5 0 1 0 6.7 6.1L2.7 10" />
     </Base>
   );
 }
@@ -361,7 +362,7 @@ export function ListViewIcon(props: SVGProps<SVGSVGElement>) {
 /** Документ (HTML-отчёт). */
 export function ReportIcon(props: SVGProps<SVGSVGElement>) {
   return (
-    <Base fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" {...props}>
+    <Base fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" {...props}>
       <path d="M14 2.5H6.5a1.5 1.5 0 0 0-1.5 1.5v16a1.5 1.5 0 0 0 1.5 1.5h11a1.5 1.5 0 0 0 1.5-1.5V7.5Z" />
       <path d="M14 2.5V7.5h5" />
       <path d="M8.5 13h7M8.5 16.5h7" />

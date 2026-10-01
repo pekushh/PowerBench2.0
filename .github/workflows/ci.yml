@@ -119,6 +119,46 @@ jobs:
             target/release/bundle/msi/*.msi
           retention-days: 30
 
+  ui:
+    name: UI (types, build, adaptive)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 22 нужен встроенный WebSocket: стенды адаптива говорят с Chromium по
+      # CDP, а отдельную зависимость ради этого добавлять нельзя.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: app
+
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: app
+
+      - name: Build UI
+        run: npx vite build
+        working-directory: app
+
+      # Токены и раскладка по ширинам окна (ТЗ XIV.4). Стенд меряет собранный
+      # CSS на скелете разметки, поэтому приложение запускать не нужно.
+      - name: Adaptive acceptance
+        run: npm run check:adaptive
+        working-directory: app
+
+      # Тот же замер без контейнерных запросов: блоки `@container` вырезаны,
+      # фолбэк на `vw` раскрыт (Приложение C.2).
+      - name: Adaptive fallback
+        run: npm run check:fallback
+        working-directory: app
+
   docs:
     name: Build Documentation
     runs-on: ubuntu-latest

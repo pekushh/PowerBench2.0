@@ -209,6 +209,10 @@ pub struct SettingsDto {
     pub mode: String,
     pub reduce_motion: bool,
     pub sidebar_collapsed: bool,
+    /// Плотность интерфейса: «compact» / «normal» / «roomy» (CSS `--k`).
+    pub density: String,
+    /// Масштаб текста: «s» / «m» / «l» (CSS `--kt`).
+    pub text_scale: String,
     pub score_performance: f64,
     pub score_stability: f64,
     pub score_worst_second: f64,
@@ -227,6 +231,8 @@ fn settings_to_dto(s: &AppSettings) -> SettingsDto {
         mode: s.appearance.mode.clone(),
         reduce_motion: s.appearance.reduce_motion,
         sidebar_collapsed: s.appearance.sidebar_collapsed,
+        density: s.appearance.density.clone(),
+        text_scale: s.appearance.text_scale.clone(),
         score_performance: s.scoring.performance,
         score_stability: s.scoring.stability,
         score_worst_second: s.scoring.worst_second,
@@ -273,6 +279,16 @@ pub fn set_settings(settings: SettingsDto) -> Result<(), String> {
         cur.appearance.mode = std::mem::take(&mut s.mode);
         cur.appearance.reduce_motion = s.reduce_motion;
         cur.appearance.sidebar_collapsed = s.sidebar_collapsed;
+        // Неизвестное значение молча берётся как «обычно»: настройка приходит из
+        // интерфейса, но конфиг мог достаться от другой версии приложения.
+        cur.appearance.density = match s.density.as_str() {
+            "compact" | "normal" | "roomy" => s.density,
+            _ => "normal".to_string(),
+        };
+        cur.appearance.text_scale = match s.text_scale.as_str() {
+            "s" | "m" | "l" => s.text_scale,
+            _ => "m".to_string(),
+        };
         cur.scoring.performance = s.score_performance;
         cur.scoring.stability = s.score_stability;
         cur.scoring.worst_second = s.score_worst_second;

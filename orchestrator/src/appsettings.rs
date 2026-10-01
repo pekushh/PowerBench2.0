@@ -50,6 +50,17 @@ pub struct AppearanceSettings {
     pub mode: String,
     pub reduce_motion: bool,
     pub sidebar_collapsed: bool,
+    /// Плотность интерфейса: «compact» / «normal» / «roomy».
+    ///
+    /// Множитель отступов, высот контролов и размера иконок меню: 0.92 / 1 /
+    /// 1.1. Живёт в CSS как `--k`, см. `styles.css`.
+    pub density: String,
+    /// Масштаб текста: «s» / «m» / «l».
+    ///
+    /// Множитель только кеглей, геометрия не трогается: 0.94 / 1 / 1.08. В CSS
+    /// это `--kt`. Настройки независимы — «крупный текст + компактная
+    /// плотность» валидная комбинация.
+    pub text_scale: String,
 }
 
 impl Default for AppearanceSettings {
@@ -59,6 +70,8 @@ impl Default for AppearanceSettings {
             mode: "Dark".to_string(),
             reduce_motion: false,
             sidebar_collapsed: true,
+            density: "normal".to_string(),
+            text_scale: "m".to_string(),
         }
     }
 }

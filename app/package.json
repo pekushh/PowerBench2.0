@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "typecheck": "tsc --noEmit",
+    "check:adaptive": "node tools/adaptive-check.cjs",
+    "check:fallback": "node tools/fallback-check.cjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

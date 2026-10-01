@@ -10,14 +10,26 @@ import { commands, type SettingsDto } from "../api";
 import { Button, Glass, Seg, Switch } from "../components/ui";
 import { useCascade } from "../components/useCascade";
 import { setSectionDetail } from "../store";
-import { FolderIcon, MotionIcon, ShieldIcon, SocketIcon, ThemeIcon } from "../components/icons";
+import { FolderIcon, GridIcon, MotionIcon, ShieldIcon, SocketIcon, ThemeIcon } from "../components/icons";
 import { pushToast } from "../store";
 
 type ModeName = "Dark" | "Light" | "Auto";
+type DensityName = "compact" | "normal" | "roomy";
+type TextScaleName = "s" | "m" | "l";
 
 /** Отсечение неизвестного значения: без него `Seg` остался бы без выбора. */
 function isMode(v: string): v is ModeName {
   return v === "Dark" || v === "Light" || v === "Auto";
+}
+
+/** Плотность: неизвестное значение из конфига показываем как «обычно». */
+function isDensity(v: string): v is DensityName {
+  return v === "compact" || v === "normal" || v === "roomy";
+}
+
+/** Масштаб текста: неизвестное значение показываем как обычный. */
+function isTextScale(v: string): v is TextScaleName {
+  return v === "s" || v === "m" || v === "l";
 }
 
 /**
@@ -213,6 +225,54 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
               </div>
             </div>
             <Switch checked={st.reduce_motion} onChange={(v) => patch({ reduce_motion: v })} />
+          </div>
+
+          {/* Плотность и масштаб текста независимы: «крупный текст +
+              компактная плотность» — валидная комбинация (ТЗ II.4). */}
+          <div className="set-row">
+            <div className="set-left">
+              <span className="set-icon">
+                <GridIcon />
+              </span>
+              <div className="set-text">
+                <div className="set-title">Плотность интерфейса</div>
+                <div className="set-sub">
+                  Отступы и высота контролов. На 720 px высоты окна экономит место
+                </div>
+              </div>
+            </div>
+            <Seg
+              label="Плотность интерфейса"
+              options={[
+                { value: "compact", label: "Компактно" },
+                { value: "normal", label: "Обычно" },
+                { value: "roomy", label: "Свободно" },
+              ]}
+              value={isDensity(st.density) ? st.density : "normal"}
+              onChange={(v) => patch({ density: v })}
+            />
+          </div>
+
+          <div className="set-row">
+            <div className="set-left">
+              <span className="set-icon">
+                <ThemeIcon />
+              </span>
+              <div className="set-text">
+                <div className="set-title">Масштаб текста</div>
+                <div className="set-sub">Меняет только размер шрифта, не геометрию</div>
+              </div>
+            </div>
+            <Seg
+              label="Масштаб текста"
+              options={[
+                { value: "s", label: "Мелкий" },
+                { value: "m", label: "Обычный" },
+                { value: "l", label: "Крупный" },
+              ]}
+              value={isTextScale(st.text_scale) ? st.text_scale : "m"}
+              onChange={(v) => patch({ text_scale: v })}
+            />
           </div>
         </div>
       </section>

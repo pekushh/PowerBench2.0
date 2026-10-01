@@ -649,8 +649,8 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
                   className="m-col"
                   title={
                     rowHasMargin(r)
-                      ? "Доверительный интервал (разброс оценки)"
-                      : `Мало данных: доверительный интервал считается от ${MARGIN_MIN_RUNS} прогонов, выполнено ${r.rounds_completed}`
+                      ? "Доверительный интервал: разброс оценки"
+                      : `Нужно от ${MARGIN_MIN_RUNS} ${plural(MARGIN_MIN_RUNS, "прогона", "прогонов", "прогонов")}, выполнено ${r.rounds_completed}`
                   }
                 >
                   <span className="m-label">Погрешность</span>
@@ -859,8 +859,8 @@ function SessionDetail({
   const marginGreen =
     margin != null && Number.isFinite(margin) && sessionMarginAvailable(s.schemes, margin) && margin >= 1;
   const marginTitle = enoughRuns
-    ? "Перевес лидера над вторым местом по среднему throughput прогонов (не по медиане из таблицы ниже)."
-    : `Мало данных: перевес считается от ${MARGIN_MIN_RUNS} прогонов, минимум по схеме — ${minRuns}.`;
+    ? "Перевес лидера над вторым местом по среднему throughput прогонов."
+    : `Перевес посчитан по ${minRuns} ${plural(minRuns, "прогону", "прогонам", "прогонах")} — для оценки нужно от ${MARGIN_MIN_RUNS}.`;
 
   // Таблица: лидер первым, затем остальные по убыванию медианы; забракованные — в конце.
   const tableRows = [...s.schemes].sort((a, b) => {
@@ -920,8 +920,8 @@ function SessionDetail({
   const leaderRuns = leader?.runs ?? 0;
   if (leaderRuns > 0 && leaderRuns < 3) {
     alerts.push({
-      title: `${modeName} (${leaderRuns} ${plural(leaderRuns, "прогон", "прогона", "прогонов")}):`,
-      text: "для расчёта доверительного интервала нужно от 3 прогонов.",
+      title: `${modeName} · ${leaderRuns} ${plural(leaderRuns, "прогон", "прогона", "прогонов")}`,
+      text: `нужно от ${MARGIN_MIN_RUNS} для доверительного интервала`,
     });
   }
   // Отформатированный чип про фон CPU идёт первым, а следом бэкенд присылает
@@ -991,8 +991,8 @@ function SessionDetail({
                 className="badge-pill"
                 title={
                   enoughRuns
-                    ? `Вердикт: ${rec.level_label ?? rec.level}. P(лучший)=${f1(probs[0], 2)} · P(перевес>1%)=${f1(probs[2], 2)}`
-                    : `Мало данных: P(лучший) посчитан по ${minRuns} прогону, для оценки нужно от ${MARGIN_MIN_RUNS}`
+                    ? `${rec.level_label ?? rec.level}. Шанс лидерства ${Math.round(probs[0] * 100)} %, шанс перевеса больше 1 % — ${Math.round(probs[2] * 100)} %.`
+                    : `Посчитано по ${minRuns} ${plural(minRuns, "прогону", "прогонам", "прогонах")}, для оценки нужно от ${MARGIN_MIN_RUNS}.`
                 }
               >
                 {enoughRuns

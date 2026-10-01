@@ -1265,6 +1265,10 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .lcb-title{font-size:15px;font-weight:700;margin-bottom:3px}
 .lcb-title b{color:var(--ok)}
 .lcb-sub{font-size:12.5px;color:var(--fg-mute)}
+/* Предупреждение о фоновой нагрузке: не то же самое, что «начнём с такой-то
+   схемы». Раньше оно было третьим вариантом одной строки и отличалось от
+   остальных только формулировкой. */
+.lcb-warn{color:var(--warn);margin-top:2px}
 /* Две кнопки вместо одной: «Продолжить с риском» и «Прервать». */
 .launch-actions{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
 .btn-launch-main{display:inline-flex;align-items:center;gap:8px;padding:10px 22px;border-radius:9px;border:0;background:var(--accent);color:#111;font:inherit;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;transition:opacity var(--dur-fast) var(--ease)}

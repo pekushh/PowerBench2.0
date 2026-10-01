@@ -935,8 +935,8 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                   </span>
                   <span className="adv-toggle-right">
                     <span className="adv-summary">
-                      Прогон {duration} с · Разогрев {warmup} с · Охлаждение {cooling} с ·
-                      Повторов {reps} · порог фона {tf(backgroundThreshold, 1)} %
+                      {duration} с · {warmup} с разогрев · {reps}{" "}
+                      {plural(reps, "повтор", "повтора", "повторов")}
                     </span>
                     <span className="adv-chevron">
                       {expanded ? "Свернуть" : "Настроить"} <i>▾</i>
@@ -1274,24 +1274,23 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                   </div>
                 </div>
 
-                {/* Баннер по фону. Приложение не пытается снижать фоновую нагрузку, поэтому
-                    и формулировки не обещают этого: во время сессии мы только
-                    сообщаем измеренное число и его влияние на результат, до
-                    запуска — предлагаем выбор. */}
-                {running && bgAbove && bgNow != null ? (
+                {/* Баннер по фону. Приложение не пытается снижать фоновую
+                    нагрузку, поэтому формулировки и не обещают этого: во
+                    время сессии сообщаем измеренное число и его влияние на
+                    результат, до запуска — предлагаем выбор. Оба текста
+                    вынесены в подсказку: цифры и так стоят в баннере жирным,
+                    а 70 символов рядом с ними читались как вторая мысль. */}
+                {bgAbove && bgNow != null ? (
                   <div className="warn-banner">
                     <span>
-                      <b>Фон {tf(bgNow, 1)} % выше порога {tf(backgroundThreshold, 1)} %.</b>{" "}
-                      Результат может быть занижен — верьте сравнению схем, а не
-                      абсолютному числу.
-                    </span>
-                  </div>
-                ) : null}
-                {!running && bgAbove && bgNow != null ? (
-                  <div className="warn-banner">
-                    <span>
-                      <b>Фон {tf(bgNow, 1)} % выше порога {tf(backgroundThreshold, 1)} %.</b>{" "}
-                      Закройте ресурсоёмкие программы или запустите замер с риском.
+                      <b>Фон {tf(bgNow, 1)} % выше порога {tf(backgroundThreshold, 1)} %.</b>
+                      <InfoTip
+                        text={
+                          running
+                            ? "Результат может быть занижен. Ориентируйтесь на сравнение схем, а не на абсолютное число."
+                            : "Закройте тяжёлые программы или запустите замер с риском — кнопка «с риском» есть ниже."
+                        }
+                      />
                     </span>
                   </div>
                 ) : null}
@@ -1339,7 +1338,10 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                     <div className="sc-header">
                       <div className="sc-title-wrap">
                         <h2 className="sc-title">Параметры и готовность</h2>
-                        <span className="sc-count">{phasePlan.length} фазы нагрузки</span>
+                        <span className="sc-count">
+                          {phasePlan.length}{" "}
+                          {plural(phasePlan.length, "фаза", "фазы", "фаз")} нагрузки
+                        </span>
                       </div>
                       <button
                         type="button"
@@ -1354,7 +1356,9 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                         <span className="kv-k">Режим</span>
                         <span className="kv-v kv-pill">
                           {activePreset === "quick" ? "Скрининг" : PRESET_SHORT[activePreset]}
-                          {activePreset !== "quick" ? ` (${reps} раундов)` : ""}
+                          {activePreset !== "quick"
+                            ? ` · ${reps} ${plural(reps, "повтор", "повтора", "повторов")}`
+                            : ""}
                         </span>
                       </div>
                       <div className="kv-row">
@@ -1364,9 +1368,12 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                         </span>
                       </div>
                       <div className="kv-row">
-                        <span className="kv-k">Всего прогонов</span>
-                        <span className="kv-v">
-                          {selected.size * reps} ({selected.size} схем × {reps})
+                        <span className="kv-k">Прогонов</span>
+                        {/* Расклад «схем × повторов» убран: это то же
+                            число, что слева, и та же информация, что в двух
+                            строках выше. В подсказке — откуда оно. */}
+                        <span className="kv-v" title={`${selected.size} ${plural(selected.size, "схема", "схемы", "схем")} × ${reps} ${plural(reps, "повтор", "повтора", "повторов")}`}>
+                          {selected.size * reps}
                         </span>
                       </div>
                       <div className="kv-row">
@@ -1411,15 +1418,22 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                 <div className="launch-cta-bar">
                   <div>
                     <div className="lcb-title">
-                      Расчётное время сессии: <b>около {estimate}</b>
+                      Расчётное время сессии: <b>{estimate}</b>
                     </div>
+                    {/* Три варианта сводились к одной строке: что будет с
+                        активной схемой. Предупреждение о фоне вынесено
+                        отдельно — оно меняет смысл результата, а не
+                        сообщает о ходе замера. */}
                     <div className="lcb-sub">
-                      {needsRiskConsent
-                        ? `Фон ${tf(bgNow, 1)} % выше порога запуска ${tf(backgroundThreshold, 1)} % — результат может быть занижен.`
-                        : activeInQueue
-                          ? `Активная схема «${activeInQueue.name || "без названия"}» протестируется первой и восстановится автоматически после завершения.`
-                          : "Исходная схема питания восстановится автоматически после завершения."}
+                      {activeInQueue && activeInQueue.name
+                        ? `Начнём с «${activeInQueue.name}»`
+                        : "Исходная схема вернётся после замера"}
                     </div>
+                    {needsRiskConsent ? (
+                      <div className="lcb-sub lcb-warn">
+                        Фон {tf(bgNow, 1)} % выше порога {tf(backgroundThreshold, 1)} %
+                      </div>
+                    ) : null}
                   </div>
                   <div className="launch-actions">
                     {needsRiskConsent ? (

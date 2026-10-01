@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { commands, type SchemeRow, type SettingsDto } from "../api";
-import { Badge, Button, Modal } from "../components/ui";
+import { Button, Modal } from "../components/ui";
 import { ExportIcon, PlusIcon, RestoreIcon } from "../components/icons";
 import SchemeTiles from "../components/SchemeTiles";
 import { Page, PageHead } from "../components/Page";
@@ -172,14 +172,14 @@ const { running } = useSession();
           </>
         }
       />
-      {isAdmin === false ? (
-        <div className="hint" style={{ marginBottom: 4 }}>
-          {/* Без точки: это короткая метка-подсказка, а не предложение. */}
-          <Badge kind="warn">Требуется запуск от имени администратора</Badge>
-        </div>
-      ) : null}
+{/* Плашка «Требуется запуск от имени администратора» удалена: она
+          висела отдельной строкой под шапкой, в обёртке без рамки, с
+          собственным `marginBottom` — выглядела как потерянный элемент. При
+          этом обе кнопки, которые она отключает, уже несут то же сообщение в
+          своей подсказке, а на плитках схем оно написано в `title` кнопки
+          питания. Пользователь видит причину там, где пытается нажать. */}
       {exportTarget ? (
-        <div className="wizard-toolbar" style={{ marginBottom: 10 }}>
+        <div className="wizard-toolbar export-toolbar">
           <span className="ttl">Выбрана: {selName || exportTarget}</span>
           <div className="spacer" />
           <Button variant="ghost" disabled={busy} onClick={() => void exportSel()}>

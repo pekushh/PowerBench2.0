@@ -21,6 +21,7 @@ import {
   TrashIcon,
 } from "./icons";
 import { Button, Modal, Spot } from "./ui";
+import { InfoTip } from "./Tooltip";
 import { pushToast } from "../store";
 import { usePill } from "./usePill";
 import { usePopOnFilter } from "./useCascade";
@@ -301,9 +302,12 @@ export function SchemePicker({
             Оценка времени: <span className="est">{estimate ?? "—"}</span>
           </span>
           {detailed && selected.size > 20 ? (
-            <span className="time-tip">
-              Совет: для &gt;20 схем начните с режима «Быстро» ({oneScheme ?? "—"} на схему)
-            </span>
+            /* Совет — по наведению на значок: раньше это была плашка из 70
+               символов в строке сводки, и она отодвигала оценку времени в
+               сторону ровно на тех экранах, где совет и нужен. */
+            <InfoTip
+              text={`При таком числе схем начните с режима «Быстро» — это ${oneScheme ?? "—"} на схему против нескольких минут в детальном.`}
+            />
           ) : null}
         </div>
       </div>
@@ -312,9 +316,9 @@ export function SchemePicker({
         <div className="glass inset">
           <div className="muted">
             {schemes.length === 0
-              ? "Схемы питания не найдены. Проверьте, что PowerBench запущен от имени администратора."
+              ? "Схемы питания не найдены — запустите PowerBench от имени администратора."
               : query.trim()
-                ? "По этому запросу ничего не найдено."
+                ? "Ничего не найдено."
                 : "В этой вкладке нет схем."}
           </div>
         </div>
@@ -660,9 +664,9 @@ export default function SchemeTiles({
       {visible.length === 0 ? (
         <div className="empty-card">
           {query.trim()
-            ? `По запросу «${query.trim()}» ничего не найдено.`
+            ? `Ничего не найдено по запросу «${query.trim()}».`
             : filter === "fav"
-              ? "Нет избранных схем. Отметьте звездой на карточке."
+              ? "Нет избранных схем — отметьте их звездой."
               : filter === "excluded"
                 ? "Нет исключённых схем."
                 : filter === "dup"

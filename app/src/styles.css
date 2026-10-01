@@ -262,10 +262,13 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 /* Правило ниже, а не выше: у `.wizard > *` и `.wizard-stage` одинаковая
    специфичность, и объявленный раньше рост был бы перебит. */
 .wizard-stage{flex:1 0 auto}
-/* Карточки «Быстро»/«Детально» тянутся вниз, но не на всю окно: потолок
-   оставляет между ними и панелью параметров воздух, а не превращает карточку
-   в пустой прямоугольник. */
-.mode-grid{flex:1 1 auto;max-height:min(52vh,420px)}
+/* Шаг 1 целиком: карточки режимов, строка состояния и панель параметров —
+   одна группа с равным зазором `--gap`. Раньше у карточек был потолок
+   `max-height: min(52vh, 420px)`, и на низких окнах между ними и панелью
+   параметров оставалась гарантированная пустота; у панели parameters был
+   отдельный `margin-top: 14px`, из-за чего блок читался как три
+   разрозненные части, а не как «режим + его настройки». */
+.mode-grid{flex:1 1 auto}
 /* Раскрытая панель параметров забирает свою долю высоты и растягивается
    изнутри: `.adv-body` — единая строка `1fr`, иначе карточка выросла бы, а
    поля остались бы прижаты к её верху. Свёрнутая (без `.open`) не растёт. */
@@ -277,19 +280,17 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .float{background:var(--bg-2);border:1px solid var(--line-2);border-radius:var(--radius-lg);box-shadow:var(--shadow-float)}
 .card-title{display:flex;flex-direction:column;gap:3px;font-size:var(--fs-h2);font-weight:600;letter-spacing:-.1px;line-height:var(--lh-tight);margin:0 0 var(--sp-3)}
 .card-title .hint{font-size:var(--fs-sm);font-weight:400}
+/* Ряд действий под текстом карточки. Раньше отступ до него задавался
+   `marginBottom: 10` / `marginTop: 10` прямо в разметке — магическое число
+   в обход шкалы отступов, о котором легко забыть при правках. */
+.card-actions{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;margin-top:var(--sp-3)}
 .hint{color:var(--fg-mute);font-size:var(--fs-body);line-height:1.5}
 .muted{color:var(--fg-mute)}
 .strong{color:var(--fg);font-weight:600}
 .sub{font-size:var(--fs-xs);color:var(--fg-mute);line-height:var(--lh-body)}
 
 .stat-suffix{font-size:var(--fs-sm);color:var(--fg-mute);font-weight:500}
-.row{display:flex;align-items:center;gap:var(--sp-2)}
-.wrap{flex-wrap:wrap}
-
 .spacer{flex:1 1 auto}
-
-
-.gap-2{gap:var(--sp-2)}
 .stat{background:var(--bg-2);border:1px solid var(--line-1);border-radius:var(--radius-md);padding:var(--sp-2) var(--sp-3);transition:border-color var(--dur-fast) var(--ease)}
 .stat:hover{border-color:var(--line-2)}
 .stat .label{font-size:var(--fs-sm);color:var(--fg-mute)}
@@ -387,12 +388,12 @@ table.grid tr:last-child td{border-bottom:0}
    `animation-name` сбрасывался в `none` — шаг мастера появлялся без анимации.
    Обратный ход переопределяет имя на `stageInBack`. */
 .wizard-stage{display:flex;flex-direction:column;gap:var(--sp-4);animation:pb-fade-up var(--t-3) var(--e-out) both}
-/* Шаги с фиксированным содержимым (карточки режимов, сводка запуска)
-   центрируются по вертикали — их высота не зависит от данных, и скачков не
-   было. Шаг со списком схем (`wizard-stage.top`) не центрируется: там высота
-   меняется вместе с фильтром, и центрирование уводило пустой список в
-   середину экрана. */
-.wizard-stage.centered{margin-block:auto}
+/* Шаги не центрируются по вертикали: `margin-block:auto` здесь был, но ниже
+   его отменял `margin-block:0` — то есть объявление просто не работало, а
+   переключение между стадиями мастера давало скачок. Теперь шаг всегда от
+   верха, как и все страницы. Класс `centered`/`top` в разметке остаётся
+   (он различает стадии), но на раскладку не влияет. */
+.wizard-stage.centered{margin-block:0}
 .wizard-stage.back{animation-name:stageInBack}
 
 .search-box{position:relative;display:inline-flex;align-items:center}
@@ -405,6 +406,9 @@ table.grid tr:last-child td{border-bottom:0}
 .est b{color:var(--fg);font-weight:650;font-variant-numeric:tabular-nums}
 .field-hint{font-size:var(--fs-meta);color:var(--fg-mute);margin-top:2px;line-height:1.4}
 .wizard-toolbar{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
+/* Панель выбранной схемы на странице «Схемы»: отступ до списка задаёт общий
+   `gap` колонки, а не магическое число в разметке. */
+.export-toolbar{background:var(--bg-1);border:1px solid var(--line-1);border-radius:var(--radius-md);padding:var(--sp-2) var(--sp-3)}
 .wizard-toolbar .ttl{font-weight:600;font-size:var(--fs-title);letter-spacing:-.1px}
 .wizard-toolbar .cnt{color:var(--fg-mute);font-size:var(--fs-caption)}
 .wizard-toolbar .spacer{flex:1 1 auto}
@@ -452,6 +456,49 @@ table.grid .date{white-space:nowrap;font-variant-numeric:tabular-nums}
 }
 /* --- ╨Т╨╛╤Б╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╤А╨╕ ╤А╨╡╨║╨╛╨╜╤Б╤В╤А╤Г╨║╤Ж╨╕╨╕: ╤Г╨▓╨╡╨┤╨╛╨╝╨╗╨╡╨╜╨╕╤П, ╤Б╨┐╨╕╨╜╨╜╨╡╤А╤Л num-in, ╤Г╨╖╨║╨╕╨╡ ╤Н╨║╤А╨░╨╜╤Л, ╨┐╨╡╤А╤Д ╤Б╨┐╨╕╤Б╨║╨░ --- */
 .toasts{position:fixed;right:16px;bottom:16px;z-index:80;display:flex;flex-direction:column;gap:8px;max-width:min(380px,90vw)}
+
+/* ===== Подсказки =====
+   Уровень ниже тостов (90 против 80): подсказка живёт дольше тоста и не
+   должна закрывать сообщение об ошибке. `isolation: isolate` — чтобы её
+   `z-index` не конкурировал с элементами снаружи группы. */
+.tt{position:relative;display:inline-flex;align-items:center}
+.tt-bubble{
+  position:fixed;
+  z-index:90;
+  width:max-content;
+  max-width:340px;
+  padding:8px 10px;
+  font-size:var(--fs-meta);
+  line-height:1.45;
+  color:var(--fg-dim);
+  white-space:normal;
+  pointer-events:auto;
+  animation:tt-in var(--t-1) var(--e-out) both;
+}
+.tt-bubble .mono{color:var(--fg)}
+@keyframes tt-in{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+/* Значок «i»: 15 px, чтобы читался как знак, а не как буква. */
+.tt-icon{
+  display:inline-grid;
+  place-items:center;
+  width:15px;
+  height:15px;
+  border-radius:50%;
+  border:1px solid var(--line-2);
+  color:var(--fg-mute);
+  font-size:10px;
+  font-weight:700;
+  font-style:italic;
+  line-height:1;
+  cursor:help;
+  flex:0 0 auto;
+  transition:color var(--t-1) var(--e-out),border-color var(--t-1) var(--e-out)
+}
+.tt-icon:hover,.tt-icon:focus-visible{color:var(--fg);border-color:var(--fg-mute);outline:none}
+/* Значок не должен раздвигать строку настройки: подпись и контроль стоят на
+   одной высоте независимо от того, есть пояснение или нет. */
+/* Подпись строки настройки с необязательным значком подсказки. */
+.set-title{display:flex;align-items:center;gap:6px;font-size:var(--fs-body);font-weight:600;color:var(--fg)}
 .toast{padding:10px 14px;font-size:var(--fs-body);border-left:3px solid var(--accent)}
 .toast.err{border-left-color:var(--err)}
 .toast.okk{border-left-color:var(--ok)}
@@ -497,8 +544,10 @@ table.grid .date{white-space:nowrap;font-variant-numeric:tabular-nums}
 .set-icon{width:34px;height:34px;border-radius:9px;background:var(--bg-2);border:1px solid var(--line-1);color:var(--fg-dim);display:inline-grid;place-items:center;flex:0 0 auto}
 .set-icon svg{width:17px;height:17px}
 .set-text{min-width:0}
-.set-title{font-size:var(--fs-body);font-weight:600;color:var(--fg)}
-.set-sub{font-size:var(--fs-sm);color:var(--fg-mute);margin-top:1px}
+/* `.set-sub` удалён: постоянно видимые пояснения под настройками убраны в
+   подсказки значком (Tooltip). Подписи занимали по строке под каждой из
+   семи строк раздела «Внешний вид», а на узком окне строка съезжала над
+   своим же переключателем и разрывала связь «это про тот контрол». */
 
 /* Переключатель темы. Значения сняты с общих правил `.seg`: у контейнера был
    радиус 14px, а у активной кнопки — `calc(14px - 3px)`, и при внутреннем
@@ -524,9 +573,12 @@ table.grid .date{white-space:nowrap;font-variant-numeric:tabular-nums}
 /* Подпись «Необязательно · …» живёт в первой строке карточки, а не под
    заголовком секции: иначе отступ от заголовка до карточки у этой секции
    отличался от двух остальных. */
-.bios-top{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap}
-.bios-label{font-size:var(--fs-body);font-weight:600;color:var(--fg);flex:0 0 auto}
-.bios-top .hint{margin-left:auto;text-align:right;min-width:0}
+.bios-top{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap}
+.bios-label{font-size:var(--fs-body);font-weight:600;color:var(--fg);flex:0 0 auto;display:flex;align-items:center;gap:6px}
+/* «Необязательно» прижато к правому краю строки: раньше там стоял отдельный
+   `.hint`, который на узком окне переносился под подпись и выглядел как
+   отдельная строка. */
+.bios-note{margin-left:auto;color:var(--fg-mute);font-size:var(--fs-sm);display:flex;align-items:center;gap:6px}
 /* Высота фиксирована, растягивание выключено: у поля с двумя строками под
    плейсхолдером оставалась пустая чёрная полоса. */
 .bios-input{width:100%;height:54px;resize:none;background:var(--bg-0);color:var(--fg);border:1px solid var(--line-1);border-radius:var(--radius-md);padding:8px 13px;font:inherit;font-size:var(--fs-body);line-height:1.45;transition:border-color var(--dur) var(--ease)}
@@ -551,7 +603,7 @@ table.grid .date{white-space:nowrap;font-variant-numeric:tabular-nums}
 .set-row .switch{align-self:flex-start}
 .status-card{align-items:flex-start;flex-direction:column;gap:var(--sp-2)}
 .bios-top{flex-direction:column;align-items:flex-start;gap:4px}
-.bios-top .hint{margin-left:0;text-align:left}
+.bios-note{margin-left:0}
 .qt-clear{margin-left:0}
 }
 @keyframes pulseSoft{0%,100%{opacity:.45}50%{opacity:.65}}
@@ -869,6 +921,9 @@ html.bench-running .modal{
 /* Счётчик сессий переехал в строку заголовка, поэтому строка-разделитель
    больше не нужна. */
 .page-head .sub b{color:var(--fg);font-weight:600}
+/* Метка внутри сводки (например «мало места») не должна растягивать строку:
+   без `align-self` она поднималась на всю высоту шапки. */
+.page-head .sub .badge{align-self:center;margin-left:8px}
 .results-toolbar{gap:10px}
 .res-search{flex:1 1 260px;min-width:260px;max-width:320px;width:auto}
 
@@ -966,7 +1021,8 @@ html.bench-running .modal{
 .section-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:12px;overflow:hidden;flex:0 0 auto}
 .sc-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:9px 14px;border-bottom:1px solid var(--line-1);background:rgba(255,255,255,.015)}
 .sc-title{font-size:12.5px;font-weight:700;color:var(--fg);margin:0}
-.sc-hint{font-size:11.5px;color:var(--fg-mute)}
+/* `.sc-hint` удалён: постоянно видимое пояснение «как читать таблицу» ушло
+   в подсказку значком — оно занимало строку в заголовке каждой секции. */
 
 /* Таблица фаз */
 .phases-tbl{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
@@ -1086,7 +1142,7 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .mc-title{font-size:17px;font-weight:700;margin:0;letter-spacing:-.2px}
 .mc-tag{font-size:11px;font-weight:600;padding:2px 7px;border-radius:6px;background:var(--bg-2);color:var(--fg-dim);border:1px solid var(--line-1);white-space:nowrap}
 .mode-card.selected .mc-tag{background:var(--okbg);color:var(--ok);border-color:var(--okline)}
-.mc-desc{font-size:var(--fs-body);color:var(--fg-mute);line-height:1.45;margin:0}
+.mc-desc{display:flex;align-items:baseline;gap:6px;font-size:var(--fs-body);color:var(--fg-mute);line-height:1.45;margin:0}
 .mc-radio{width:22px;height:22px;border-radius:50%;border:1.5px solid var(--line-2);display:inline-grid;place-items:center;flex:0 0 auto;color:transparent;transition:border-color var(--t-2) var(--e-out),color var(--t-2) var(--e-out),background var(--t-2) var(--e-out)}
 .mc-radio svg{display:block}
 .mode-card.selected .mc-radio{border-color:var(--ok);background:var(--okbg);color:var(--ok)}
@@ -1097,8 +1153,9 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .mc-pill.time b{color:var(--ok)}
 
 
-/* Выдвижные параметры теста: карточки режимов остаются видимыми при раскрытии */
-.adv-wrap{margin-top:14px;background:var(--bg-1);border:1px solid var(--line-1);border-radius:14px;overflow:hidden}
+/* Выдвижные параметры теста: карточки режимов остаются видимыми при раскрытии.
+   Свой `margin-top` больше не нужен — зазор до него задаёт `gap` у `.wizard`. */
+.adv-wrap{background:var(--bg-1);border:1px solid var(--line-1);border-radius:14px;overflow:hidden}
 .adv-toggle{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 18px;background:transparent;border:0;color:var(--fg-dim);font:inherit;font-size:var(--fs-body);font-weight:600;cursor:pointer;transition:background var(--dur-fast) var(--ease);text-align:left}
 .adv-toggle:hover{background:rgba(255,255,255,.025)}
 .adv-toggle-left{display:flex;align-items:center;gap:9px;flex:0 0 auto}
@@ -1141,7 +1198,11 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .sel-summary-strip b{color:var(--fg);font-variant-numeric:tabular-nums}
 .sel-summary-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .sel-summary-strip .est{color:var(--ok);font-weight:650;font-variant-numeric:tabular-nums}
-.time-tip{font-size:11.5px;color:var(--warn);background:var(--warnbg);border:1px solid var(--warnline);padding:2px 8px;border-radius:6px}
+/* Значок совета в сводке выбора схем: приглушённый, чтобы не спорить с самой
+   оценкой времени слева. Плашка `.time-tip` на 70 символов удалена — ушла в
+   подсказку. */
+.sel-summary-right .tt-icon{color:var(--warn);border-color:var(--warnline)}
+.sel-summary-right .tt-icon:hover,.sel-summary-right .tt-icon:focus-visible{color:var(--warn);border-color:var(--warn)}
 .pick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(calc(var(--k)*300px),1fr));gap:var(--gap)}
 .pick-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:10px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;user-select:none;min-width:0;transition:border-color var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease)}
 .pick-card:hover{border-color:var(--line-2);background:#202020}
@@ -1566,11 +1627,6 @@ html[data-motion="off"] *::after{
 /* После смены раскладки полоска встаёт на место сразу, без пролёта. */
 .pb-nav-ind.is-instant{transition:none}
 
-/* Вертикальный «провал» под шапкой раздела: содержимое центрировалось по
-   высоте окна и висело посреди экрана, оставляя сверху пустоту в четверть
-   окна. Теперь блок начинается сразу под шапкой. */
-.wizard-stage.centered{margin-block:0}
-
 /* Плашки режима: равная высота и запрет переноса значения. */
 .mc-stats{align-items:stretch}
 .mc-pill{min-height:52px;display:flex;flex-direction:column;justify-content:center}
@@ -1616,9 +1672,11 @@ html[data-motion="off"] *::after{
 .adv-body{min-height:0}
 .adv-wrap{min-height:0}
 
-/* Подпись о состоянии режима — слева, под карточками: по центру она
-   читалась как строка без хозяина. */
-.mode-caption{margin-top:10px;font-size:11.5px;color:var(--fg-mute);font-variant-numeric:tabular-nums}
+/* Строка состояния шага: что применено и что будет замерено. Слева, под
+   карточками режимов — по центру она читалась как строка без хозяина.
+   Зазор до панели параметров задаёт общий `gap`, поэтому своего `margin-top`
+   здесь нет: раньше он был, и блок выглядел как три отдельные части. */
+.mode-caption{font-size:11.5px;color:var(--fg-mute);font-variant-numeric:tabular-nums}
 
 
 /* Бейдж ручной правки на выбранной карточке. */

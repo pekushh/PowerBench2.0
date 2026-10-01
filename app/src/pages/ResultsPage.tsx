@@ -24,6 +24,7 @@ import {
 import { pushToast, setSectionDetail } from "../store";
 import { usePill } from "../components/usePill";
 import { Page, PageHead } from "../components/Page";
+import { InfoTip } from "../components/Tooltip";
 import { usePopOnFilter } from "../components/useCascade";
 
 type SortKey = "started" | "level" | "margin" | "stability";
@@ -442,11 +443,20 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
             <b>{rows.length}</b>
             {stats && stats.max_sessions > 0 ? ` из ${stats.max_sessions}` : ""} сессий
             {stats ? ` · ${fmtBytes(stats.history_bytes)}` : ""}
+            {/* Предупреждение о нехватке места живёт рядом с объёмом файлов, а
+                не в ряду кнопок: раньше оно было первой кнопкой-подобной
+                плашкой среди действий и выглядело потерянным элементом. Здесь
+                оно стоит рядом с числом, о котором говорит, и показывает
+                сколько именно места осталось. */}
+            {lowDisk && stats ? (
+              <Badge kind="warn" title={`Свободно ${fmtBytes(stats.free_bytes)} — новые результаты могут не записаться`}>
+                мало места
+              </Badge>
+            ) : null}
           </>
         }
         actions={
           <>
-            {lowDisk ? <Badge kind="warn">Место на диске заканчивается</Badge> : null}
             <div className="split-act" ref={fmtRef}>
               <button
                 type="button"
@@ -569,8 +579,8 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
       {shown.length === 0 ? (
         <div className="empty-card">
           {rows.length === 0
-            ? "Завершённые сессии с данными по схемам появятся здесь."
-            : "Подходящих сессий не найдено"}
+            ? "Завершённые сессии появятся здесь после первого замера."
+            : "Подходящих сессий нет"}
         </div>
       ) : (
         <FadeScroll className="session-list fill-list" innerRef={popRef}>
@@ -1034,9 +1044,10 @@ function SessionDetail({
         <section className="section-card">
           <div className="sc-bar">
             <h4 className="sc-title">Показатели лидера по фазам</h4>
-            <span className="sc-hint">
-              Сравнение корректно внутри одной фазы · ↓ — снижение частоты CPU
-            </span>
+            {/* Как читать таблицу — по наведению на значок. Пояснение на 68
+                символов стояло строкой в заголовке секции и повторялось перед
+                каждой таблицей. */}
+            <InfoTip text="Значения сравнимы только внутри одной фазы. Стрелка ↓ означает снижение частоты CPU — это и есть эффект схемы." />
           </div>
           <table className="phases-tbl">
             <thead>

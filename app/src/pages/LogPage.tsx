@@ -216,10 +216,15 @@ export default function LogPage({ active = true }: { active?: boolean }) {
     }
   };
 
-  const meta =
+  // Видимая часть — только числа. Что делать со скрытыми старыми записями
+  // («уточните фильтр или поиск») ушло в подсказку: это 95 символов в строке
+  // над журналом, и на 860 px они вытесняли список.
+  const meta = hidden > 0
+      ? `Последние ${visible.length} из ${shown.length}`
+      : `${shown.length} из ${all.length}`;
+  const metaTitle =
     hidden > 0
-      ? `Показаны последние ${visible.length} из ${shown.length} записей · ` +
-        `для более старых уточните фильтр или поиск`
+      ? `Показаны последние ${visible.length} из ${shown.length} записей. Для более старых уточните фильтр или введите поиск.`
       : `Показано ${shown.length} из ${all.length} записей`;
 
   // Состояние для крошки в шапке: «5000 записей» или «5000 записей · 2 ошибки».
@@ -311,7 +316,9 @@ export default function LogPage({ active = true }: { active?: boolean }) {
 
       <div className="log-card">
         <div className="log-card-head">
-          <span className="log-meta">{meta}</span>
+          <span className="log-meta" title={metaTitle}>
+            {meta}
+          </span>
           <div className="log-tools">
             <button
               type="button"

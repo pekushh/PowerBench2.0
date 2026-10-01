@@ -11,6 +11,7 @@ import { Button, Glass, Seg, Switch } from "../components/ui";
 import { Page, PageHead } from "../components/Page";
 import { setSectionDetail } from "../store";
 import { FolderIcon, GridIcon, MotionIcon, ShieldIcon, SocketIcon, ThemeIcon } from "../components/icons";
+import { InfoTip } from "../components/Tooltip";
 import { pushToast } from "../store";
 
 type ModeName = "Dark" | "Light" | "Auto";
@@ -100,7 +101,7 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
         <Glass className="inset">
           <div className="card-title">Не удалось прочитать настройки</div>
           <div className="hint">{loadError ?? "Ответ приложения не получен."}</div>
-          <div className="row gap-2" style={{ marginTop: 10 }}>
+          <div className="card-actions">
             <Button
               variant="primary"
               onClick={() => {
@@ -201,8 +202,13 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
                 <ThemeIcon />
               </span>
               <div className="set-text">
-                <div className="set-title">Тема оформления</div>
-                <div className="set-sub">Цветовая палитра окна и генерируемых отчётов</div>
+                <div className="set-title">
+                  Тема оформления
+                  {/* Пояснения к настройкам — по наведению на значок: они
+                      занимали по строке под каждой из четырёх, а на узком
+                      окне строка съезжала над своим же переключателем. */}
+                  <InfoTip text="Палитра окна и генерируемых HTML-отчётов." />
+                </div>
               </div>
             </div>
             <Seg
@@ -225,8 +231,10 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
                 <MotionIcon />
               </span>
               <div className="set-text">
-                <div className="set-title">Уменьшить движение</div>
-                <div className="set-sub">Отключить плавные переходы и анимации интерфейса</div>
+                <div className="set-title">
+                  Уменьшить движение
+                  <InfoTip text="Отключает плавные переходы и анимации интерфейса." />
+                </div>
               </div>
             </div>
             <Switch checked={st.reduce_motion} onChange={(v) => patch({ reduce_motion: v })} />
@@ -240,9 +248,9 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
                 <GridIcon />
               </span>
               <div className="set-text">
-                <div className="set-title">Плотность интерфейса</div>
-                <div className="set-sub">
-                  Отступы и высота контролов. На 720 px высоты окна экономит место
+                <div className="set-title">
+                  Плотность интерфейса
+                  <InfoTip text="Отступы и высота контролов. На невысоком окне экономит место." />
                 </div>
               </div>
             </div>
@@ -264,8 +272,10 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
                 <ThemeIcon />
               </span>
               <div className="set-text">
-                <div className="set-title">Масштаб текста</div>
-                <div className="set-sub">Меняет только размер шрифта, не геометрию</div>
+                <div className="set-title">
+                  Масштаб текста
+                  <InfoTip text="Меняет только размер шрифта, геометрия остаётся прежней." />
+                </div>
               </div>
             </div>
             <Seg
@@ -313,7 +323,13 @@ export default function SettingsPage({ onAppearance, active = true }: { onAppear
         <Glass className="bios-card">
           <div className="bios-top">
             <span className="bios-label">Разгон, андервольт и память</span>
-            <span className="hint">Необязательно · добавляется в отчёт</span>
+            {/* Необязательность поля и его роль — в подсказке: строка
+                «Необязательно · добавляется в отчёт» стояла рядом с
+                подписью и уводила взгляд от самого поля ввода. */}
+            <span className="bios-note">
+              необязательно
+              <InfoTip text="Попадёт в отчёт о сессии: при разборе результатов видно, на каких настройках он сделан." />
+            </span>
           </div>
           <textarea
             className="bios-input"
@@ -379,8 +395,13 @@ function StatusCard({
       <div className="st-left">
         <span className="st-icon">{icon}</span>
         <div className="set-text">
-          <div className="set-title">{title}</div>
-          <div className="set-sub">{sub}</div>
+          {/* Пояснение к карточке — по наведению на значок: подпись занимала
+              вторую строку в каждой из двух карточек ради слов, которые
+              пользователь читает один раз. */}
+          <div className="set-title">
+            {title}
+            <InfoTip text={sub} />
+          </div>
         </div>
       </div>
       <span className="st-badge">{state == null ? "…" : state ? okLabel : badLabel}</span>

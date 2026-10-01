@@ -16,6 +16,7 @@ import {
 } from "../api";
 import { Button, Glass, Spot } from "../components/ui";
 import { GearIcon } from "../components/icons";
+import { InfoTip } from "../components/Tooltip";
 import { Page, PageHead } from "../components/Page";
 import { pushToast, setRunning, setSectionDetail, useSession } from "../store";
 import { SchemePicker, filterEligible, sortSchemes } from "../components/SchemeTiles";
@@ -25,22 +26,24 @@ type PresetKey = "quick" | "detailed" | "custom";
 
 interface PresetDef {
   title: string;
+  /** Подпись под названием режима. */
   desc: string;
-  expand: string;
+  /** Развёрнутое объяснение режима — в подсказке на карточке. */
+  detail: string;
 }
 
 const PRESETS: Record<"quick" | "detailed", PresetDef> = {
   quick: {
     title: "Быстро",
-    desc: "Быстрая проверка производительности системы с минимальным временем тестирования.",
-    expand:
-      "Один повтор и короткие фазы — ответ за пару минут. Разница между схемами видна, но это режим скрининга: доверительного интервала здесь не существует, поэтому итог не будет обещать подтверждённый выбор.",
+    desc: "Один короткий прогон каждой схемы.",
+    detail:
+      "Ответ за пару минут. Разницу между схемами видно, но это скрининг: доверительного интервала при одном прогоне не существует, и итог не подтверждает выбор.",
   },
   detailed: {
     title: "Детально",
-    desc: "Расширенное тестирование для точного сравнения схем питания и стабильных результатов.",
-    expand:
-      "Длинные фазы и пять повторов — точнее и надёжнее, срабатывает адаптивная остановка. Подходит, когда схема выбирается на длительный срок.",
+    desc: "Пять повторов, длинные фазы, ранняя остановка.",
+    detail:
+      "Точнее и надёжнее: есть доверительный интервал, а замер останавливается раньше, если одна схема явно лучше. Подходит для выбора схемы надолго.",
   },
 };
 
@@ -111,13 +114,21 @@ function earlyStopNeed(reps: number, cv = 0.05): number | null {  if (reps < 2) 
   return ((2 * Math.SQRT2 * n * cv * 100) / Math.sqrt(reps));
 }
 
-function earlyStopHint(reps: number): string {
+/**
+ * Что даёт выбранное число повторов. Текст уходит в подсказку к полю
+ * «Повторов», а не стоит строкой в панели: раньше он стоял слева от кнопки
+ * «Сбросить по умолчанию», к которой отношения не имеет, и описывал поле на
+ * четыре позиции левее.
+ *
+ * `null` — подсказка не нужна: условие применимости выполняется всегда.
+ */
+function earlyStopHint(reps: number): string | null {
   if (!Number.isFinite(reps) || reps < 2)
-    return "Адаптивная остановка невозможна при одном повторе: нужны минимум два прогона, чтобы оценить разброс.";
+    return "При одном повторе адаптивная остановка не работает: оценить разброс не по чему.";
   const need = earlyStopNeed(reps) ?? Infinity;
   if (need >= 100)
-    return `При ${reps} ${plural(reps, "повторе", "повторах", "повторах")} ранняя остановка практически недостижима (нужен перевес > 100% при разбросе прогонов ~5%). Рекомендуем 5+ повторов.`;
-  return `Ранняя остановка возможна, если перевес ≈ ${need.toFixed(0)}% и более (при разбросе прогонов ~5%). Для практичного срабатывания рекомендуем 5+ повторов.`;
+    return `${reps} ${plural(reps, "повтор", "повтора", "повторов")}: замер не остановится раньше времени. Нужен перевес больше 100%.`;
+  return `Замер остановится раньше, если перевес ≈ ${need.toFixed(0)}% и больше. Считается при разбросе прогонов ~5%.`;
 }
 
 /** Русские склонения: 1 повтор / 2 повтора / 5 повторов. */
@@ -822,7 +833,14 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                             <span className="mc-tag">{key === "quick" ? "Скрининг" : "Рекомендуется"}</span>
                             {editedHere ? <span className="mc-tag edited">изменено вручную</span> : null}
                           </div>
-                          <p className="mc-desc">{def.desc}</p>
+                          {/* Развёрнутое объяснение режима — по наведению на
+                              значок: 78 символов прямого текста под названием
+                              занимали две строки и отодвигали цифры вниз на
+                              каждой карточке. */}
+                          <p className="mc-desc">
+                            {def.desc}
+                            <InfoTip text={def.detail} />
+                          </p>
                         </div>
                         <span className="mc-radio">
                           <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
@@ -878,19 +896,29 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
               {/* Строка о состоянии режима привязана к карточкам: по центру
                   она читалась как подпись без хозяина. Цифры в ней берутся из
                   тех же значений, что и в сводке параметров. */}
-              {activePreset === "custom" || edited ? (
+              {/* Одна строка состояния на весь шаг, а не две подряд.
+                  Раньше здесь стояли две `.mode-caption` — «параметры изменены
+                  вручную» и «будет замерено N схем», — между карточками режимов
+                  и панелью параметров: обе принадлежали не тому и не этому.
+                  Теперь это подпись под блоком выбора режима: что применено и
+                  что будет замерено. Числа те же, что в сводке параметров. */}
+              {activePreset === "custom" || edited || selected.size > 0 ? (
                 <div className="mode-caption">
-                  {activePreset === "custom" ? "Режим: пользовательские параметры" : `Параметры изменены вручную`}
-                  {" · "}
-                  {reps} {plural(reps, "раунд", "раунда", "раундов")}, {duration} с /{" "}
-                  {warmup} с
-                </div>
-              ) : null}
-              {selected.size > 0 ? (
-                <div className="mode-caption">
-                  Будет замерено {selected.size}{" "}
-                  {plural(selected.size, "схема", "схемы", "схем")} · оценочно{" "}
-                  {estimate === "—" ? "—" : estimate}
+                  {activePreset === "custom" || edited ? (
+                    <>
+                      {activePreset === "custom" ? "Пользовательские параметры" : "Параметры изменены вручную"}
+                      {" · "}
+                    </>
+                  ) : null}
+                  {selected.size > 0 ? (
+                    <>
+                      {selected.size}{" "}
+                      {plural(selected.size, "схема", "схемы", "схем")}
+                      {estimate !== "—" ? ` · оценочно ${estimate}` : ""}
+                    </>
+                  ) : (
+                    <>Схемы не выбраны — выберите их на следующем шаге</>
+                  )}
                 </div>
               ) : null}
 
@@ -964,7 +992,14 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                         </div>
                       </div>
                       <div className="p-field">
-                        <label htmlFor="pReps">Повторов (раундов)</label>
+                        <label htmlFor="pReps">
+                          Повторов
+                          {/* Объяснение числа повторов — в подсказке значком.
+                              Текст был 100–130 символов и стоял строкой в
+                              подвале панели, визуально приписанный к кнопке
+                              сброса. */}
+                          <InfoTip text={earlyStopHint(reps) ?? ""} />
+                        </label>
                         <div className="p-input-wrap">
                           <input
                             id="pReps"
@@ -996,7 +1031,6 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                       </div>
                   </div>
                   <div className="adv-footer">
-                    <span>{earlyStopHint(reps)}</span>
                     <button
                       type="button"
                       className="btn-reset-params"
@@ -1007,7 +1041,7 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                     >
                       Сбросить по умолчанию
                     </button>
-                    </div>
+                  </div>
                   </div>
                 </div>
               </div>
@@ -1031,15 +1065,17 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
               {schemes.length === 0 ? (
                 <div className="glass inset">
                   <div className="muted">
-                    Схемы питания не найдены. Проверьте, что вы запустили
-                    PowerBench от имени администратора.
+                    Схемы питания не найдены — запустите PowerBench от имени
+                    администратора.
                   </div>
                 </div>
               ) : null}
               {checkpointError ? (
                 <Glass className="inset">
                   <div className="card-title">Незавершённая сессия не читается</div>
-                  <div className="hint" style={{ marginBottom: 10 }}>
+                  {/* Отступ до кнопок задаёт `.card-actions`, а не
+                      `marginBottom` в разметке. */}
+                  <div className="hint">
                     {checkpointError} Продолжить её нельзя: отработанные раунды
                     восстановить не из чего. Файл{" "}
                     <span className="mono break">benchmark-checkpoint.json</span>{" "}
@@ -1051,7 +1087,7 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
               {checkpoint && !checkpoint.original_restored ? (
                 <Glass className="inset">
                   <div className="card-title">Незавершённая сессия</div>
-                  <div className="hint" style={{ marginBottom: 10 }}>
+                  <div className="hint">
                     <span className="mono break">{checkpoint.plan_guid}</span> · схем{" "}
                     {checkpoint.scheme_ids.length} · повторов {checkpoint.repetitions} ·{" "}
                     {(() => {
@@ -1074,7 +1110,7 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                       );
                     })()}
                   </div>
-                  <div className="row wrap gap-2">
+                  <div className="card-actions">
                     <Button variant="primary" disabled={running} onClick={() => start(true)}>
                       Продолжить из контрольной точки
                     </Button>

@@ -51,13 +51,18 @@ pub const WATCHDOG_NO_PROGRESS_SECS: u64 = 30;
 pub const WATCHDOG_CANCEL_GRACE_SECS: u64 = 5;
 /// Пауза после применения схемы питания: живёт в `config`, оттуда же её
 /// берёт оценка времени сессии (единый источник правды).
-pub use crate::config::PAUSE_AFTER_SCHEME_SECS;
+pub use crate::config::{
+    SCHEME_STABILIZE_ESTIMATE_SECS, SCHEME_STABILIZE_MAX_SECS, SCHEME_STABILIZE_MIN_SECS,
+};
 /// Длительность одного замера фоновой нагрузки (спецификация).
 pub const BACKGROUND_MEASURE_MS: u64 = 700;
 /// Пауза между повторными замерами фона (спецификация).
 pub const BACKGROUND_RETRY_PAUSE_MS: u64 = 1200;
-/// Число попыток проверки фона до предупреждения (спецификация).
-pub const BACKGROUND_ATTEMPTS: u32 = 3;
+/// Сколько раз схема в раунде проверяется на «фон не слишком тяжёлый».
+///
+/// Повторы, а не карантин: тяжёлый фон — свойство машины в данный момент
+/// (антивирус, синхронизация, резервное копирование), а не свойство схемы.
+pub const BACKGROUND_RUN_ATTEMPTS: u32 = 3;
 /// Стабилизационная пауза после окончания каждой фазы: живёт в `config`,
 /// оттуда же её берёт оценка времени сессии (единый источник правды).
 pub use crate::config::STABILIZATION_SECS;
@@ -141,6 +146,22 @@ pub enum SessionEvent {
         measured_total_percent: f64,
         threshold_percent: f64,
     },
+    /// Фон слишком тяжёлый: замер не начат, идёт повтор.
+    BackgroundTooDirty {
+        measured_total_percent: f64,
+        threshold_percent: f64,
+        attempt: u32,
+        attempts: u32,
+    },
+    /// Прогон признан недействительным и в результаты не попал.
+    ///
+    /// Отдельное событие, а не `SchemeRejected`, потому что это НЕ свойство
+    /// схемы: виновата машина (пропало питание от сети), и карантить схему
+    /// здесь нельзя — она в порядке.
+    RunInvalid {
+        scheme_id: String,
+        reason: String,
+    },
     BackgroundClean {
         measured_total_percent: f64,
         threshold_percent: f64,
@@ -202,6 +223,29 @@ impl std::fmt::Display for SessionEvent {
                 f,
                 "Предупреждение: фон загружен ({measured_total_percent:.1}% при пороге {threshold_percent:.1}% суммарно), замеры продолжаются"
             ),
+            SessionEvent::BackgroundTooDirty {
+                measured_total_percent,
+                threshold_percent,
+                attempt,
+                attempts,
+            } => {
+                if attempt < attempts {
+                    write!(
+                        f,
+                        "Фон слишком загружен ({measured_total_percent:.1}% при критическом пороге \
+                         {threshold_percent:.1}% суммарно), замер отложен ({attempt}/{attempts})"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Фон слишком загружен ({measured_total_percent:.1}% при критическом пороге \
+                         {threshold_percent:.1}% суммарно), прогон пропущен после {attempts} попыток"
+                    )
+                }
+            }
+            SessionEvent::RunInvalid { scheme_id, reason } => {
+                write!(f, "Прогон недействителен (схема {scheme_id}): {reason}")
+            }
             SessionEvent::BackgroundClean {
                 measured_total_percent,
                 threshold_percent,
@@ -293,8 +337,74 @@ fn note(
 pub trait SchemeDriver {
     fn list_schemes(&self) -> Result<Vec<PowerScheme>, String>;
     fn set_active(&self, guid: &str) -> Result<(), String>;
+    /// GUID активной схемы — чтение состояния, а не установка.
+    ///
+    /// Нужен для ПОДТВЕРЖДЕНИЯ переключения и для обнаружения подмены схемы
+    /// посторонним процессом. `powercfg /setactive` возвращает код 0 и при
+    /// этом ничего не переключает (конфликт политики, OEM-агент), поэтому
+    /// «команда прошла» и «схема применена» — разные утверждения.
+    fn active_scheme(&self) -> Result<String, String>;
     fn ac_power_online(&self) -> Result<bool, String>;
     fn is_admin(&self) -> bool;
+}
+
+/// Сколько раз повторяем чтение активной схемы после `setactive`.
+///
+/// Windows применяет план асинхронно: команда возвращается, а запись может
+/// дойти до Power Manager позже. Один poll сразу после команды попадал в эту
+/// дыру и давал ложное «ОС не переключила схему».
+pub const SCHEME_APPLY_ATTEMPTS: u32 = 4;
+/// Пауза между попытками подтверждения смены схемы, мс.
+pub const SCHEME_APPLY_RETRY_MS: u64 = 250;
+
+/// Применить схему и **убедиться**, что ОС её приняла.
+///
+/// `powercfg /setactive` проверяет только код возврата процесса. Если схема не
+/// применилась, замер пойдёт на чужой схеме, и в отчёте это неотличимо от
+/// штатного результата — хуже всего. Поэтому единственная точка применения
+/// схемы во всём проекте — эта функция.
+pub fn apply_and_verify(driver: &dyn SchemeDriver, guid: &str) -> Result<(), String> {
+    driver
+        .set_active(guid)
+        .map_err(|e| format!("команда применения не удалась: {e}"))?;
+    let mut last_seen = String::new();
+    for attempt in 0..SCHEME_APPLY_ATTEMPTS {
+        match driver.active_scheme() {
+            Ok(active) => {
+                if active.eq_ignore_ascii_case(guid) {
+                    return Ok(());
+                }
+                last_seen = active;
+            }
+            Err(e) => {
+                // Нечитаемое состояние — не «применилось». Молчать здесь
+                // опаснее, чем лишний повтор.
+                last_seen = format!("не прочитано ({e})");
+            }
+        }
+        if attempt + 1 < SCHEME_APPLY_ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(SCHEME_APPLY_RETRY_MS));
+        }
+    }
+    Err(format!(
+        "ОС не переключила схему за {} мс: активна «{last_seen}», требовалась «{guid}»",
+        SCHEME_APPLY_ATTEMPTS as u64 * SCHEME_APPLY_RETRY_MS
+    ))
+}
+
+/// Убедиться, что во время измерения осталась та же схема.
+///
+/// Проверка на границе каждой фазы ловит подмену плана посторонним
+/// процессом, OEM-утилитой или обновлением Windows. Без неё такой прогон
+/// выглядит как обычный результат, хотя измерен был вовсе не тот план.
+pub fn verify_scheme_active(driver: &dyn SchemeDriver, expected: &str) -> Result<(), String> {
+    match driver.active_scheme() {
+        Ok(active) if active.eq_ignore_ascii_case(expected) => Ok(()),
+        Ok(active) => Err(format!(
+            "активна схема «{active}» вместо «{expected}» — план сменили извне"
+        )),
+        Err(e) => Err(format!("не удалось прочитать активную схему: {e}")),
+    }
 }
 
 /// Реальный драйвер поверх powercfg и Windows API.
@@ -307,6 +417,10 @@ impl SchemeDriver for RealSchemeDriver {
 
     fn set_active(&self, guid: &str) -> Result<(), String> {
         powerbench_windows::powercfg::activate(guid).map_err(|e| e.message)
+    }
+
+    fn active_scheme(&self) -> Result<String, String> {
+        powerbench_windows::powercfg::active_scheme().map_err(|e| e.message)
     }
 
     fn ac_power_online(&self) -> Result<bool, String> {
@@ -450,32 +564,74 @@ pub fn spike_windows_for(
     out
 }
 
-/// Решение «фон чистый»: суммарная загрузка процессов (кроме системы и себя)
-/// меньше порога `threshold_percent * логических_CPU`.
+/// Решение по фоновой загрузке.
 ///
-/// Нормировка `cpu_percent` у sysinfo — процент **одного** ядра, поэтому
-/// сумма по процессам сравнивается с порогом, умноженным на число логических
-/// CPU. Первый вызов `sample()` прогревает накопители sysinfo (без него
-/// `cpu_usage()` отдаёт 0), дальше идут настоящие измерения.
-pub fn background_check(logical_cpus: usize, threshold_percent: f64) -> (bool, f64) {
+/// Раньше здесь был булев «чист/не чист», и оба ответа означали одно и то же:
+/// замер продолжался. Фоном в 15 % CPU результат занижался молча, а схема
+/// получала худшую оценку и могла попасть в карантин по `phase_floor_collapse`
+/// с ложной причиной.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackgroundVerdict {
+    /// Фон ниже порога.
+    Clean { measured: f64 },
+    /// Фон выше порога, но не критично: замер продолжается с пометкой.
+    Noisy { measured: f64 },
+    /// Фон слишком тяжёлый: замер начинать нельзя.
+    TooDirty { measured: f64 },
+}
+
+/// Во сколько раз порог считается критичным для отказа от замера.
+///
+/// Не «1 + запас», а именно множитель: 5 % на ядро при 16 ядрах — это 80 %,
+/// и фон в 200 % при таком пороге означает загрузку примерно половины
+/// машины. Такой фон съедает столько, что сравнивать планы бессмысленно, но
+/// это ещё не поломка машины — поэтому отказ с повтором, а не карантин.
+pub const BACKGROUND_DIRTY_FACTOR: f64 = 3.0;
+
+/// Классифицировать измеренную фоновую загрузку.
+///
+/// Нормировка `cpu_percent` у sysinfo — процент **одного** ядра, поэтому порог
+/// умножается на число логических CPU.
+pub fn classify_background(
+    measured: f64,
+    threshold_percent: f64,
+    logical_cpus: usize,
+) -> BackgroundVerdict {
+    let threshold = threshold_percent * logical_cpus as f64;
+    if !measured.is_finite() {
+        // Неизвестную загрузку нельзя считать чистой: это был бы замер по
+        // умолчанию «всё хорошо» без единого подтверждения.
+        return BackgroundVerdict::TooDirty { measured };
+    }
+    if measured < threshold {
+        BackgroundVerdict::Clean { measured }
+    } else if measured < threshold * BACKGROUND_DIRTY_FACTOR {
+        BackgroundVerdict::Noisy { measured }
+    } else {
+        BackgroundVerdict::TooDirty { measured }
+    }
+}
+
+/// Измерить фоновую загрузку один раз. `None` — пользователь отменил ожидание.
+pub fn measure_background(
+    logical_cpus: usize,
+    threshold_percent: f64,
+    user_cancel: &AtomicBool,
+) -> Option<BackgroundVerdict> {
     let mut sampler = ProcessSampler::new();
     // Прогрев накопителей: без него первый замер всегда нулевой.
     let _ = sampler.sample();
-    let mut last = 0.0;
-    for attempt in 0..BACKGROUND_ATTEMPTS {
-        std::thread::sleep(Duration::from_millis(BACKGROUND_MEASURE_MS));
-        let samples = sampler.sample();
-        last = samples.iter().map(|s| s.cpu_percent).sum();
-        let threshold = threshold_percent * logical_cpus as f64;
-        if last < threshold {
-            return (true, last);
-        }
-        // Между попытками ждём только если ещё остались попытки.
-        if attempt + 1 < BACKGROUND_ATTEMPTS {
-            std::thread::sleep(Duration::from_millis(BACKGROUND_RETRY_PAUSE_MS));
-        }
+    // Окно измерения само прерываемо, иначе кнопка «Стоп» ждала бы 700 мс.
+    if interruptible_sleep_ms(user_cancel, BACKGROUND_MEASURE_MS) {
+        return None;
     }
-    (false, last)
+    let samples = sampler.sample();
+    let measured = samples.iter().map(|s| s.cpu_percent).sum();
+    Some(classify_background(
+        measured,
+        threshold_percent,
+        logical_cpus,
+    ))
 }
 
 /// Вердикт сторожевого таймера.
@@ -668,19 +824,144 @@ fn user_wants_stop(user_cancel: &AtomicBool) -> bool {
 /// Сон с быстрой реакцией на отмену пользователя.
 /// Возвращает `true`, если сон был прерван до истечения.
 fn interruptible_sleep(user_cancel: &AtomicBool, seconds: u64) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(seconds);
+    interruptible_sleep_ms(user_cancel, seconds.saturating_mul(1000))
+}
+
+/// Сон в миллисекундах с быстрой реакцией на отмену пользователя.
+///
+/// Технические паузы сессии обязаны быть прерываемыми: иначе кнопка «Стоп»
+/// игнорируется на всём их протяжении. Раньше не прерывались пауза после
+/// схемы, стабилизация после фазы и вся проверка фона — вместе это до 9,5 с
+/// молчания после нажатия, при 90 схемах — десятки минут за сессию.
+pub fn interruptible_sleep_ms(user_cancel: &AtomicBool, millis: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(millis);
     loop {
         if user_cancel.load(Ordering::Relaxed) {
             return true;
         }
-        // `saturating_sub` вместо вычитания: между проверкой и вычитанием поток
-        // может быть вытеснен, и `deadline - now()` на отрицательном остатке
-        // паниковал бы прямо в потоке сессии.
+        // `saturating_duration_since` вместо вычитания: между проверкой и
+        // вычитанием поток может быть вытеснен, и `deadline - now()` на
+        // отрицательном остатке паниковал бы прямо в потоке сессии.
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return user_cancel.load(Ordering::Relaxed);
         }
-        std::thread::sleep(Duration::from_millis(100).min(left));
+        std::thread::sleep(Duration::from_millis(50).min(left));
+    }
+}
+
+/// Итог ожидания стабилизации схемы.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StabilizationReport {
+    /// Схема подтверждена и потолок частот держится.
+    pub settled: bool,
+    /// Сколько ждали, мс.
+    pub waited_ms: u64,
+    /// Разрешённый потолок частот, МГц (0 — данные недоступны).
+    pub ceiling_mhz: u32,
+    /// Причина, почему не дождались (пусто — дождались).
+    pub reason: Option<SchemeStabilizeFailure>,
+}
+
+/// Почему стабилизация не завершилась штатно.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemeStabilizeFailure {
+    /// Схему так и не подтвердили как активную.
+    SchemeUnconfirmed,
+    /// Потолок частот всё менялся до потолка ожидания.
+    CeilingNotStable,
+}
+
+/// Как часто опрашиваем потолок частот при стабилизации, мс.
+pub const SCHEME_STABILIZE_POLL_MS: u64 = 250;
+/// Сколько замеров подряд должны совпасть, чтобы считать потолок устоявшимся.
+///
+/// Два, а не один: одиночный замер совпадает и просто по совпадению, а два
+/// подряд означают, что система перестала пересчитывать потолок.
+pub const SCHEME_STABILIZE_STABLE_SAMPLES: u32 = 2;
+
+/// Дождаться, пока схема применится и частота устоится.
+///
+/// Вместо фиксированных трёх секунд: ждём, пока `MaxMhz` (разрешённый
+/// процессором потолок) перестанет меняться И активная схема подтверждена.
+/// Так ожидание короче, когда Windows переключила план мгновенно, и длиннее,
+/// когда плановая запись задержалась — ровно тот случай, который фиксированная
+/// пауза пропускала.
+///
+/// Проверка `MaxMhz` вместо температуры осознанна: температура недоступна без
+/// драйвера, а потолок частот — это и есть то, что меняет схема питания.
+pub fn wait_scheme_stabilized(
+    driver: &dyn SchemeDriver,
+    expected_guid: &str,
+    user_cancel: &AtomicBool,
+) -> StabilizationReport {
+    let started = Instant::now();
+    let min_deadline = started + Duration::from_secs(SCHEME_STABILIZE_MIN_SECS);
+    let max_deadline = started + Duration::from_secs(SCHEME_STABILIZE_MAX_SECS);
+
+    let mut last_ceiling = 0u32;
+    let mut stable = 0u32;
+    let mut confirmed = false;
+    let mut ceiling_known = false;
+
+    loop {
+        if user_cancel.load(Ordering::Relaxed) {
+            return StabilizationReport {
+                settled: false,
+                waited_ms: started.elapsed().as_millis() as u64,
+                ceiling_mhz: last_ceiling,
+                reason: Some(SchemeStabilizeFailure::CeilingNotStable),
+            };
+        }
+        if !confirmed {
+            confirmed = verify_scheme_active(driver, expected_guid).is_ok();
+        }
+        let ceiling = powerbench_windows::power::power_state().max_mhz;
+        if ceiling != 0 {
+            if ceiling_known && ceiling == last_ceiling {
+                stable += 1;
+            } else {
+                stable = 0;
+                ceiling_known = true;
+            }
+            last_ceiling = ceiling;
+        }
+        let now = Instant::now();
+        if confirmed && stable >= SCHEME_STABILIZE_STABLE_SAMPLES && now >= min_deadline {
+            return StabilizationReport {
+                settled: true,
+                waited_ms: now.saturating_duration_since(started).as_millis() as u64,
+                ceiling_mhz: last_ceiling,
+                reason: None,
+            };
+        }
+        if now >= max_deadline {
+            return StabilizationReport {
+                settled: false,
+                waited_ms: now.saturating_duration_since(started).as_millis() as u64,
+                ceiling_mhz: last_ceiling,
+                reason: Some(if confirmed {
+                    SchemeStabilizeFailure::CeilingNotStable
+                } else {
+                    SchemeStabilizeFailure::SchemeUnconfirmed
+                }),
+            };
+        }
+        if interruptible_sleep_ms(
+            user_cancel,
+            SCHEME_STABILIZE_POLL_MS.min(
+                max_deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u64,
+            ),
+        ) {
+            return StabilizationReport {
+                settled: false,
+                waited_ms: started.elapsed().as_millis() as u64,
+                ceiling_mhz: last_ceiling,
+                reason: Some(SchemeStabilizeFailure::SchemeUnconfirmed),
+            };
+        }
     }
 }
 
@@ -1266,13 +1547,16 @@ fn run_session_loop(
                 checkpoint.original_restored = false;
                 store.save(checkpoint).map_err(SessionError::Persist)?;
             }
-            // --- Применение схемы ---
-            driver
-                .set_active(&scheme_id)
-                .map_err(|cause| SessionError::ApplyScheme {
-                    scheme_id: scheme_id.clone(),
-                    cause,
-                })?;
+            // --- Применение схемы С ПОДТВЕРЖДЕНИЕМ ---
+            //
+            // `setactive` проверяет только код возврата. Если план не
+            // применился, замер пойдёт на чужой схеме — и это неотличимо от
+            // нормального результата. Поэтому применяем через
+            // `apply_and_verify`: без подтверждения от ОС замер не начинается.
+            apply_and_verify(driver, &scheme_id).map_err(|cause| SessionError::ApplyScheme {
+                scheme_id: scheme_id.clone(),
+                cause,
+            })?;
             // Маркер активного прогона: переживает убийство процесса.
             // Если следующий запуск найдёт его — схема уйдёт в карантин
             // как подозрение на жёсткое зависание ПК.
@@ -1298,31 +1582,139 @@ fn run_session_loop(
                 },
             );
 
-            // --- Преамбула: пауза после схемы ---
-            std::thread::sleep(Duration::from_secs(PAUSE_AFTER_SCHEME_SECS));
+            // --- Стабилизация схемы: не фиксированная пауза, а ожидание
+            //     устоявшегося потолка частот И подтверждённой активной схемы.
+            let stabilization = wait_scheme_stabilized(driver, &scheme_id, user_cancel);
+            if user_wants_stop(user_cancel) {
+                cancelled = true;
+                clear_testing_marker();
+                break 'outer;
+            }
+            if !stabilization.settled {
+                // Не отказ, а предупреждение: ждать дольше уже нельзя, а
+                // Windows могла применить план с задержкой и без нас.
+                note(
+                    observer,
+                    events,
+                    SessionEvent::Warn(format!(
+                        "схема «{scheme_id}» не подтверждена за {} с: {}; потолок частот {} МГц",
+                        SCHEME_STABILIZE_MAX_SECS,
+                        stabilization
+                            .reason
+                            .map(|r| match r {
+                                SchemeStabilizeFailure::SchemeUnconfirmed =>
+                                    "ОС не показывает её активной",
+                                SchemeStabilizeFailure::CeilingNotStable =>
+                                    "потолок частот всё меняется",
+                            })
+                            .unwrap_or("причина неизвестна"),
+                        stabilization.ceiling_mhz
+                    )),
+                );
+            }
 
-            // --- Проверка фона ---
-            let (clean, measured) =
-                background_check(engine.logical_cpus(), plan.background_threshold_percent);
+            // --- Проверка фона: грязный фон отменяет замер, а не портит его ---
+            //
+            // Раньше превышение порога давало только строку в журнале, и
+            // результат всё равно записывался: антивирус, съедающий 15 % CPU,
+            // молча занижал скорость схемы, и та могла попасть в карантин по
+            // «провалу фазы» с ложной причиной. Теперь слишком тяжёлый фон
+            // откладывает прогон и после попыток пропускает его, а в карантин
+            // не идёт — тяжёлый фон свойство машины, а не схемы.
             let threshold = plan.background_threshold_percent * engine.logical_cpus() as f64;
-            if clean {
-                note(
-                    observer,
-                    events,
-                    SessionEvent::BackgroundClean {
-                        measured_total_percent: measured,
-                        threshold_percent: threshold,
-                    },
-                );
-            } else {
-                note(
-                    observer,
-                    events,
-                    SessionEvent::BackgroundNoisy {
-                        measured_total_percent: measured,
-                        threshold_percent: threshold,
-                    },
-                );
+            let mut background_ok = false;
+            for attempt in 1..=BACKGROUND_RUN_ATTEMPTS {
+                let Some(verdict) = measure_background(
+                    engine.logical_cpus(),
+                    plan.background_threshold_percent,
+                    user_cancel,
+                ) else {
+                    cancelled = true;
+                    break 'outer;
+                };
+                match verdict {
+                    BackgroundVerdict::Clean { measured } => {
+                        note(
+                            observer,
+                            events,
+                            SessionEvent::BackgroundClean {
+                                measured_total_percent: measured,
+                                threshold_percent: threshold,
+                            },
+                        );
+                        background_ok = true;
+                    }
+                    BackgroundVerdict::Noisy { measured } => {
+                        note(
+                            observer,
+                            events,
+                            SessionEvent::BackgroundNoisy {
+                                measured_total_percent: measured,
+                                threshold_percent: threshold,
+                            },
+                        );
+                        background_ok = true;
+                    }
+                    BackgroundVerdict::TooDirty { measured } => {
+                        note(
+                            observer,
+                            events,
+                            SessionEvent::BackgroundTooDirty {
+                                measured_total_percent: measured,
+                                threshold_percent: threshold * BACKGROUND_DIRTY_FACTOR,
+                                attempt,
+                                attempts: BACKGROUND_RUN_ATTEMPTS,
+                            },
+                        );
+                        if attempt < BACKGROUND_RUN_ATTEMPTS
+                            && interruptible_sleep_ms(user_cancel, BACKGROUND_RETRY_PAUSE_MS)
+                        {
+                            cancelled = true;
+                            break 'outer;
+                        }
+                    }
+                }
+                if background_ok {
+                    break;
+                }
+            }
+            if !background_ok {
+                clear_testing_marker();
+                continue 'scheme;
+            }
+
+            // --- Питание: АКБ вместо сети во время сессии ---
+            //
+            // Проверка в начале сессии уже была, но она ничего не значит для
+            // прогона, начавшегося через полчаса: выдернутый кабель не
+            // прерывает замер, а молча занижает его на десятки процентов, и
+            // виновата оказывается схема.
+            //
+            // Пропадание питания останавливает ВСЮ сессию, а не только прогон:
+            // на батарее не пройдёт ни одна последующая схема, а перебор 90
+            // схем с проверками фона только истёк бы временем.
+            match driver.ac_power_online() {
+                Ok(true) => {}
+                Ok(false) => {
+                    note(
+                        observer,
+                        events,
+                        SessionEvent::RunInvalid {
+                            scheme_id: scheme_id.clone(),
+                            reason: "питание от сети пропало до начала замера (система на батарее)"
+                                .to_string(),
+                        },
+                    );
+                    cancelled = true;
+                    clear_testing_marker();
+                    break 'outer;
+                }
+                Err(e) => {
+                    clear_testing_marker();
+                    return Err(SessionError::Config(format!(
+                        "не удалось определить питание от сети: {e}"
+                    )));
+                }
             }
 
             // --- Разогрев профилем «Отклик» (результаты отбрасываются) ---
@@ -1444,6 +1836,51 @@ fn run_session_loop(
                     clear_testing_marker();
                     break 'outer;
                 }
+                // --- Граница фазы: та ли схема, и то ли питание ---
+                //
+                // Здесь ловится подмена плана посторонним процессом, OEM-утилитой
+                // или обновлением Windows, и пропадание питания от сети. Обе
+                // проверки обязаны быть на границе, а не в конце: чтобы фаза, в
+                // которой событие уже произошло, вообще не начиналась.
+                if let Err(why) = verify_scheme_active(driver, &scheme_id) {
+                    note(
+                        observer,
+                        events,
+                        SessionEvent::RunInvalid {
+                            scheme_id: scheme_id.clone(),
+                            reason: why,
+                        },
+                    );
+                    clear_testing_marker();
+                    break 'scheme;
+                }
+                match driver.ac_power_online() {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        note(
+                            observer,
+                            events,
+                            SessionEvent::RunInvalid {
+                                scheme_id: scheme_id.clone(),
+                                reason: format!(
+                                    "питание от сети пропало перед фазой «{}»",
+                                    phase_label(phase)
+                                ),
+                            },
+                        );
+                        // Питание пропало посреди сессии: дальше ни одна схема
+                        // не пройдёт, поэтому останавливаем сессию целиком.
+                        cancelled = true;
+                        clear_testing_marker();
+                        break 'outer;
+                    }
+                    Err(e) => {
+                        clear_testing_marker();
+                        return Err(SessionError::Config(format!(
+                            "не удалось определить питание от сети: {e}"
+                        )));
+                    }
+                }
                 let label = phase_label(phase);
                 // Момент старта ИМЕННО ЭТОЙ фазы: `phase_started` выше отсчитывает
                 // весь прогон и годится только для `duration_ms`. По шкале фаз
@@ -1518,7 +1955,29 @@ fn run_session_loop(
                         // Срез питания в конце фазы: троттлинг может начаться
                         // и кончиться внутри прогона, и по одному срезу в
                         // конце всего прогона это не поймать.
-                        phase_power.push(PowerSnapshot::capture());
+                        let phase_snapshot = PowerSnapshot::capture();
+                        // Питание могло пропасть ВНУТРИ фазы — тогда её данные
+                        // недостоверны целиком, и продолжать прогон незачем:
+                        // все следующие фазы тоже пойдут на батарее. Снимок
+                        // уже содержит `on_ac`, поэтому лишнего вызова API не
+                        // нужно.
+                        if !phase_snapshot.on_ac {
+                            let reason = format!("питание от сети пропало во время фазы «{label}»");
+                            note(
+                                observer,
+                                events,
+                                SessionEvent::RunInvalid {
+                                    scheme_id: scheme_id.clone(),
+                                    reason,
+                                },
+                            );
+                            // Фаза недостоверна целиком, а следующие на батарее
+                            // тоже не пройдут — останавливаем сессию.
+                            cancelled = true;
+                            clear_testing_marker();
+                            break 'outer;
+                        }
+                        phase_power.push(phase_snapshot);
                         // Шаг перевода индекса сэмпла в секунды и начало фазы
                         // считаем по ФАКТИЧЕСКОМУ времени, а не по номинальному
                         // `secs`: фаза включает запуск нагрузки и разгон, из-за
@@ -1536,8 +1995,13 @@ fn run_session_loop(
                         spike_count_total += windows.len();
                         all_spike_windows.extend(windows.clone());
                         times_by_phase.push((phase.index(), times));
-                        // Стабилизационная пауза после каждой фазы.
-                        std::thread::sleep(Duration::from_secs(STABILIZATION_SECS));
+                        // Стабилизационная пауза после каждой фазы —
+                        // прерываемая, иначе кнопка «Стоп» ждала бы её целиком.
+                        if interruptible_sleep(user_cancel, STABILIZATION_SECS) {
+                            cancelled = true;
+                            clear_testing_marker();
+                            break 'outer;
+                        }
                         if spike_count_total > 0 {
                             note(
                                 observer,
@@ -2383,9 +2847,18 @@ mod tests {
     use super::*;
 
     /// Драйвер, запоминающий переключения схемы.
+    #[derive(Default)]
     struct RecordingDriver {
         active: Mutex<String>,
         calls: Mutex<Vec<String>>,
+        /// Сколько раз `active_scheme` должно сообщать «старую» схему, прежде
+        /// чем сообщить новую (эмуляция асинхронной записи в Power Manager).
+        stale_reads: Mutex<usize>,
+        /// Ответ `active_scheme`: `Err` эмулирует «состояние не читается».
+        active_read_fails: Mutex<bool>,
+        /// `set_active` возвращает успех, но НЕ переключает схему — так ведёт
+        /// себя `powercfg` под доменной политикой.
+        lie_on_set: Mutex<bool>,
     }
 
     impl RecordingDriver {
@@ -2393,7 +2866,18 @@ mod tests {
             Self {
                 active: Mutex::new(initial.to_string()),
                 calls: Mutex::new(Vec::new()),
+                stale_reads: Mutex::new(0),
+                active_read_fails: Mutex::new(false),
+                lie_on_set: Mutex::new(false),
             }
+        }
+
+        /// Драйвер, у которого `set_active` возвращает успех, но схема НЕ
+        /// меняется — ровно поведение powercfg при конфликте политики.
+        fn lying(initial: &str) -> Self {
+            let d = Self::new(initial);
+            *d.lie_on_set.lock().unwrap() = true;
+            d
         }
     }
 
@@ -2412,12 +2896,34 @@ mod tests {
         }
 
         fn set_active(&self, guid: &str) -> Result<(), String> {
-            *self.active.lock().unwrap_or_else(|e| e.into_inner()) = guid.to_string();
-            self.calls
+            if !*self.lie_on_set.lock().unwrap_or_else(|e| e.into_inner()) {
+                *self.active.lock().unwrap_or_else(|e| e.into_inner()) = guid.to_string();
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(guid.to_string());
+            }
+            Ok(())
+        }
+
+        fn active_scheme(&self) -> Result<String, String> {
+            if *self
+                .active_read_fails
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(guid.to_string());
-            Ok(())
+            {
+                return Err("мост питания недоступен".to_string());
+            }
+            let mut stale = self.stale_reads.lock().unwrap_or_else(|e| e.into_inner());
+            if *stale > 0 {
+                *stale -= 1;
+                return Ok("old-guid".to_string());
+            }
+            Ok(self
+                .active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone())
         }
 
         fn ac_power_online(&self) -> Result<bool, String> {
@@ -2750,5 +3256,258 @@ mod tests {
         let got = recorded.lock().unwrap().len();
         assert!(got >= 1, "ожидались тики телеметрии, получено {got}");
         assert!(!engine.progress_snapshot().running);
+    }
+
+    // ------------------------------------------------------------------
+    // Фаза 2: применение схемы только при подтверждении от ОС
+    // ------------------------------------------------------------------
+
+    /// Штатное переключение подтверждается с первого чтения.
+    #[test]
+    fn scheme_application_is_confirmed() {
+        let driver = RecordingDriver::new("old-guid");
+        assert_eq!(
+            apply_and_verify(&driver, "new-guid"),
+            Ok(()),
+            "корректное переключение обязано подтверждаться"
+        );
+        assert_eq!(driver.active_scheme().unwrap(), "new-guid");
+    }
+
+    /// Ключевой случай: `powercfg /setactive` вернул код 0, но план не
+    /// применился. Без проверки замер пошёл бы на чужой схеме, и в отчёте это
+    /// не отличилось бы от нормального результата.
+    #[test]
+    fn a_scheme_that_did_not_apply_is_an_error_not_a_measurement() {
+        let driver = RecordingDriver::lying("old-guid");
+        let err = apply_and_verify(&driver, "new-guid").expect_err("ложное применение");
+        let text = err.to_lowercase();
+        assert!(
+            text.contains("не переключила схему"),
+            "ошибка обязана называть суть, а не код возврата: {err}"
+        );
+        assert!(
+            err.contains("old-guid"),
+            "в ошибке должно быть видно активную схему: {err}"
+        );
+    }
+
+    /// Windows применяет план асинхронно: сразу после команды ещё может быть
+    /// старая схема. Одиночный poll попадал в эту дыру и давал ложный отказ.
+    #[test]
+    fn late_scheme_write_is_not_mistaken_for_a_failure() {
+        let driver = RecordingDriver::new("old-guid");
+        // Два чтения подряд показывают старую схему, третье — новую.
+        *driver.stale_reads.lock().unwrap() = 2;
+        assert_eq!(
+            apply_and_verify(&driver, "new-guid"),
+            Ok(()),
+            "задержка применения не должна считаться отказом"
+        );
+    }
+
+    /// Нечитаемое состояние — не «применилось». Проверка не может молча
+    /// пропустить фазу, потому что не смогла прочитать схему.
+    #[test]
+    fn unreadable_scheme_state_is_not_treated_as_applied() {
+        let driver = RecordingDriver::new("old-guid");
+        *driver.active_read_fails.lock().unwrap() = true;
+        let err = apply_and_verify(&driver, "new-guid")
+            .expect_err("непрочитанное состояние обязано быть отказом");
+        assert!(err.contains("мост питания недоступен"), "{err}");
+    }
+
+    /// Подмена схемы посторонним процессом видна на границе фазы.
+    #[test]
+    fn foreign_scheme_is_detected_at_the_phase_boundary() {
+        let driver = RecordingDriver::new("new-guid");
+        assert_eq!(verify_scheme_active(&driver, "new-guid"), Ok(()));
+        let err = verify_scheme_active(&driver, "other-guid")
+            .expect_err("чужая схема обязана обнаруживаться");
+        assert!(err.contains("other-guid"), "{err}");
+        assert!(err.contains("new-guid"), "{err}");
+        assert!(err.contains("извне"), "{err}");
+    }
+
+    /// Регистр GUID не должен считаться подменой: powercfg отдаёт его в
+    /// верхнем регистре, а план — как его ввёл пользователь.
+    #[test]
+    fn scheme_comparison_ignores_case() {
+        let driver = RecordingDriver::new("381B4222-F694-41F0-9685-FF5BB260DF2E");
+        assert_eq!(
+            verify_scheme_active(&driver, "381b4222-f694-41f0-9685-ff5bb260df2e"),
+            Ok(())
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Фаза 2: фон влияет на замер
+    // ------------------------------------------------------------------
+
+    /// Границы «чисто / шумно / слишком грязно».
+    #[test]
+    fn background_thresholds_are_ordered() {
+        let cpus = 16;
+        let threshold = 5.0;
+        // Порог = 5 % * 16 = 80 % одного ядра суммарно.
+        assert!(matches!(
+            classify_background(79.0, threshold, cpus),
+            BackgroundVerdict::Clean { .. }
+        ));
+        assert!(matches!(
+            classify_background(80.0, threshold, cpus),
+            BackgroundVerdict::Noisy { .. }
+        ));
+        // Критический порог = 3 * 80 = 240.
+        assert!(matches!(
+            classify_background(239.0, threshold, cpus),
+            BackgroundVerdict::Noisy { .. }
+        ));
+        assert!(matches!(
+            classify_background(240.0, threshold, cpus),
+            BackgroundVerdict::TooDirty { .. }
+        ));
+    }
+
+    /// Ровно на границе фон считается превышением, иначе «грязный» фон на
+    /// ровно пороговом значении проходил бы как чистый.
+    #[test]
+    fn background_threshold_is_exclusive_at_the_bottom() {
+        let (clean, noisy) = (
+            classify_background(80.0, 5.0, 16),
+            classify_background(80.01, 5.0, 16),
+        );
+        assert!(matches!(clean, BackgroundVerdict::Noisy { .. }));
+        assert!(matches!(noisy, BackgroundVerdict::Noisy { .. }));
+    }
+
+    /// Неизвестная загрузка (NaN/бесконечность) не считается чистой.
+    ///
+    /// Иначе сломанный sysinfo дал бы «фон чистый» без единого подтверждения,
+    /// то есть ровно то молчание, которое Фаза 2 и убирает.
+    #[test]
+    fn unknown_background_is_never_clean() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                matches!(
+                    classify_background(bad, 5.0, 16),
+                    BackgroundVerdict::TooDirty { .. }
+                ),
+                "{bad} не должен считаться чистым фоном"
+            );
+        }
+    }
+
+    /// Тяжёлый фон отменяет замер, а не портит его: без проверки схема
+    /// получала заниженную оценку и могла уйти в карантин с ложной причиной.
+    #[test]
+    fn too_dirty_background_blocks_the_measurement() {
+        assert!(matches!(
+            classify_background(1000.0, 5.0, 16),
+            BackgroundVerdict::TooDirty { .. }
+        ));
+        // Множитель критичности — именно множитель, а не «1 + запас».
+        assert_eq!(BACKGROUND_DIRTY_FACTOR, 3.0);
+    }
+
+    // ------------------------------------------------------------------
+    // Фаза 2: паузы прерываемы
+    // ------------------------------------------------------------------
+
+    /// Любая техническая пауза обязана прерываться по кнопке «Стоп».
+    ///
+    /// Раньше пауза после схемы, стабилизация после фазы и вся проверка фона
+    /// были обычным `sleep` — вместе до 9,5 с молчания после нажатия.
+    #[test]
+    fn technical_sleeps_are_interrupted_by_user_cancel() {
+        let cancel = AtomicBool::new(false);
+        // Без отмены сон отрабатывает полностью.
+        let started = Instant::now();
+        assert!(!interruptible_sleep(&cancel, 0));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        // С отменой — немедленно, независимо от запрошенной длительности.
+        cancel.store(true, Ordering::Relaxed);
+        let started = Instant::now();
+        assert!(interruptible_sleep(&cancel, 600));
+        assert!(interruptible_sleep_ms(&cancel, 60_000));
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "отмена обязана будить сон мгновенно, ждали {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Отмена не должна «съедать» сон молча: без флага сон идёт до конца.
+    #[test]
+    fn a_long_sleep_actually_waits_when_not_cancelled() {
+        let cancel = AtomicBool::new(false);
+        let started = Instant::now();
+        interruptible_sleep_ms(&cancel, 200);
+        let spent = started.elapsed();
+        assert!(
+            spent >= Duration::from_millis(150),
+            "сон отработал за {spent:?}"
+        );
+        assert!(spent < Duration::from_secs(3), "сон затянулся: {spent:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // Фаза 2: стабилизация схемы
+    // ------------------------------------------------------------------
+
+    /// Границы ожидания стабилизации упорядочены и осмысленны.
+    ///
+    /// Константы проверяются на неизменность: смысл теста именно в том, чтобы
+    /// правка этих чисел не прошла молча.
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn stabilization_bounds_are_sane() {
+        assert!(
+            SCHEME_STABILIZE_MIN_SECS >= 1,
+            "минимум нужен для ramp частот"
+        );
+        assert!(
+            SCHEME_STABILIZE_MAX_SECS > SCHEME_STABILIZE_MIN_SECS,
+            "потолок обязан быть выше минимума, иначе ожидание бессмысленно"
+        );
+        assert!(
+            SCHEME_STABILIZE_MAX_SECS <= 30,
+            "пользователь не должен ждать полминуты"
+        );
+        assert!(SCHEME_STABILIZE_POLL_MS > 0);
+        assert!(SCHEME_STABILIZE_STABLE_SAMPLES >= 2);
+    }
+
+    /// Отмена пользователем прерывает стабилизацию и не ждёт потолка.
+    #[test]
+    fn stabilization_stops_on_user_cancel() {
+        let driver = RecordingDriver::new("scheme-guid");
+        let cancel = AtomicBool::new(true);
+        let started = Instant::now();
+        let report = wait_scheme_stabilized(&driver, "scheme-guid", &cancel);
+        assert!(!report.settled);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "отмена обязана прервать стабилизацию сразу, ждали {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Схема, которую ОС не показывает активной, стабилизацию не проходит.
+    #[test]
+    fn stabilization_fails_when_the_scheme_is_not_active() {
+        let driver = RecordingDriver::new("other-guid");
+        let cancel = AtomicBool::new(false);
+        let report = wait_scheme_stabilized(&driver, "scheme-guid", &cancel);
+        assert!(
+            !report.settled,
+            "неподтверждённая схема обязана давать сбой"
+        );
+        assert_eq!(
+            report.reason,
+            Some(SchemeStabilizeFailure::SchemeUnconfirmed)
+        );
+        assert!(report.waited_ms <= SCHEME_STABILIZE_MAX_SECS * 1000 + 1000);
     }
 }

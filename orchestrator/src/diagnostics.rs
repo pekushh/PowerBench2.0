@@ -99,6 +99,9 @@ mod tests {
         fn set_active(&self, _guid: &str) -> Result<(), String> {
             Ok(())
         }
+        fn active_scheme(&self) -> Result<String, String> {
+            Ok("noisy-guid".to_string())
+        }
         fn ac_power_online(&self) -> Result<bool, String> {
             Ok(false)
         }
@@ -144,6 +147,9 @@ mod tests {
             }
             fn set_active(&self, _guid: &str) -> Result<(), String> {
                 Ok(())
+            }
+            fn active_scheme(&self) -> Result<String, String> {
+                Ok("healthy-guid".to_string())
             }
             fn ac_power_online(&self) -> Result<bool, String> {
                 Ok(true)

@@ -263,6 +263,9 @@ mod tests {
             *self.active.borrow_mut() = guid.to_string();
             Ok(())
         }
+        fn active_scheme(&self) -> Result<String, String> {
+            Ok(self.active.borrow().clone())
+        }
 
         fn ac_power_online(&self) -> Result<bool, String> {
             Ok(true)

@@ -4,7 +4,7 @@
 //! [`estimate_run_seconds`] и [`format_estimate`], которыми пользуются и
 //! оркестратор, и интерфейс, поэтому оценка времени не расходится с фактом.
 
-use crate::session::{BACKGROUND_ATTEMPTS, BACKGROUND_MEASURE_MS, BACKGROUND_RETRY_PAUSE_MS};
+use crate::session::{BACKGROUND_MEASURE_MS, BACKGROUND_RETRY_PAUSE_MS, BACKGROUND_RUN_ATTEMPTS};
 
 /// Пресет «Быстрый»: длительность 30 с, разогрев 3 с, охлаждение 3 с, 1 повтор.
 ///
@@ -103,7 +103,19 @@ pub const MAX_BACKGROUND_PERCENT: f64 = 100.0;
 
 /// Пауза после применения схемы питания (секунды). Ждём, чтобы Windows
 /// переключила профиль питания до начала замера.
-pub const PAUSE_AFTER_SCHEME_SECS: u64 = 3;
+///
+/// Это НИЖНЯЯ граница ожидания: схема считается готовой не по прошедшему
+/// времени, а когда разрешённый процессором потолок частот (`MaxMhz`) держится
+/// одинаковым в двух замерах подряд И активная схема подтверждена. Ожидание
+/// поэтому либо короче (ОС переключила мгновенно), либо длиннее (плановая
+/// запись задержалась) — вместо того чтобы всегда ждать одно и то же число.
+pub const SCHEME_STABILIZE_MIN_SECS: u64 = 1;
+/// Потолок ожидания стабилизации: дальше ждать бессмысленно, и замер надо
+/// начинать — иначе пользователь решит, что приложение зависло.
+pub const SCHEME_STABILIZE_MAX_SECS: u64 = 10;
+/// Оценка типичного ожидания для расчёта времени сессии (между минимумом и
+/// максимумом; на практике схема стабилизируется за 1-2 с).
+pub const SCHEME_STABILIZE_ESTIMATE_SECS: f64 = 2.0;
 /// Стабилизационная пауза после каждой измеряемой фазы (секунды): даёт
 /// затухнуть эффекту только что прошедшей нагрузки.
 pub const STABILIZATION_SECS: u64 = 2;
@@ -111,10 +123,10 @@ pub const STABILIZATION_SECS: u64 = 2;
 pub const DEFAULT_COOLING_SECS: u64 = 5;
 /// Число измеряемых фаз в прогоне (Лёгкая, Частичная, Тяжёлая, Отклик).
 pub const PHASES_PER_RUN: u64 = 4;
-/// Оценка времени проверки фоновой нагрузки: одна попытка, а при шуме —
+/// Оценка времени проверки фоновой нагрузки: одна проба, а при грязном фоне —
 /// до трёх с паузами между ними.
 pub const BACKGROUND_CHECK_SECS: f64 = BACKGROUND_MEASURE_MS as f64 / 1000.0
-    + (BACKGROUND_ATTEMPTS as f64 - 1.0) * BACKGROUND_RETRY_PAUSE_MS as f64 / 1000.0;
+    + (BACKGROUND_RUN_ATTEMPTS as f64 - 1.0) * BACKGROUND_RETRY_PAUSE_MS as f64 / 1000.0;
 
 /// Оценка полного времени сессии в секундах.
 ///
@@ -141,7 +153,7 @@ pub fn estimate_run_seconds(
     }
     let per_run = duration_seconds as f64
         + warmup_seconds as f64
-        + PAUSE_AFTER_SCHEME_SECS as f64
+        + SCHEME_STABILIZE_ESTIMATE_SECS
         + STABILIZATION_SECS as f64 * PHASES_PER_RUN as f64
         + BACKGROUND_CHECK_SECS;
     // Охлаждение идёт после каждого прогона, кроме последнего в плане, то есть
@@ -363,13 +375,13 @@ pub fn run_key(round: u32, plan_guid: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Оценка времени учитывает паузу после схемы, стабилизации, проверку
-    /// фона и охлаждение — иначе она систематически занижена.
+    /// Оценка времени учитывает стабилизацию после схемы, стабилизации после фаз,
+    /// проверку фона и охлаждение — иначе она систематически занижена.
     #[test]
     fn estimate_covers_every_stage() {
         let per_run = 30.0
             + 6.0
-            + PAUSE_AFTER_SCHEME_SECS as f64
+            + SCHEME_STABILIZE_ESTIMATE_SECS
             + STABILIZATION_SECS as f64 * PHASES_PER_RUN as f64
             + BACKGROUND_CHECK_SECS;
         // Охлаждение идёт после каждого прогона, кроме последнего в плане:

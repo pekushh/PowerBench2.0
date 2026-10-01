@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "check:adaptive": "node tools/adaptive-check.cjs",
-    "check:fallback": "node tools/fallback-check.cjs"
+    "check:fallback": "node tools/fallback-check.cjs",
+    "check:dead": "node tools/dead-classes.cjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

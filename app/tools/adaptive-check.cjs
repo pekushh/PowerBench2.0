@@ -133,6 +133,8 @@ const HEAD_PAGE = `<!DOCTYPE html><html lang="ru" data-theme="Graphite" data-mod
         <div class="page-host on"><div class="page fill" id="p3"><div class="page-head"><h1>Результаты</h1><span class="sub">24 сессии</span><div class="actions"><span class="act-secondary">Обновить</span></div></div><div class="session-list fill-list"><article class="session-card"><div class="sc-main"><div class="sc-top"><span class="sc-title">Схема</span></div></div></article></div></div></div>
         <div class="page-host on"><div class="page fill" id="p4"><div class="page-head"><h1>Логи</h1><div class="actions"><span class="export-btn">Сохранить</span></div></div><div class="log-controls"><div class="filter-tabs pb-pill-host"><button class="ftab active">Все</button></div></div><div class="log-card"><div class="log-list"><div class="log-row"><span class="l-time">14:19:02</span><span class="l-badge info">Инфо</span><span class="l-msg">Схема применена</span></div></div></div></div></div>
         <div class="page-host on"><div class="page set-page" id="p5"><div class="page-head"><h1>Настройки</h1><div class="actions"><span class="folder-btn">Папка результатов</span></div></div><section class="set-sec"><div class="section-head"><h2 class="section-title">Внешний вид</h2></div><div class="set-group"><div class="set-row"><div class="set-left"><span class="set-icon"></span><div class="set-text"><div class="set-title">Тема оформления</div></div></div><div class="seg"><button class="on">Тёмная</button><button>Светлая</button></div></div></div></div></section></div></div>
+        <div class="results-toolbar" id="toolbar"><div class="split-act" id="split"><button class="act-secondary" id="ex">Экспорт…</button><button class="act-secondary caret" id="fmt">▾</button><div class="mini-menu" id="menu"><button>JSON</button><button>CSV</button></div></div></div>
+        <div class="filter-tabs pb-pill-host" id="tabs"><button class="ftab active" id="tab">Все</button><button class="ftab" id="tab2">Скрининг</button></div>
       </div>
     </main>
   </div>
@@ -141,6 +143,74 @@ const HEAD_PAGE = `<!DOCTYPE html><html lang="ru" data-theme="Graphite" data-mod
 // Положение заголовка каждого экрана относительно верхнего отступа .main
 // и одинаковые метрики самого заголовка: вес и межбуквенный интервал
 // раньше различались (700 / −0.3 px против 650 / −0.2 px).
+window.measureLayers = () => {
+  // У каждого, кто обязан перекрывать что-то, должен быть СОБСТВЕННЫЙ контекст
+  // наложения. Без isolation:isolate (или z-index не auto) его z-index
+  // считается в корневом контексте и конкурирует со всем приложением: любой
+  // позиционированный элемент, идущий позже в DOM, перекрывал его вместо
+  // того, чтобы быть перекрытым.
+  const need = [
+    [".pb-pill-host", "группа вкладок"],
+    [".modal-overlay", "оверлей модалки"],
+    [".split-act", "кнопка экспорта с меню"],
+  ];
+  const bad = [];
+  for (const [sel, name] of need) {
+    const el = document.querySelector(sel);
+    if (!el) continue;
+    const cs = getComputedStyle(el);
+    if (cs.isolation !== "isolate" && cs.zIndex === "auto") bad.push(name + " (" + sel + ")");
+  }
+  // Порядок слоёв зафиксирован и не должен ломаться: тосты над модалкой,
+  // оверлей над меню формата.
+  const z = (sel) => {
+    const el = document.querySelector(sel);
+    return el ? Number(getComputedStyle(el).zIndex) || 0 : null;
+  };
+  const menu = z(".mini-menu"), overlay = z(".modal-overlay"), toasts = z(".toasts");
+  if (menu != null && overlay != null && menu > overlay) bad.push("меню экспорта выше оверлея модалки");
+  if (overlay != null && toasts != null && overlay > toasts) bad.push("оверлей модалки выше тостов");
+  return bad;
+};
+// Меню формата экспорта и пилюля вкладок — два элемента, которые перекрывают
+// соседей. Проверяем, что их никто не срезает: выпадающее меню обязано целиком
+// показываться поверх содержимого под ним, а не обрезаться родителем с
+// overflow и не уезжать за границу рабочей области.
+window.measureOverlap = () => {
+  const bad = [];
+  const main = document.querySelector(".main");
+  const mainBox = main.getBoundingClientRect();
+
+  // Меню: ни один предок не должен его обрезать, и оно обязано помещаться
+  // в горизонтальные границы рабочей области.
+  const menu = document.getElementById("menu");
+  const mr = menu.getBoundingClientRect();
+  if (mr.height < 10) bad.push("меню формата схлопнулось в ноль (" + Math.round(mr.height) + " px)");
+  if (mr.left < mainBox.left - 1 || mr.right > mainBox.right + 1) {
+    bad.push("меню формата вылезло за границу рабочей области");
+  }
+  for (let el = menu.parentElement; el && el !== main; el = el.parentElement) {
+    const cs = getComputedStyle(el);
+    const clips = cs.overflow !== "visible" || cs.overflowY !== "visible" || cs.overflowX !== "visible";
+    if (clips && el.id !== "split") bad.push("меню формата обрезает предок ." + (el.className || el.id || el.tagName));
+  }
+
+  // Пилюля вкладок: лежит под своей кнопкой, а не поверх неё, и не выходит за
+  // границы своей группы.
+  const host = document.getElementById("tabs");
+  const pill = host.querySelector(".pb-pill");
+  if (pill) {
+    const pr = pill.getBoundingClientRect();
+    const hr = host.getBoundingClientRect();
+    if (pr.width <= 0) bad.push("пилюля вкладок не имеет ширины");
+    if (pr.left < hr.left - 1 || pr.right > hr.right + 1) bad.push("пилюля вылезла за границы группы вкладок");
+    if (getComputedStyle(pill).zIndex >= getComputedStyle(host.firstElementChild).zIndex) {
+      bad.push("пилюля вкладок не под своей кнопкой");
+    }
+  }
+  return bad;
+};
+
 window.measureHeads = () => {
   const main = document.querySelector(".main");
   const out = {};
@@ -579,6 +649,24 @@ window.measureBench = (open) => {
   }
   if (hc.length) bad++;
   console.log(`    ${hc.length ? "✗ " + hc.join("; ") : "совпадает"}`);
+
+  // Слои наложения: у элементов, которые обязаны перекрывать соседей, должен
+  // быть собственный контекст, иначе их `z-index` считается в корневом.
+  const lc = [];
+  console.log("\n  слои наложения:");
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/heads` });
+  await new Promise((r) => setTimeout(r, 1200));
+  for (const [h, w] of [[900, 1440], [720, 1180]]) {
+    await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false });
+    await new Promise((r) => setTimeout(r, 350));
+    const lay = await evalJs("window.measureLayers()");
+    const ov = await evalJs("window.measureOverlap()");
+    if (lay.length) lc.push(`${w}×${h}: ${lay.join(", ")}`);
+    if (ov.length) lc.push(`${w}×${h}: ${ov.join(", ")}`);
+    console.log(`    ${String(w).padStart(4)}×${h}: контексты ${lay.length ? "✗ " + lay.join(", ") : "ok"}, перекрытия ${ov.length ? "✗ " + ov.join(", ") : "ok"}`);
+  }
+  if (lc.length) bad++;
+  console.log(`    ${lc.length ? "✗ " + lc.join("; ") : "ok"}`);
 
   // Поля вокруг колонки меряются на общей странице стенда, поэтому сначала
   // возвращаемся на неё с изолированных страниц.

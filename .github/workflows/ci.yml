@@ -159,6 +159,13 @@ jobs:
         run: npm run check:fallback
         working-directory: app
 
+      # Классы в CSS, которых нет ни в одной разметке: их накопилось 43, и
+      # они молча конфликтовали с живыми правилами (`.sc-title` был объявлен
+      # трижды, `.schemes-toolbar` — дважды, последний выигрывал).
+      - name: No dead CSS classes
+        run: npm run check:dead
+        working-directory: app
+
   docs:
     name: Build Documentation
     runs-on: ubuntu-latest

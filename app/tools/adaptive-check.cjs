@@ -133,26 +133,36 @@ const HEAD_PAGE = `<!DOCTYPE html><html lang="ru" data-theme="Graphite" data-mod
         <div class="page-host on"><div class="page fill" id="p3"><div class="page-head"><h1>Результаты</h1><span class="sub">24 сессии</span><div class="actions"><span class="act-secondary">Обновить</span></div></div><div class="session-list fill-list"><article class="session-card"><div class="sc-main"><div class="sc-top"><span class="sc-title">Схема</span></div></div></article></div></div></div>
         <div class="page-host on"><div class="page fill" id="p4"><div class="page-head"><h1>Логи</h1><div class="actions"><span class="export-btn">Сохранить</span></div></div><div class="log-controls"><div class="filter-tabs pb-pill-host"><button class="ftab active">Все</button></div></div><div class="log-card"><div class="log-list"><div class="log-row"><span class="l-time">14:19:02</span><span class="l-badge info">Инфо</span><span class="l-msg">Схема применена</span></div></div></div></div></div>
         <div class="page-host on"><div class="page set-page" id="p5"><div class="page-head"><h1>Настройки</h1><div class="actions"><span class="folder-btn">Папка результатов</span></div></div><section class="set-sec"><div class="section-head"><h2 class="section-title">Внешний вид</h2></div><div class="set-group"><div class="set-row"><div class="set-left"><span class="set-icon"></span><div class="set-text"><div class="set-title">Тема оформления</div></div></div><div class="seg"><button class="on">Тёмная</button><button>Светлая</button></div></div></div></div></section></div></div>
-        <div class="results-toolbar" id="toolbar"><div class="split-act" id="split"><button class="act-secondary" id="ex">Экспорт…</button><button class="act-secondary caret" id="fmt">▾</button><div class="mini-menu" id="menu"><button>JSON</button><button>CSV</button></div></div></div>
+        <div class="results-toolbar" id="toolbar"><div class="split-act" id="split"><button class="act-secondary" id="ex">Экспорт…</button><button class="act-secondary caret" id="fmt">▾</button></div></div>
         <div class="filter-tabs pb-pill-host" id="tabs"><button class="ftab active" id="tab">Все</button><button class="ftab" id="tab2">Скрининг</button></div>
       </div>
     </main>
   </div>
 </div>
+<!-- Меню экспорта — портал в body, ровно как в приложении (FloatingMenu).
+     Раньше стенд держал его ВНУТРИ .split-act, и с position:absolute это
+     работало. В приложении .page.fill{overflow:hidden} такое меню обрезал,
+     а поднять слой сквозь overflow предка невозможно в принципе. Значит, стенд
+     обязан строить тот же DOM, который поставляется, — иначе проверяется не
+     приложение, а его прежняя вёрстка. -->
+<div class="mini-menu" id="menu" style="position:fixed;left:900px;top:120px"><button>JSON</button><button>CSV</button></div>
 <script>
 // Положение заголовка каждого экрана относительно верхнего отступа .main
 // и одинаковые метрики самого заголовка: вес и межбуквенный интервал
 // раньше различались (700 / −0.3 px против 650 / −0.2 px).
 window.measureLayers = () => {
-  // У каждого, кто обязан перекрывать что-то, должен быть СОБСТВЕННЫЙ контекст
-  // наложения. Без isolation:isolate (или z-index не auto) его z-index
-  // считается в корневом контексте и конкурирует со всем приложением: любой
-  // позиционированный элемент, идущий позже в DOM, перекрывал его вместо
-  // того, чтобы быть перекрытым.
+  // В контексте наложения нужны элементы, ВНУТРИ которых живёт слой, который
+  // обязан перекрывать соседей по странице. Без isolation: isolate (или
+  // z-index не uto) такой слой оказывался под кнопкой в DOM, то есть под
+  // ЛИСТОМ, а не над ним.
+  //
+  // .split-act из списка убран: он требовался, пока меню экспорта лежало
+  // ВНУТРИ кнопки. Теперь оно вынесено порталом в ody, собственного
+  // контекста наложения не имеет — и не должно: поднимать его над модалкой и
+  // тостами нельзя. Порядок слоёв проверяется ниже явно.
   const need = [
     [".pb-pill-host", "группа вкладок"],
     [".modal-overlay", "оверлей модалки"],
-    [".split-act", "кнопка экспорта с меню"],
   ];
   const bad = [];
   for (const [sel, name] of need) {
@@ -189,10 +199,31 @@ window.measureOverlap = () => {
   if (mr.left < mainBox.left - 1 || mr.right > mainBox.right + 1) {
     bad.push("меню формата вылезло за границу рабочей области");
   }
-  for (let el = menu.parentElement; el && el !== main; el = el.parentElement) {
+  // Обрезка проверяется ТОЛЬКО по предкам до containing block'а меню. Для
+  // position:fixed containing block — окно, поэтому overflow:hidden у предков
+  // (в том числе у body) меню не режет: резать его может лишь предок, который
+  // сам стал containing block'ом из-за transform, filter, will-change:
+  // transform, perspective или contain.
+  // Раньше здесь безусловно шёл обход всех предков до .main, и меню в портале
+  // попадало в ложное срабатывание на body{overflow:hidden}.
+  const makesContainingBlock = (el) => {
     const cs = getComputedStyle(el);
-    const clips = cs.overflow !== "visible" || cs.overflowY !== "visible" || cs.overflowX !== "visible";
-    if (clips && el.id !== "split") bad.push("меню формата обрезает предок ." + (el.className || el.id || el.tagName));
+    return (
+      (cs.transform !== "none" && cs.transform !== "") ||
+      (cs.filter !== "none" && cs.filter !== "") ||
+      (cs.perspective !== "none" && cs.perspective !== "") ||
+      /transform/.test(cs.willChange || "") ||
+      /layout|paint|strict|content/.test(cs.contain || "")
+    );
+  };
+  // Обход до самого верха, ВКЛЮЧАЯ body: если body сам стал containing block
+  // (например, из-за transform на корне), то именно его overflow и режет меню.
+  for (let el = menu.parentElement; el && el.nodeType === 1; el = el.parentElement) {
+    if (makesContainingBlock(el)) {
+      const cs = getComputedStyle(el);
+      const clips = cs.overflow !== "visible" || cs.overflowY !== "visible" || cs.overflowX !== "visible";
+      if (clips) bad.push("меню обрезано ." + (el.className || el.id || el.tagName) + " — этот предок стал containing block");
+    }
   }
 
   // Пилюля вкладок: лежит под своей кнопкой, а не поверх неё, и не выходит за

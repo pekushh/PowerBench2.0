@@ -392,6 +392,10 @@ export const commands = {
   acPowerOnline: () => invoke<boolean>("ac_power_online"),
   schemeAction: (action: string, guid?: string | null, path?: string | null) =>
     invoke<string | null>("scheme_action", { action, guid: guid ?? null, path: path ?? null }),
+  /// Применить схему и убедиться, что ОС её приняла (с перечитыванием активной
+  /// и повтором при отказе). `schemeAction("activate")` этого не делает, поэтому
+  /// для «применить победителя» — только этот вызов.
+  applyScheme: (guid: string) => invoke<void>("apply_scheme", { guid }),
   getSettings: () => invoke<SettingsDto>("get_settings"),
   setSettings: (settings: SettingsDto) => invoke<void>("set_settings", { settings }),
   checkpointStatus: () => invoke<CheckpointDto | null>("checkpoint_status"),

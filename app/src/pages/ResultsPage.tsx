@@ -11,7 +11,7 @@ import {
   type HistoryRow,
   type SessionJson,
 } from "../api";
-import { Badge, FadeScroll, Modal } from "../components/ui";
+import { Badge, FadeScroll, FloatingMenu, Modal } from "../components/ui";
 import {
   ChevronIcon,
   ExportIcon,
@@ -150,21 +150,9 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
   // в шапку по макету, но убирать выбор формата нельзя.
   const [fmtOpen, setFmtOpen] = useState(false);
   const fmtRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!fmtOpen) return;
-    const away = (e: PointerEvent) => {
-      if (!fmtRef.current?.contains(e.target as Node)) setFmtOpen(false);
-    };
-    const esc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setFmtOpen(false);
-    };
-    document.addEventListener("pointerdown", away);
-    document.addEventListener("keydown", esc);
-    return () => {
-      document.removeEventListener("pointerdown", away);
-      document.removeEventListener("keydown", esc);
-    };
-  }, [fmtOpen]);
+  // Закрытие по клику вне и по Escape живёт в `FloatingMenu`: после переноса в
+  // портал клик по самому меню не всплывает до кнопки, и прежняя проверка
+  // «цель внутри fmtRef?» сочла бы его кликом мимо и закрыла меню сразу.
   // Состояние для крошки в шапке: «2 сессии · лидер Icyy's Powerplan».
   useEffect(() => {
     const leader = rows.find((r) => r.readable && r.throughput != null && r.throughput > 0);
@@ -477,30 +465,38 @@ export default function ResultsPage({ active = true }: { active?: boolean }) {
               >
                 <ChevronIcon />
               </button>
-              {fmtOpen ? (
-                <div className="mini-menu" role="menu">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setFmtOpen(false);
-                      void exportAll("json");
-                    }}
-                  >
-                    JSON
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setFmtOpen(false);
-                      void exportAll("csv");
-                    }}
-                  >
-                    CSV
-                  </button>
-                </div>
-              ) : null}
+              {/* Регресс: меню было вложено в `.split-act` и обрезалось
+                  `overflow: hidden` страницы — список уезжал под панель
+                  фильтров, и часть пунктов не была видна. Поднять `z-index`
+                  не помогало: у `.split-act` свой контекст наложения
+                  (`isolation: isolate`). Теперь меню в портале `body`. */}
+              <FloatingMenu
+                open={fmtOpen}
+                anchor={fmtRef}
+                onClose={() => setFmtOpen(false)}
+                className="mini-menu"
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setFmtOpen(false);
+                    void exportAll("json");
+                  }}
+                >
+                  JSON
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setFmtOpen(false);
+                    void exportAll("csv");
+                  }}
+                >
+                  CSV
+                </button>
+              </FloatingMenu>
             </div>
             <button
               type="button"

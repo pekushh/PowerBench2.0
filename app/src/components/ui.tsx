@@ -1,7 +1,152 @@
 // Базовые элементы интерфейса (восстановлены из дизайна приложения).
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
+import { createPortal } from "react-dom";
 import { usePill } from "./usePill";
+
+/**
+ * Позиционирование меню, вынесенного порталом в `document.body`.
+ *
+ * Зачем портал, а не `position: absolute` рядом с кнопкой:
+ *
+ *  — у страницы `.page.fill{overflow:hidden}`, и это держит раскладку (на нём
+ *    стоит `check:adaptive`). Меню внутри страницы обрезается этим `overflow`:
+ *    на «Результатах» выпадающий список форматов экспорта уезжал под панель
+ *    фильтров, и половины пунктов не было видно;
+ *  — `z-index` не помогает: у `.split-act` есть `isolation: isolate`, то есть
+ *    собственный контекст наложения, и `z-index` меню остаётся внутри него.
+ *    Поднять слой выше `--z-modal` сквозь `overflow: hidden` предка невозможно
+ *    в принципе;
+ *  — в портале предком меню становится `body`, где нет ни `transform`, ни
+ *    `contain`, а значит нет и containing block, перехватывающего
+ *    позиционирование. Тот же приём уже применён к подсказке (`Tooltip.tsx`),
+ *    и по той же причине.
+ *
+ * Позиция считается в координатах окна (`position: fixed`) и пересчитывается на
+ * прокрутке (в фазе захвата — прокручиваются вложенные области) и на изменении
+ * размера окна. Если внизу места не хватает, меню раскрывается вверх; по
+ * горизонтали прижимается к краям окна. До первого расчёта меню невидимо, но
+ * уже в потоке — иначе оно мелькнуло бы в левом верхнем углу окна.
+ *
+ * Возвращает `style` для портированного узла меню.
+ */
+export function useFloatingMenu(
+  open: boolean,
+  anchor: React.RefObject<HTMLElement | null>,
+  menu: React.RefObject<HTMLElement | null>,
+  onClose: () => void,
+) {
+  const [style, setStyle] = useState<CSSProperties | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setStyle(null);
+      return;
+    }
+    const GAP = 6;
+    const EDGE = 8;
+    const place = () => {
+      const a = anchor.current;
+      const m = menu.current;
+      if (!a || !m) return;
+      const r = a.getBoundingClientRect();
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const w = m.offsetWidth;
+      const h = m.offsetHeight;
+
+      const roomBelow = vh - r.bottom;
+      // Раскрываемся вниз, пока там есть место; вверх — только если вниз не
+      // помещается, а вверх помещается.
+      const below = roomBelow >= h + GAP + EDGE || roomBelow >= r.top;
+      let top = below ? r.bottom + GAP : r.top - h - GAP;
+      if (top + h > vh - EDGE) top = vh - EDGE - h;
+      if (top < EDGE) top = EDGE;
+
+      let left = r.left;
+      if (left + w > vw - EDGE) left = vw - EDGE - w;
+      if (left < EDGE) left = EDGE;
+
+      setStyle({ position: "fixed", top, left });
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, anchor, menu]);
+
+  // Закрытие по клику вне и по Escape. Подписка на документ, а не на кнопку:
+  // меню в портале, и клик по нему не всплывает до кнопки.
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (!anchor.current?.contains(t) && !menu.current?.contains(t)) onClose();
+    };
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("pointerdown", away);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("pointerdown", away);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open, anchor, menu, onClose]);
+
+  return style;
+}
+
+/**
+ * Меню в портале `document.body`.
+ *
+ * `className` переносится на портированный узел, поэтому вид (фон, скругление,
+ * тень) задаётся теми же правилами, что и раньше, а `z-index` берётся из
+ * шкалы слоёв и теперь действительно работает: в портале нет контекста
+ * наложения, который его бы ограничил.
+ */
+export function FloatingMenu({
+  open,
+  anchor,
+  onClose,
+  className,
+  role = "menu",
+  children,
+}: {
+  open: boolean;
+  anchor: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+  className: string;
+  role?: string;
+  children: ReactNode;
+}) {
+  const menu = useRef<HTMLDivElement | null>(null);
+  const style = useFloatingMenu(open, anchor, menu, onClose);
+  if (!open) return null;
+  return createPortal(
+    <div
+      className={className}
+      role={role}
+      ref={menu}
+      style={style ?? { position: "fixed", top: 0, left: 0, visibility: "hidden" }}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
+
 
 /**
  * Ref на прокручиваемый контейнер + признаки «есть что прокрутить» сверху и

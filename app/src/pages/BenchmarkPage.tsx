@@ -207,6 +207,12 @@ export default function BenchmarkPage({ active = true }: { active?: boolean }) {
   const [stopping, setStopping] = useState(false);
   const [finished, setFinished] = useState(false);
   const [finishMsg, setFinishMsg] = useState("");
+  // Победитель сессии: GUID и имя. Раньше бэкенд присылал `recommended_scheme`,
+  // а интерфейс его выбрасывал, оставляя только имя для текста баннера — из-за
+  // чего активировать победителя было нечем: нужен именно GUID.
+  const [leader, setLeader] = useState<{ guid: string; name: string } | null>(null);
+  const [applyingLeader, setApplyingLeader] = useState(false);
+  const [leaderActive, setLeaderActive] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [quarantine, setQuarantine] = useState<QuarantineEntry[]>([]);
@@ -423,6 +429,15 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
       setStopping(false);
       setTelemetry(null);
       setFinished(true);
+      // Победитель нужен для кнопки применения схемы. На ошибочной сессии
+      // рекомендации нет — тогда кнопку не показываем вовсе, потому что
+      // «применить лидера» без лидера бессмысленно.
+      setLeader(
+        m.recommended_scheme
+          ? { guid: m.recommended_scheme, name: m.recommended_name || m.recommended_scheme }
+          : null,
+      );
+      setLeaderActive(false);
       commands
         .checkpointStatus()
         .then((cp) => setCheckpoint(cp))
@@ -550,6 +565,12 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
       setFinishMsg("");
       t0.current = 0;
       setElapsed(0);
+      // Новый замер — новый прогресс: без сброса кольцо начало бы с максимума
+      // прошлой сессии, и монотонность превратилась бы в залипание на 100 %.
+      sessionProgressMax.current = 0;
+      phaseCursor.current = -1;
+      setLeader(null);
+      setLeaderActive(false);
       commands
         .startTest({
           // Отправляем выведенный `activePreset`, а не последний нажатый ключ:
@@ -595,6 +616,27 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
     [selected, preset, duration, warmup, cooling, reps, settings, quarantine],
   );
 
+  // Включить схему-победителя в Windows.
+  //
+  // Идёт через `apply_scheme`, а не через `scheme_action("activate")`: в
+  // проекте есть `apply_and_verify` — единственная точка применения схемы, —
+  // которая после `SetActive` перечитывает активную и повторяет попытку при
+  // отказе. Прямой `activate` этого не делает, то есть кнопка могла бы
+  // сообщить об успехе, оставив схему невыключенной.
+  const applyLeader = useCallback(async () => {
+    if (!leader) return;
+    setApplyingLeader(true);
+    try {
+      await commands.applyScheme(leader.guid);
+      setLeaderActive(true);
+      pushToast("okk", `Схема «${leader.name}» успешно активирована в Windows`);
+    } catch (e) {
+      pushToast("err", `Не удалось активировать схему «${leader.name}»: ${String(e)}`);
+    } finally {
+      setApplyingLeader(false);
+    }
+  }, [leader]);
+
   const stop = () => {
     setStopping(true);
     commands
@@ -633,16 +675,45 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
   // оно снова и снова возвращалось к нулю: выглядело, будто замер начинается
   // заново. `run_index` измеряет прогоны по всем схемам (`run_total` =
   // схемы × повторы), поэтому общий процент = выполненные прогоны плюс
-  // текущая фаза.
+  // место текущего прогона.
+  //
+  // МЕСТО ВНУТРИ ПРОГОНА — это (номер фазы + её доля) / число фаз, а не просто
+  // доля текущей фазы. Со второй формулой прогресс на границе фаз проваливался
+  // назад: в конце «Тяжёлой» было 38 %, а первые сообщения «Отклика» приходили
+  // с долей фазы около нуля, и кольцо показывало 7 % — то есть ПОТЕРЯЛО ровно
+  // один прогон (1/run_total) на каждой из трёх внутренних границ фазы. Считать
+  // надо по пройденным фазам, иначе фаза внутри прогона стоила целый прогон.
+  //
+  // Поверх этого percent не уменьшается НИКОГДА (см. `sessionProgressMax`):
+  // телеметрия приходит событиями, и кратковременный пропуск или перескок
+  // индекса не должны крутить кольцо назад.
+  const phaseCursor = useRef(-1);
+  const sessionProgressMax = useRef(0);
   const sessionProgress = useMemo(() => {
     const total = telemetry?.run_total;
     const idx = telemetry?.run_index;
-    if (telemetry == null || total == null || total <= 0 || idx == null) return 0;
-    const frac = phaseProgress / 100;
-    const done = Math.max(0, idx - 1 + frac);
+    const phases = phasePlan.length;
+    if (telemetry == null || total == null || total <= 0 || idx == null || phases <= 0) return 0;
+
+    // Номер текущей фазы. Имена совпадают с планом: и то, и другое приходит из
+    // `phase_label(Phase)`.
+    let ord = phaseIndex(phasePlan, telemetry.phase);
+    // Между фазами (разогрев, охлаждение, сброс) телеметрия не приходит вовсе,
+    // поэтому номер не «пропадает» — но если подпись не найдена, берём последнюю
+    // известную фазу, а не ноль: иначе прогресс скачет назад.
+    if (ord < 0) ord = phaseCursor.current;
+    if (ord < 0) ord = 0;
+    if (ord > phaseCursor.current) phaseCursor.current = ord;
+
+    const frac = Math.min(1, Math.max(0, phaseProgress / 100));
+    const within = phases > 0 ? (ord + frac) / phases : 0;
+    const done = Math.max(0, idx - 1) + within;
     const p = (done / total) * 100;
-    return Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : 0;
-  }, [telemetry, phaseProgress]);
+    const clamped = Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : 0;
+    // Монотонность: кольцо показывает уже достигнутый максимум.
+    if (clamped > sessionProgressMax.current) sessionProgressMax.current = clamped;
+    return sessionProgressMax.current;
+  }, [telemetry, phaseProgress, phasePlan]);
 
   const next = () => go(stage === "mode" ? "schemes" : "run", "fwd");
   const back = () => go(stage === "run" ? "schemes" : "mode", "back");
@@ -1255,10 +1326,18 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                   </div>
                   <div className="ph-grid">
                     {phasePlan.map((p, i) => {
-                      const active = telemetry?.phase === p.name;
-                      const done =
-                        telemetry != null &&
-                        phaseIndex(phasePlan, telemetry.phase) > i;
+                      // Регресс: полоса «Отклик» прыгала с 100 % на 0 % на
+                      // каждой границе прогонов. `done` смотрел только на
+                      // номер фазы В ТЕКУЩЕМ прогоне, а новый прогон начинался с
+                      // «Лёгкой», то есть последняя фаза предыдущего прогона
+                      // мгновенно становилась «непройденной». На сессии в 96
+                      // прогонов это 96 визуальных откатов.
+                      // Пройденной фаза считается либо если перед ней уже была
+                      // фаза этого прогона, либо если это не первый прогон:
+                      // тогда все четыре фазы позади по определению.
+                      const active = telemetry != null && telemetry.phase === p.name;
+                      const passedPriorRun = telemetry != null && telemetry.run_index > 1;
+                      const done = passedPriorRun || phaseCursor.current > i;
                       const pct = active ? phaseProgress : done ? 100 : 0;
                       return (
                         <div
@@ -1422,11 +1501,34 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                     </span>
                   </div>
                 ) : null}
-                {finished ? (
+{finished ? (
                   <div className="warn-banner ok-banner">
                     <span>
-                      <b>Тест завершён.</b> {finishMsg || "сессия завершена — можно начать новую"}
+                      <b>Тест завершён.</b> {finishMsg || "сессия завершилась — можно начать новую"}
                     </span>
+                    {/* Прямое действие по итогу замера. Раньше на финише был
+                        только текст: победитель назывался, и чтобы включить
+                        его схему, нужно было идти в «Схемы питания» и искать
+                        её вручную. Здесь — одна кнопка рядом с именем. */}
+                    {leader ? (
+                      <button
+                        type="button"
+                        className="btn-apply-leader"
+                        disabled={applyingLeader || leaderActive}
+                        title={
+                          leaderActive
+                            ? `Схема «${leader.name}» уже активна в Windows`
+                            : `Включить схему «${leader.name}» в Windows`
+                        }
+                        onClick={() => void applyLeader()}
+                      >
+                        {leaderActive
+                          ? "✓ Схема уже активна"
+                          : applyingLeader
+                            ? "Применяем…"
+                            : "Применить лучшую схему"}
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
 

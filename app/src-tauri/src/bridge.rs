@@ -203,6 +203,25 @@ pub fn scheme_action(
     }
 }
 
+/// Применить схему питания и **убедиться**, что ОС её приняла.
+///
+/// Отдельная команда, а не ветка в `scheme_action`, потому что
+/// `scheme_action("activate")` вызывает `powercfg::activate` напрямую: команда
+/// может вернуть успех, а схема останется прежней (отказ SetActive, политика
+/// или запрет OEM-агента). Кнопка «Применить лучшую схему» на финише замера
+/// сообщала бы об успехе, оставив пользователя со старой схемой.
+///
+/// Здесь используется `session::apply_and_verify` — та же точка применения,
+/// которой пользуется сама сессия при старте и восстановлении: попытка, затем
+/// перечитывание активной схемы и повтор при отказе.
+#[tauri::command(async)]
+pub fn apply_scheme(guid: String) -> Result<(), String> {
+    powerbench_orchestrator::session::apply_and_verify(
+        &powerbench_orchestrator::session::RealSchemeDriver,
+        &guid,
+    )
+}
+
 /// Плоский DTO настроек для интерфейса (этап 7).
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SettingsDto {

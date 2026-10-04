@@ -11,7 +11,8 @@ use crate::bridge::{
     checkpoint_status, diagnostics_file_name, estimate_session, get_settings, history_delete,
     history_export_to, history_list, history_open, history_open_folder, history_report,
     identity_info, is_admin, list_schemes, log_flush, log_history, open_file, open_folder,
-    phase_plan, quarantine_clear, quarantine_list, results_dir, save_diagnostics, scheme_action,
+    apply_scheme, phase_plan, quarantine_clear, quarantine_list, results_dir, save_diagnostics,
+    scheme_action,
     session_report, set_settings, start_test, stop_test, storage_stats, system_ready, test_presets,
     test_running,
 };
@@ -149,6 +150,7 @@ fn main() {
             list_schemes,
             is_admin,
             ac_power_online,
+            apply_scheme,
             scheme_action,
             get_settings,
             set_settings,

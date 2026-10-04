@@ -1,4 +1,4 @@
-﻿@font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-cyrillic-ext.woff2) format("woff2-variations");unicode-range:U+0460-052F,U+1C80-1C88,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
+@font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-cyrillic-ext.woff2) format("woff2-variations");unicode-range:U+0460-052F,U+1C80-1C88,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-cyrillic.woff2) format("woff2-variations");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-latin-ext.woff2) format("woff2-variations");unicode-range:U+0100-02AF,U+0304,U+0308,U+0329,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-latin.woff2) format("woff2-variations");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
@@ -1046,15 +1046,16 @@ html.bench-running .modal{
 /* Кнопка экспорта с выбором формата: основная часть отдаёт JSON, стрелка
    раскрывает CSV. Раньше формат выбирался отдельным выпадающим списком, и он
    не помещался в шапку по макету. */
-/* `isolation: isolate` — у кнопки с меню должен быть свой контекст наложения.
-   Без него `z-index` меню (40) считался в корневом контексте и конкурировал со
-   всем приложением: оверлей модалки (70) и тосты (80) оказывались «под» меню,
-   и меню перерисовывалось поверх них. */
-.split-act{position:relative;display:inline-flex;isolation:isolate}
+/* isolation: isolate на группе кнопки была нужна, пока меню лежало ВНУТРИ
+   кнопки: еe z-index и так ограничивался бы собственным контекстом наложения
+   и не дотянул бы до тостов на уровне страницы. Сейчас меню вынесено порталом
+   в <body> (см. FloatingMenu), поэтому isolation только мешает и убрана:
+   именно она делала z-index меню бессмысленным. */
+.split-act{position:relative;display:inline-flex}
 .split-act>.act-secondary:first-child{border-top-right-radius:0;border-bottom-right-radius:0}
 .split-act .caret{padding:7px 7px;margin-left:-1px;border-top-left-radius:0;border-bottom-left-radius:0}
 .split-act .caret svg{width:12px;height:12px}
-.mini-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:var(--z-menu);min-width:104px;background:var(--bg-1);border:1px solid var(--line-2);border-radius:9px;padding:4px;box-shadow:var(--shadow-modal)}
+.mini-menu{position:fixed;z-index:var(--z-menu);min-width:104px;background:var(--bg-1);border:1px solid var(--line-2);border-radius:9px;padding:4px;box-shadow:var(--shadow-modal)}
 .mini-menu button{display:block;width:100%;text-align:left;padding:6px 9px;border:0;border-radius:6px;background:transparent;color:var(--fg-dim);font:inherit;font-size:var(--fs-sm);cursor:pointer}
 .mini-menu button:hover{background:var(--bg-2);color:var(--fg)}
 /* ===== Правки по «Результатам»: шапка, тулбар, бейджи, кнопка удаления ===== */
@@ -1473,9 +1474,17 @@ tr.is-leader .score-bar i{background:var(--ok)}
 /* Кольцо прогресса сессии. Раньше у него было три конкурирующих определения
    (`--line-2`/7px/.18s в одном месте, `--bg-2`/6px/.4s в другом и `620ms` в
    третьем) — выигрывало последнее по порядку, а первые два были мёртвым
-   кодом. Осталось одно. */
+   кодом. Осталось одно.
+
+   Длительность перехода подобрана под телеметрию: события идут 10 раз в
+   секунду, то есть новое значение приходит каждые 100 мс. Переход короче
+   этого интервала (например 60 мс) не успевал бы завершиться между
+   обновлениями и кольцо дёргалось бы ступенями; заметно длиннее (0,8 с и
+   больше) — постоянно отставал бы от цифры, которая уже успела измениться.
+   300 мс — как раз около трёх тиков: за это время анимация идёт ровно и без
+   рывков, а цифра под кольцом не убегает далеко от дуги. */
 .ring-bg{fill:none;stroke:var(--bg-2);stroke-width:6}
-.ring-fg{fill:none;stroke:var(--ok);stroke-width:6;stroke-linecap:round;transition:stroke-dashoffset var(--t-3) var(--e-out),stroke var(--t-3) var(--e-out)}
+.ring-fg{fill:none;stroke:var(--ok);stroke-width:6;stroke-linecap:round;transition:stroke-dashoffset .3s ease-out,stroke .3s ease-out}
 .ring-text{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.1}
 .ring-text b{font-size:14.5px;font-variant-numeric:tabular-nums}
 .ring-text small{font-size:10px;color:var(--fg-mute);margin-top:2px}
@@ -1509,7 +1518,22 @@ tr.is-leader .score-bar i{background:var(--ok)}
 .phi-bar i{display:block;height:100%;background:var(--accent);border-radius:999px}
 .ph-item.done .phi-bar i{background:var(--ok)}
 .warn-banner{background:var(--warnbg);border:1px solid var(--warnline);border-radius:11px;padding:10px 14px;font-size:12.5px;color:var(--fg-dim);display:flex;align-items:center;gap:10px}
+/* Баннер может нести текст и действие, поэтому переносится, а кнопка прижата
+   к правому краю. На узком окне кнопка встаёт на вторую строку во всю ширину
+   — иначе она сжималась бы до трёх слов подряд. */
+.warn-banner{flex-wrap:wrap}
+.warn-banner>span{min-width:0;flex:1 1 240px}
 .warn-banner b{color:var(--warn)}
+/* Применить победителя. Акцентная, но не главная: главное действие экрана —
+   запуск нового замера, и «применить схему» не должно выглядеть как запуск. */
+.btn-apply-leader{margin-left:auto;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:9px;border:1px solid var(--okline);background:var(--okbg);color:var(--ok);font:inherit;font-size:var(--fs-sm);font-weight:600;cursor:pointer;white-space:nowrap;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),opacity var(--dur-fast) var(--ease)}
+.btn-apply-leader:hover:not(:disabled){background:color-mix(in srgb,var(--okbg) 70%,var(--ok) 12%);border-color:var(--ok)}
+.btn-apply-leader:disabled{cursor:default;opacity:.7}
+.btn-apply-leader:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+@media (max-width:620px){
+/* На узком окне действие перестаёт быть «хвостом» баннера и занимает строку. */
+.btn-apply-leader{margin-left:0;width:100%;justify-content:center}
+}
 
 @media (max-width:860px){
 /* Раньше здесь были свои горизонтальные отступы у `.benchmark-view`: на узком
@@ -1638,8 +1662,15 @@ button:active,.ic-btn:active,.mini-ic:active,.act-pill:active{transform:scale(.9
    после расчёта сессии шкала ползла ещё секунду после того, как всё остальное
    уже встало на место. Теперь тот же `--t-3`, что и у остальных элементов.
    Правило одно на все полосы: раньше у каждой был свой переход, а общий
-   перебивал их по порядку, и половина объявлений была мёртвой. */
-.phi-bar i,.score-bar i,.progress>i{transition:width var(--t-3) var(--e-out),transform var(--t-3) var(--e-out),background-color var(--t-3) var(--e-out)}
+   перебивал их по порядку, и половина объявлений была мёртвой.
+
+   Ширина полосы идёт по `linear` и по 200 мс — в отличие от кольца. Разница в
+   том, что у полосы «цель» линейно: каждую фазу заполняет равномерно
+   текущая фаза, поэтому сглаживание (ease-out) искажало бы видимую скорость —
+   шкала сначала догоняла бы, потом visлась, и глаз сравнивал бы не ход, а
+   кривую. 200 мс при интервале телеметрии 100 мс — два тика: полоса доходит
+   до нового значения между обновлениями и не дёргается. */
+.phi-bar i,.score-bar i,.progress>i{transition:width .2s linear,transform var(--t-3) var(--e-out),background-color var(--t-3) var(--e-out)}
 
 
 
@@ -1669,7 +1700,7 @@ button:active,.ic-btn:active,.mini-ic:active,.act-pill:active{transform:scale(.9
        мгновенно (width = раскладка). Переход кольца идёт по общему правилу
        выше: `!important` с отдельной длительностью больше не нужен — он
        перебивал всё остальное. */
-html.bench-running .ring-fg{animation:pb-ring-glow 2.4s var(--e-in-out) infinite;transition:stroke-dashoffset var(--t-3) var(--e-out)!important}
+html.bench-running .ring-fg{animation:pb-ring-glow 2.4s var(--e-in-out) infinite;transition:stroke-dashoffset .3s ease-out!important,stroke .3s ease-out!important}
 
 /* --- Три выключателя --- */
 html[data-motion="off"] *,
@@ -1964,3 +1995,4 @@ html[data-motion="off"] *::after{
 /* Модалка на всю ширину окна. */
 .modal{width:100%;max-height:88vh}
 }
+

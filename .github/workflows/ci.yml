@@ -162,9 +162,24 @@ jobs:
       # Подпись кода не настроена (сертификата нет), поэтому Windows будет
       # ругаться SmartScreen на установщик — см. раздел «Установка» в README.
       # Отпечаток прикладываем, чтобы пользователь мог сверить файл.
+      # Сначала хеши считаются целиком и только потом пишется сам файл сумм.
+      # Наоборот нельзя: `SHA256SUMS.txt` лежит в том же каталоге, который
+      # перебирается, и `Out-File` успевает открыть его на запись ДО того, как
+      # до него дойдёт `Get-FileHash` — тот падает с «The process cannot access
+      # the file ... because it is being used by another process».
+      # Кодировка — обычный `utf8`: в PowerShell 7 (именно он используется в
+      # `shell: pwsh`) это UTF-8 БЕЗ BOM, а BOM сломал бы первый хеш для
+      # `sha256sum -c`. Явный `utf8NoBOM` не годится — этого значения нет в
+      # Windows PowerShell 5.1, и шаг падал бы там с ошибкой параметра.
       - name: Checksums
         shell: pwsh
-        run: Get-ChildItem release-files | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } | Out-File release-files/SHA256SUMS.txt -Encoding utf8
+        run: |
+          $files = Get-ChildItem release-files -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' }
+          if (-not $files) { throw "нет файлов для контрольных сумм" }
+          $lines = $files | Get-FileHash -Algorithm SHA256 |
+                   ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path -Leaf $_.Path)" }
+          $lines | Out-File release-files/SHA256SUMS.txt -Encoding utf8
+          Get-Content release-files/SHA256SUMS.txt
 
       # Файлы идут на страницу Releases, а не в артефакты Actions: артефакты
       # живут 30 дней и требуют аккаунта GitHub, а релиз должны быть видно с

@@ -236,7 +236,14 @@ jobs:
 
   docs:
     name: Build Documentation
-    runs-on: ubuntu-latest
+    # Именно windows-latest, а не ubuntu-latest. На Linux крейт
+    # `powerbench-windows` не собирается: `windows_sys` и `std::os::windows`
+    # используются не только под `cfg(windows)`, и cargo падает с
+    # «cannot find module or crate `windows_sys`». Это не пропущенная
+    # зависимость — проект Windows-only, и остальные задания уже работают на
+    # Windows-раннере. Переносить документацию на Linux можно будет вместе с
+    # полным `cfg`-покрытием крейта, но не раньше.
+    runs-on: windows-latest
     needs: check
     steps:
       - name: Checkout
@@ -251,14 +258,7 @@ jobs:
           workdir: .
 
       - name: Build docs
-        # Крейт `powerbench-app` исключён: это тонкая Tauri-обёртка, и на
-        # ubuntu-latest её сборка требует системных библиотек GTK (`glib-2.0` и
-        # далее по цепочке webkit2gtk), которых на образе нет. Задание падало с
-        # «The system library `glib-2.0` required by crate `glib-sys` was not
-        # found» — то есть документация не собиралась вообще. Документировать
-        # обёртку нечего: она не содержит логики, всё интересное живёт в
-        # крейтах ниже, и они документируются на Windows-раннере в job `check`.
-        run: cargo doc --workspace --exclude powerbench-app --no-deps --document-private-items
+        run: cargo doc --workspace --no-deps --document-private-items
 
       - name: Upload docs
         uses: actions/upload-artifact@v4

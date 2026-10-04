@@ -15,7 +15,7 @@ use crate::session::{BACKGROUND_MEASURE_MS, BACKGROUND_RETRY_PAUSE_MS, BACKGROUN
 /// строится вовсе, поэтому режим честно называется скринингом: он годен, чтобы
 /// отсеять явно слабые схемы, но не для выбора победителя.
 ///
-/// 30 секунд на четыре фазы (7/6/8/9) — минимум, при котором у каждой фазы
+/// 30 секунд на четыре фазы (8/6/8/8) — минимум, при котором у каждой фазы
 /// набирается выборка для перцентилей.
 pub const QUICK_PRESET: Preset = Preset {
     duration_seconds: 30,
@@ -56,7 +56,7 @@ pub struct Preset {
 /// Параметры сценария сессии.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionConfig {
-    /// Длительность измеряемой части (сумма трёх фаз). Минимум 9 с.
+    /// Длительность измеряемой части (сумма четырёх фаз). Минимум 16 с.
     pub duration_seconds: u64,
     /// Разогрев профилем «Отклик». Минимум 2 с.
     pub warmup_seconds: u64,
@@ -66,6 +66,19 @@ pub struct SessionConfig {
     pub repetitions: u32,
     /// Порог фоновой нагрузки в % на ядро (по умолчанию 5.0; 0.5..=100).
     pub background_threshold_percent: f64,
+    /// Замер разрешено начать при загруженной фоне («продолжить с риском»).
+    ///
+    /// Кнопка в интерфейсе была всегда, но флаг не доходил до плана: кнопка
+    /// лишь прятала себя, а гейт в `run_session` по-прежнему пропускал все
+    /// прогоны. Теперь выбор доходит до гейта и означает ровно одно — не
+    /// откладывать прогон из-за фона. Остальные причины остановки (нет
+    /// админа, нет сети, потеря схемы, watchdog) флаг не отменяет: скомпрометированный
+    /// замер нельзя отличить от хорошего, и «с риском» их не лечит.
+    ///
+    /// `serde(default)` — старые чекпоинты и результаты без поля читаются как
+    /// «риск не принимали», то есть как раньше: без отложенного прогона.
+    #[serde(default)]
+    pub accept_dirty_background: bool,
     /// Число воркеров пула (None — значение по умолчанию движка).
     pub worker_count: Option<usize>,
     /// Идентификаторы выбранных схем (GUID), в порядке предпочтения пользователя.
@@ -451,6 +464,7 @@ mod tests {
             cooling_seconds: preset.cooling_seconds,
             repetitions: preset.repetitions,
             background_threshold_percent: threshold,
+            accept_dirty_background: false,
             worker_count: None,
             scheme_ids: vec!["a".to_string()],
             plan_guid: "plan-1".to_string(),
@@ -462,6 +476,130 @@ mod tests {
     fn default_preset_is_detailed() {
         assert_eq!(DETAILED_PRESET.repetitions, 5);
         assert_eq!(DETAILED_PRESET.duration_seconds, 60);
+    }
+
+    /// Регресс M38: таблица пресетов в README обязана совпадать с кодом.
+    ///
+    /// README обещал `quick` = 9 с / 2 с / 1 с / 1 раунд и `detailed` =
+    /// 30 с / 6 с / 5 с / 3 раунда, а в коде было 30/3/3/1 и 60/8/5/5. Человек,
+    /// планирующий время сессии по README, получал замер втрое короче
+    /// обещанного — а «детальный» пресет с тремя раундами на практике не
+    /// позволял адаптивной остановке сработать, то есть обещанной экономии не
+    /// происходило. Никакой проверки связи документации с кодом не было, и
+    /// расхождение жило годами.
+    ///
+    /// Читаем таблицу README и сверяем каждое число с константами: правка
+    /// пресета без правки README (или наоборот) теперь ломает сборку тестов.
+    #[test]
+    fn readme_preset_table_matches_the_code() {
+        let readme = include_str!("../../README.md");
+        let row = |preset: &str| -> String {
+            readme
+                .lines()
+                .find(|l| l.starts_with(&format!("| `{preset}` |")))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "в README нет строки таблицы пресетов для `{preset}` — \
+                         таблица разъехалась с кодом"
+                    )
+                })
+                .to_string()
+        };
+
+        for (name, preset) in [("quick", QUICK_PRESET), ("detailed", DETAILED_PRESET)] {
+            let line = row(name);
+            for (label, value) in [
+                ("длительность", preset.duration_seconds),
+                ("разогрев", preset.warmup_seconds),
+                ("охлаждение", preset.cooling_seconds),
+                ("раундов", u64::from(preset.repetitions)),
+            ] {
+                // В таблице длительности пишутся с единицей измерения, а число
+                // раундов — само по себе.
+                let wanted = if label == "раундов" {
+                    value.to_string()
+                } else {
+                    format!("{value} с")
+                };
+                assert!(
+                    line.contains(&wanted),
+                    "в README пресет `{name}`: {label} = {value}, а в таблице \
+                     строка «{line}». Правь README или константу пресета."
+                );
+            }
+        }
+    }
+
+    /// Регресс M38: README не должен обещать несуществующие флаги.
+    ///
+    /// В репозитории лежал `bench.example.toml` с ключами `duration_seconds`,
+    /// `export_raw_samples`, `out_path` и флагом `--config` — CLI не читал ни
+    /// одного из них и никогда не имел `--config`. Пользователь правил файл и
+    /// ничего не получал.
+    #[test]
+    fn documentation_does_not_promise_unsupported_options() {
+        let readme = include_str!("../../README.md");
+        let example = include_str!("../../bench.example.toml");
+
+// `--config` не существует ни в CLI, ни в справочнике флагов. Ищем именно
+        // ветку разбора (`"--config" =>`), а не любое упоминание: иначе тест
+        // находил бы сам себя — он тоже пишет про этот флаг.
+let cli_src = include_str!("../../cli/src/main.rs");
+        let bench_src = include_str!("../../cli/src/bench.rs");
+        assert!(
+            !bench_src.contains("\"--config\" =>") && !cli_src.contains("\"--config\" =>"),
+            "появился флаг --config — тогда его надо описать, а не отрицать"
+        );
+        for (name, text, comment_prefix) in [
+            ("README.md", readme, ">"),
+            ("bench.example.toml", example, "#"),
+        ] {
+            // `--config` может упоминаться в ПРОЗЕ («раньше был флаг, теперь
+            // его нет») — это полезно и честно. Запрещено другое: строка, которая
+            // читается как инструкция выполнить команду с этим флагом.
+            for (i, line) in text.lines().enumerate() {
+                let is_prose = line.trim_start().starts_with(comment_prefix);
+                if !is_prose && line.contains("--config") {
+                    panic!(
+                        "{name}:{i}: строка предлагает `--config`, которого нет \
+                         в CLI:\n  {line}"
+                    );
+                }
+            }
+        }
+
+        // Ключи, которых CLI не читает, не должны выглядеть как рабочие.
+        for key in ["export_raw_samples", "out_path"] {
+            assert!(
+                !example.contains(&format!("{key} =")),
+                "bench.example.toml снова предлагает ключ `{key}`, которого \
+                 программа не читает"
+            );
+        }
+    }
+
+    /// Чекпоинт, записанный до появления флага, должен читаться как «риск не
+    /// принимали». Без `serde(default)` продолжение старой сессии падало бы с
+    /// ошибкой десериализации — то есть отменялось само продолжение.
+    #[test]
+    fn plan_without_risk_flag_loads_as_no_risk() {
+        let mut json = serde_json::to_value(cfg(QUICK_PRESET, 5.0)).expect("в json");
+        json.as_object_mut()
+            .expect("объект")
+            .remove("accept_dirty_background");
+        let back: SessionConfig = serde_json::from_value(json).expect("читается без поля");
+        assert!(!back.accept_dirty_background);
+    }
+
+    /// Обратное направление: согласие на риск не должно теряться при записи
+    /// чекпоинта — иначе `resume` продолжил бы сессию уже с включённым гейтом.
+    #[test]
+    fn risk_consent_survives_checkpoint_round_trip() {
+        let mut plan = cfg(QUICK_PRESET, 5.0);
+        plan.accept_dirty_background = true;
+        let back: SessionConfig =
+            serde_json::from_str(&serde_json::to_string(&plan).expect("в json")).expect("из json");
+        assert!(back.accept_dirty_background);
     }
 
     #[test]
@@ -589,8 +727,11 @@ mod tests {
                 response_seconds: 10
             }
         );
-        // Ни одна фаза не короче 4 с и сумма равна total (для total ≥ 9,
-        // иначе значение поднимается до минимума).
+        // Ни одна фаза не короче 4 с и сумма равна total (для total ≥
+        // MIN_DURATION_SECONDS, иначе значение поднимается до минимума).
+        // Значения ниже минимума — обязательная часть проверки: раньше здесь
+        // стояло «total ≥ 9», то есть остатки модели трёх фаз по 3 с, которых в
+        // коде нет уже давно (четыре фазы, минимум 16 с).
         for total in [0u64, 1, 9, 15, 16, 20, 30, 45, 60, 120] {
             let d = phase_durations(total);
             let sum = d.light_seconds + d.partial_seconds + d.heavy_seconds + d.response_seconds;

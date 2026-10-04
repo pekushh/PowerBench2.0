@@ -300,6 +300,12 @@ export interface TestRequestDto {
   cooling_seconds: number | null;
   repetitions: number | null;
   background_threshold_percent: number | null;
+  /**
+   * Пользователь согласился на замер при загруженной фоне («продолжить с
+   * риском»). Без этого флага кнопка прятала себя, но гейт в бэкенде всё
+   * равно пропускал все прогоны.
+   */
+  accept_dirty_background: boolean;
   worker_count: number | null;
   scheme_ids: string[];
   resume: boolean;

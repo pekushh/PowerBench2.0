@@ -2,22 +2,17 @@
 
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { CrossIcon, MenuIcon, MinusIcon, MotionIcon, SquaresIcon, SquareIcon } from "./icons";
+import { CpuIcon, CrossIcon, MenuIcon, MinusIcon, SquaresIcon, SquareIcon } from "./icons";
 
 export default function TitleBar({
   collapsed,
   onToggleCollapse,
-  motionOff,
-  onToggleMotion,
   status,
   hardware,
   hardwareFull,
 }: {
   collapsed: boolean;
   onToggleCollapse: () => void;
-  /** Моторика выключена ручным выбором (гасится системный — отдельно). */
-  motionOff: boolean;
-  onToggleMotion: () => void;
   /** Состояние приложения для крошки: «Идёт замер · раунд 2», «111 схем»,
    *  «5000 записей». Название раздела в шапке не дублируется — оно уже
    *  написано крупно под ней. */
@@ -81,8 +76,7 @@ export default function TitleBar({
     >
       <div className="titlebar-brand" data-tauri-drag-region>
         {/* Переключатель меню — слева, рядом со знаком: так он стоит в
-            VS Code и Figma, и на него смотрят по умолчанию. */}
-        <button
+            VS Code и Figma, и на него смотрят по умолчанию. */}        <button
           type="button"
           className={`titlebar-btn menu${collapsed ? " off" : ""}`}
           title={collapsed ? "Развернуть меню (Ctrl+B)" : "Свернуть меню (Ctrl+B)"}
@@ -92,18 +86,12 @@ export default function TitleBar({
         >
           <MenuIcon />
         </button>
-        {/* Знак приложения: плитка с молнией вместо серого кружка, который
-            ничего не сообщал. */}
-        <span className="mark">
-          <MotionIcon width={12} height={12} />
-        </span>
+        {/* Знака приложения нет: молния рядом с названием читалась как
+            отдельная кнопка «Анимации» — тем более, что такой переключатель
+            в шапке действительно был и стоял справа. Пустая плитка после
+            удаления знака сообщала бы ничего. */}
         <span>PowerBench</span>
       </div>
-      {statusShown ? (
-        <span className="split" />
-      ) : null}
-      {/* В шапке — состояние, а не название раздела: название уже написано
-          крупно под шапкой, а полезно то, чего на экране нет. */}
       {statusShown ? (
         <span
           className="titlebar-section is-in"
@@ -118,23 +106,16 @@ export default function TitleBar({
             при узком окне он прячется первым. */}
         {hardware ? (
           <span className="titlebar-chip trunc" data-prio="1" title={hardwareFull ?? hardware}>
-            {hardware}
+            <CpuIcon width={14} height={14} />
+            <span>{hardware}</span>
           </span>
         ) : null}
       </div>
       <div className="titlebar-controls">
-        {/* Кнопка с подписью: одна иконка без подписи читалась как
-            «питание / энергосбережение». */}
-        <button
-          type="button"
-          className={`titlebar-toggle${motionOff ? " off" : ""}`}
-          data-prio="2"
-          onClick={onToggleMotion}
-        >
-          <MotionIcon width={12} height={12} />
-          Анимации
-        </button>
-        {/* Кнопки окна — своим блоком за разделителем. */}
+        {/* Кнопки окна — своим блоком. Переключатель «Анимации» отсюда
+            убран: в шапке он стоял рядом с иконкой молнии у названия, и обе
+            читались как одно и то же действие. Переключатель остался в
+            «Настройках», где он в одном списке с остальными. */}
         <span className="window-group">
           <button
             type="button"

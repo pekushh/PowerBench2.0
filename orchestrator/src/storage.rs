@@ -62,6 +62,9 @@ pub fn lock_file(path: &Path) -> MutexGuard<'static, ()> {
 /// `update` получает текущее содержимое (пустой вектор, если файла нет или он
 /// не читается) и возвращает новое. Запись атомарная, повторов при гонке нет:
 /// гонка исключена блокировкой.
+///
+/// ВНИМАНИЕ: «не читается» здесь означает и повреждение. Для файлов с
+/// пользовательскими данными это недопустимо — см. [`update_file_checked`].
 pub fn update_file<F>(path: &Path, update: F) -> io::Result<()>
 where
     F: FnOnce(&[u8]) -> Vec<u8>,
@@ -70,6 +73,59 @@ where
     let current = std::fs::read(path).unwrap_or_default();
     let next = update(&current);
     atomic_write(path, &next)
+}
+
+/// То же, но `update` может **отказать**, и файл при этом не перезаписывается.
+///
+/// Регресс H39. Пользовательские файлы (`powerbench-quarantine.json`,
+/// `appsettings.json`) — это накопленная история решений. Если такой файл
+/// оказался усечённым или побитым, старая схема обработки молча превращала его
+/// в пустой список, а первая же следующая запись перезаписывала файл с нуля:
+/// все прежние записи исчезали безвозвратно и без единого сообщения.
+///
+/// Здесь отказ доходит до вызывающего: файл остаётся как есть, а команда
+/// сообщает пользователю, что повреждено, и куда смотреть.
+pub fn update_file_checked<F>(path: &Path, update: F) -> io::Result<()>
+where
+    F: FnOnce(&[u8]) -> io::Result<Vec<u8>>,
+{
+    let _guard = lock_file(path);
+    // Отличаем «файла нет» (это не повреждение) от «прочитали, но это мусор».
+    let current = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!("не удалось прочитать {}: {e}", path.display()),
+            ));
+        }
+    };
+    // Пустой (нулевой длины) файл после сбоя записи — это не повреждение:
+    // содержать нечего, и запись дефолтов безопасна.
+    let next = update(&current)?;
+    atomic_write(path, &next)
+}
+
+/// Разобрать содержимое пользовательского файла, не превращая повреждение в
+/// пустоту.
+///
+/// Возвращает `Ok(None)`, только если файла нет или он пуст. Любая ошибка
+/// разбора — это `Err` с диагнозом: терять содержимое молча нельзя.
+pub fn parse_user_file<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    path: &Path,
+) -> Result<Option<T>, String> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    serde_json::from_slice(bytes).map(Some).map_err(|e| {
+        format!(
+            "{} повреждён и не читается ({e}); файл оставлен как есть — сохраните \
+             его для разбора и удалите, чтобы начать заново",
+            path.display()
+        )
+    })
 }
 
 /// Атомарная запись: полная запись во временный файл + переименование.
@@ -236,6 +292,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Регресс H39: повреждённый пользовательский файл обязан остановить
+    /// запись, а не быть молча заменённым дефолтами.
+    ///
+    /// Старая схема («прочитал как пустой список → добавил запись →
+    /// перезаписал») стирала всю прежнюю историю карантина или настроек
+    /// безвозвратно и без единого сообщения.
+    #[test]
+    fn a_corrupt_file_is_never_overwritten() {
+        let dir = tmp_dir("corrupt");
+        let path = dir.join("user.json");
+        let broken = b"{ \"entries\": [ { \"scheme_id\": ";
+        std::fs::write(&path, broken).unwrap();
+
+        let result: io::Result<()> = update_file_checked(&path, |cur| {
+            // Ровно то, что делают карантин и настройки: разбор → правка →
+            // сериализация. Ошибка разбора обязана остановить всю запись.
+            let mut entries: Vec<String> = parse_user_file(cur, &path)
+                .map_err(|m| io::Error::new(io::ErrorKind::InvalidData, m))?
+                .unwrap_or_default();
+            entries.push("new".to_string());
+            serde_json::to_vec(&entries).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        });
+        let err = result.expect_err("повреждённый файл обязан остановить запись");
+        let text = err.to_string();
+        assert!(
+            text.contains("повреждён"),
+            "в ошибке нет диагноза, по которому пользователь что-то поймёт: {text}"
+        );
+        // Файл остался байт в байт — его ещё можно разобрать вручную.
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            broken,
+            "повреждённый файл изменён: данные пользователя уничтожены"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Целый файл обновляется как обычно, а отсутствующий — создаётся.
+    #[test]
+    fn checked_update_still_works_on_good_files() {
+        let dir = tmp_dir("checked-ok");
+        let path = dir.join("user.json");
+
+        // Файла нет — это не повреждение, запись идёт.
+        update_file_checked(&path, |_| Ok(b"[]".to_vec())).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"[]");
+
+        // Файл целый — читается и дополняется.
+        update_file_checked(&path, |cur| {
+            let mut s: String = String::from_utf8(cur.to_vec()).unwrap();
+            s.push('1');
+            Ok(s.into_bytes())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"[]1");
+
+        // Пустой файл после сбоя записи — не повреждение: содержать нечего.
+        std::fs::write(&path, b"   ").unwrap();
+        update_file_checked(&path, |_| Ok(b"ok".to_vec())).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// «Нет файла» и «файл повреждён» — разные вещи, и обе отличимы от «пусто».
+    #[test]
+    fn parse_user_file_distinguishes_absence_from_corruption() {
+        let path = Path::new("user.json");
+        assert!(matches!(
+            parse_user_file::<Vec<i32>>(b"   \n", path),
+            Ok(None)
+        ));
+        let v = parse_user_file::<Vec<i32>>(b"[1,2,3]", path).unwrap();
+        assert_eq!(v, Some(vec![1, 2, 3]));
+        let err = parse_user_file::<Vec<i32>>(b"[1,2", path)
+            .expect_err("битый JSON обязан быть ошибкой, а не пустым списком");
+        assert!(err.contains("повреждён"), "{err}");
+        assert!(err.contains("удалите"), "нужно сказать, что делать: {err}");
     }
 
     #[test]

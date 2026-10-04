@@ -521,7 +521,11 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
 
   /** Схемы к бенчмарку: исключённые и карантинные не выбираются по умолчанию. */
   const start = useCallback(
-    (resume: boolean) => {
+    // `risk` передаётся аргументом, а не берётся из состояния: кнопка «продолжить
+    // с риском» вызывает `setRiskAccepted(true)` и `start()` в одном обработчике,
+    // поэтому замыкание видело бы прежнее `false` — флаг ушёл бы в бэкенд
+    // выключенным, и гейт по фону снова пропустил бы все прогоны.
+    (resume: boolean, risk = false) => {
       const chosen = [...selected];
       if (!resume && chosen.length === 0) {
         pushToast("err", "выберите хотя бы одну схему питания");
@@ -558,6 +562,10 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
           cooling_seconds: resume ? null : cooling,
           repetitions: resume ? null : reps,
           background_threshold_percent: resume ? null : backgroundThreshold,
+          // Выбор «продолжить с риском» обязан дойти до плана: иначе кнопка лишь
+          // прятала себя, а гейт по фону пропускал все прогоны. При `resume`
+          // план берётся из чекпоинта, где флаг уже сохранён.
+          accept_dirty_background: risk,
           worker_count: null,
           scheme_ids: resume ? [] : chosen,
           // Активная схема идёт эталоном: по её прогонам оценивается дрейф
@@ -911,10 +919,14 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                     </>
                   ) : null}
                   {selected.size > 0 ? (
+                    /* Оценку времени здесь не повторяем: на этом же шаге
+                       справа, крупно, стоит «Расчётное время сессии» с тем же
+                       числом. Дважды одно и то же — на «1 ч 20 мин» читалось
+                       как два разных обещания, и мелкий серый текст над
+                       блоком параметров только отвлекал. */
                     <>
                       {selected.size}{" "}
                       {plural(selected.size, "схема", "схемы", "схем")}
-                      {estimate !== "—" ? ` · оценочно ${estimate}` : ""}
                     </>
                   ) : (
                     <>Схемы не выбраны — выберите их на следующем шаге</>
@@ -1234,8 +1246,11 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                   <div className="ph-head">
                     <h2 className="ph-title">Фазы замера (по {duration} с на прогон)</h2>
                     <span className="ph-eta">
-                      Прошло <b>{fmtDuration(elapsed)}</b> · осталось примерно{" "}
-                      <b>{running ? remainingEstimate : "—"}</b>
+                      {/* Остаток времени НЕ дублируем: он же стоит крупным
+                         числом в кольце прогресса справа. Здесь оставлено
+                         только «прошло» — его в кольце нет, и без него
+                         строка в шапке фаз была бы вовсе пустой. */}
+                      Прошло <b>{fmtDuration(elapsed)}</b>
                     </span>
                   </div>
                   <div className="ph-grid">
@@ -1446,7 +1461,7 @@ const readinessBlocksStart = !!readiness && !readiness.ok && !running;
                           disabled={starting || selected.size === 0 || readinessBlocksStart}
                           onClick={() => {
                             setRiskAccepted(true);
-                            start(false);
+                            start(false, true);
                           }}
                         >
                           Продолжить с риском

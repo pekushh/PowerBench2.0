@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -29,8 +29,26 @@ const MAX_ENTRIES: usize = 5000;
 /// Как часто фоновый писатель переносит буфер на диск.
 const FLUSH_INTERVAL_MS: u64 = 1_000;
 
-/// Сколько ждать `flush`, если писатель завис (диск недоступен и т. п.).
-const FLUSH_TIMEOUT_MS: u64 = 5_000;
+/// Шаг ожидания в `flush`: как часто проверять, что запись дошла.
+const FLUSH_POLL_MS: u64 = 250;
+
+/// Суммарный потолок ожидания в `flush`.
+///
+/// `flush` зовут при выходе из приложения и перед сбором отчёта для поддержки,
+/// то есть ровно там, где зависание недопустимо. Раньше цикл ожидания был
+/// бесконечным: пока `persist()` падал (нет прав на `%LOCALAPPDATA%`, файл
+/// держит антивирус), `flush()` не возвращался и приложение не закрывалось.
+/// Потерять хвост журнала на диске лучше, чем не закрыться вовсе: данные
+/// остаются в памяти и попадают в отчёт.
+const FLUSH_BUDGET_MS: u64 = 5_000;
+
+/// Сколько неудачных записей подряд терпит писатель, прежде чем остановиться.
+///
+/// Журнал — вспомогательная задача, и отказ диска не лечится ожиданием.
+/// Счётчик ограничивает цикл: без него писатель крутился бы вечно, `Drop`
+/// не проходил бы через `join()`, и приложение зависало бы на закрытии.
+/// Данные при этом не теряются молча — они остаются в памяти (`snapshot`).
+const WRITE_GIVE_UP_AFTER: u32 = 3;
 
 /// Одна запись журнала.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,6 +80,10 @@ struct Shared {
     flushed: Condvar,
     /// Писатель завершён.
     stop: AtomicBool,
+    /// Писатель окончательно отказался писать на диск. Смысла ждать
+    /// подтверждения больше нет: `flush` возвращается сразу, и вызывающий
+    /// поток не тратит время на синхронную запись, которая тоже не пройдёт.
+    give_up: AtomicBool,
 }
 
 /// Потокобезопасный журнал с дисковым резервом и фоновой записью.
@@ -88,6 +110,7 @@ impl Logger {
             wake: Condvar::new(),
             flushed: Condvar::new(),
             stop: AtomicBool::new(false),
+            give_up: AtomicBool::new(false),
         });
         // Ёмкость 1: важен свежий хвост, а не очередь «всё и сразу».
         // Переполнение ничего не теряет — писатель забирает весь буфер целиком.
@@ -135,8 +158,14 @@ impl Logger {
                 Ok(()) => self.shared.wake.notify_one(),
                 // Канал полон — сигнал уже в очереди, второй ничего не изменит.
                 Err(TrySendError::Full(_)) => {}
-                // Писатель завершён: пишем напрямую, лучше так, чем потерять.
                 Err(TrySendError::Disconnected(_)) => {
+                    // Писатель уже отказался писать: повторять запись на
+                    // потоке вызывающего бессмысленно (она тоже не пройдёт),
+                    // а вот заблокировать `append` может. Данные остаются в
+                    // буфере и уходят в отчёт для поддержки.
+                    if self.shared.give_up.load(Ordering::Acquire) {
+                        return;
+                    }
                     let path = data_dir().join(LOG_FILE_NAME);
                     let g = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                     let _ = persist(&g.entries, &path);
@@ -155,16 +184,51 @@ impl Logger {
             .clone()
     }
 
+    /// Записи лежат на диске? `false` — значит писатель не смог и сдался.
+    ///
+    /// `flush` ничего не возвращает, и это молчание было половиной проблемы:
+    /// вызывающий (выход из приложения, отчёт для поддержки) ждал вечно и не
+    /// знал, что данные уже не появятся на диске.
+    pub fn is_persisted(&self) -> bool {
+        !self.shared.give_up.load(Ordering::Acquire)
+    }
+
+    /// Видно ли пользователю, что журнал не записан на диск.
+    ///
+    /// Запись молча терять нельзя: журнал — это то, что пользователь приложит
+    /// к обращению в поддержку. `true` — потери были и об этом сказано.
+    pub fn warn_if_not_persisted(&self, level: &str) {
+        if !self.is_persisted() {
+            self.append(
+                level,
+                "журнал не сохранён на диск: запись в файл журнала отказывает. \
+                 Диагностику всё равно можно сохранить — она берётся из памяти",
+            );
+        }
+    }
+
     /// Дождаться, пока буфер окажется на диске.
+    ///
+    /// Ждёт не больше [`FLUSH_BUDGET_MS`] и выходит сразу, если писатель
+    /// отказался писать. Прежде цикл был бесконечным, и при отказе диска
+    /// (`persist()` падает стабильно) приложение зависало на закрытии и на
+    /// запросе диагностики.
     pub fn flush(&self) {
         let target = self.shared.appended.load(Ordering::Acquire);
         self.signal();
+        if self.shared.give_up.load(Ordering::Acquire) {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_millis(FLUSH_BUDGET_MS);
         let mut g = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         while self.shared.written.load(Ordering::Acquire) < target {
+            if self.shared.give_up.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return;
+            }
             let (next, _) = self
                 .shared
                 .flushed
-                .wait_timeout(g, Duration::from_millis(FLUSH_TIMEOUT_MS))
+                .wait_timeout(g, Duration::from_millis(FLUSH_POLL_MS))
                 .unwrap_or_else(|e| e.into_inner());
             g = next;
         }
@@ -179,11 +243,16 @@ impl Default for Logger {
 
 impl Drop for Logger {
     /// Финальный сброс: без него последние записи остались бы только в памяти.
+    ///
+    /// `Drop` не имеет права блокировать: его ждут при выходе из приложения.
+    /// Поэтому сигнал отправляется через `try_send` — при полном канале
+    /// ничего терять не надо, писатель и так проснётся по `stop`, а при
+    /// завершившемся писателе отправка вернёт ошибку мгновенно.
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);
         self.shared.wake.notify_one();
         if let Some(tx) = self.tx.take() {
-            let _ = tx.send(());
+            let _ = tx.try_send(());
         }
         if let Some(h) = self.writer.take() {
             let _ = h.join();
@@ -193,11 +262,20 @@ impl Drop for Logger {
 
 /// Фоновый писатель: просыпается по сигналу или по таймауту, переносит весь
 /// буфер на диск и отмечает, сколько записей уже сохранено.
+///
+/// Цикл ограничен по двум независимым причинам, иначе отказ диска вешал бы
+/// приложение навсегда:
+/// * `WRITE_GIVE_UP_AFTER` неудачных записей подряд — писатель сдаётся и
+///   выходит, `Drop::join()` проходит;
+/// * на выходе (`stop`) дописывается последняя порция, но не бесконечно:
+///   пока флаг не снят, попытки исчерпаются тем же счётчиком.
 fn writer_loop(shared: &Arc<Shared>, rx: &Receiver<()>, path: &Path) {
+    let mut fails: u32 = 0;
     loop {
         // Ждём сигнала, но не дольше интервала: иначе последняя строка перед
-        // выходом ждала бы следующего события.
-        {
+        // выходом ждала бы следующего события. После `stop` ждать нечего —
+        // буфер надо дописать и завершиться.
+        if !shared.stop.load(Ordering::Acquire) {
             let g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
             let _ = shared
                 .wake
@@ -207,18 +285,41 @@ fn writer_loop(shared: &Arc<Shared>, rx: &Receiver<()>, path: &Path) {
         // Дренируем канал: один сигнал покрывает всё, что накопилось.
         while rx.try_recv().is_ok() {}
 
+        let mut saved_ok = true;
         let saved = {
             let g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if persist(&g.entries, path).is_ok() {
-                shared.appended.load(Ordering::Acquire)
-            } else {
-                // Не сохранилось — не отмечаем, иначе данные считались бы
-                // записанными. Следующий круг попробует снова.
-                shared.written.load(Ordering::Acquire)
+            match persist(&g.entries, path) {
+                Ok(()) => {
+                    fails = 0;
+                    shared.appended.load(Ordering::Acquire)
+                }
+                Err(_) => {
+                    saved_ok = false;
+                    // Не сохранилось — не отмечаем, иначе данные считались бы
+                    // записанными. Следующий круг попробует снова.
+                    shared.written.load(Ordering::Acquire)
+                }
             }
         };
         shared.written.store(saved, Ordering::Release);
         shared.flushed.notify_all();
+
+        if !saved_ok {
+            fails += 1;
+            if fails >= WRITE_GIVE_UP_AFTER {
+                // Отказ диска ожиданием не лечится: дальше только вечный цикл.
+                // Помечаем сдачу (чтобы `flush` и `append` не тратили время) и
+                // завершаем поток — иначе `Drop::join()` не пройдёт.
+                shared.give_up.store(true, Ordering::Release);
+                eprintln!(
+                    "PowerBench: не удалось записать журнал в {} ({WRITE_GIVE_UP_AFTER} попытки \
+                     подряд) — запись на диск прекращена, журнал остаётся только в памяти \
+                     и попадёт в отчёт для поддержки",
+                    path.display()
+                );
+                break;
+            }
+        }
 
         if shared.stop.load(Ordering::Acquire) {
             // На выходе пишем ещё раз: между последним `append` и `stop`
@@ -227,6 +328,10 @@ fn writer_loop(shared: &Arc<Shared>, rx: &Receiver<()>, path: &Path) {
             if shared.written.load(Ordering::Acquire) >= target {
                 break;
             }
+            // Пауза между попытками на выходе: иначе при продолжающихся
+            // `append` цикл крутился бы вхолостую. Попытки всё равно
+            // ограничены счётчиком `fails`, так что выход не зависнет.
+            std::thread::sleep(Duration::from_millis(FLUSH_POLL_MS));
         }
     }
 }
@@ -372,6 +477,101 @@ mod tests {
         let second = Logger::in_file(path.clone());
         assert_eq!(second.snapshot().len(), 1);
         assert_eq!(second.snapshot()[0].text, "из прошлого запуска");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Путь, на котором запись невозможна при любых условиях.
+    ///
+    /// Каталог подменён обычным файлом, поэтому `create_dir_all` внутри
+    /// `persist` всегда отказывает — ровно ситуация «нет прав на
+    /// `%LOCALAPPDATA%`» или «файл держит антивирус», только без зависимости
+    /// от прав и чужих процессов.
+    fn unwritable_path(tag: &str) -> PathBuf {
+        let dir = temp_path(tag);
+        let blocker = dir.with_extension("blocker");
+        std::fs::remove_dir_all(&dir).unwrap_or(());
+        std::fs::write(&blocker, "это файл, а не каталог").unwrap();
+        blocker.join(LOG_FILE_NAME)
+    }
+
+    /// Регресс C5: постоянно падающая запись больше не вешает приложение.
+    ///
+    /// Раньше `flush()` и цикл писателя крутились бесконечно, пока `persist()`
+    /// падал: приложение не закрывалось (висел `Drop::join()`), а запрос
+    /// диагностики не отвечал. Теперь и `flush`, и выход ограничены по времени.
+    #[test]
+    fn a_permanently_failing_write_does_not_hang_the_logger() {
+        let path = unwritable_path("blocked");
+        let log = Logger::in_file(path.clone());
+        log.append("info", "запись, которая не дойдёт до диска");
+
+        // `flush` обязан уложиться в бюджет и не ждать подтверждения, которого
+        // не будет никогда.
+        let t0 = Instant::now();
+        log.flush();
+        let flush_took = t0.elapsed();
+        assert!(
+            flush_took < Duration::from_millis(FLUSH_BUDGET_MS + 2_000),
+            "flush() не уложился в бюджет: {flush_took:?}"
+        );
+
+        // Данные не теряются молча: они в памяти и честно помечены как
+        // не дошедшие до диска.
+        assert_eq!(log.snapshot().len(), 1);
+        let t1 = Instant::now();
+        drop(log);
+        let drop_took = t1.elapsed();
+        assert!(
+            drop_took
+                < Duration::from_millis(
+                    FLUSH_BUDGET_MS + (WRITE_GIVE_UP_AFTER as u64 + 1) * FLUSH_INTERVAL_MS + 2_000
+                ),
+            "Drop завис на join(): {drop_took:?}"
+        );
+    }
+
+    /// Писатель сдаётся после ограниченного числа попыток, а не живёт вечно:
+    /// иначе `Drop::join()` не проходит. Проверяем и сам факт сдачи, и то,
+    /// что она честно отражена в `is_persisted`.
+    #[test]
+    fn the_writer_gives_up_instead_of_retrying_forever() {
+        let path = unwritable_path("giveup");
+        let log = Logger::in_file(path);
+        log.append("info", "одна");
+        // Ждём сдачи: писатель обязан исчерпать попытки и завершиться.
+        let deadline = Instant::now()
+            + Duration::from_millis(FLUSH_BUDGET_MS + (WRITE_GIVE_UP_AFTER as u64 + 1) * FLUSH_INTERVAL_MS + 2_000);
+        while log.is_persisted() && Instant::now() < deadline {
+            log.append("info", "подталкиваем писателя");
+            std::thread::sleep(Duration::from_millis(FLUSH_POLL_MS));
+        }
+        assert!(
+            !log.is_persisted(),
+            "писатель не сдался после {WRITE_GIVE_UP_AFTER} неудачных попыток"
+        );
+        // `flush` после сдачи обязан выходить мгновенно, а не ждать.
+        let t0 = Instant::now();
+        log.flush();
+        assert!(
+            t0.elapsed() < Duration::from_millis(FLUSH_POLL_MS * 4),
+            "flush() после сдачи писателя всё ещё ждёт: {:?}",
+            t0.elapsed()
+        );
+        drop(log);
+    }
+
+    /// Обычный случай не сломать: успешная запись по-прежнему гарантируется,
+    /// и `is_persisted` не срабатывает ложно.
+    #[test]
+    fn a_healthy_log_never_reports_persistence_failure() {
+        let path = temp_path("healthy");
+        let log = Logger::in_file(path.clone());
+        for i in 0..20 {
+            log.append("info", &format!("строка {i}"));
+        }
+        log.flush();
+        assert!(log.is_persisted(), "здоровый журнал не должен сдаваться");
+        assert_eq!(read_log(&path).len(), 20);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

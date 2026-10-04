@@ -172,9 +172,30 @@ fn now_ns() -> u64 {
         .unwrap_or(0)
 }
 
-/// Загрузить карантин; отсутствующий/битый файл — пустой список, без паники.
+/// Прочитать карантин, различая «нет файла» и «файл повреждён».
+///
+/// Регресс H39: раньше повреждённый файл разбирался как пустой список, и первая
+/// же следующая запись перезаписывала его с нуля — вся прежняя история браковки
+/// исчезала безвозвратно и без единого сообщения. Теперь такой файл виден
+/// вызывающему, и запись в него запрещена (см. [`quarantine_add`]).
+pub fn load_quarantine_checked() -> Result<Vec<QuarantineEntry>, String> {
+    let path = quarantine_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("не удалось прочитать карантин: {e}")),
+    };
+    crate::storage::parse_user_file(&bytes, &path).map(|opt| opt.unwrap_or_default())
+}
+
+/// Загрузить карантин; битый файл — пустой список, без паники.
+///
+/// Для мест, где карантин — вспомогательные данные (префлайт плана, отчёт).
+/// Отказ от продолжения там хуже, чем работа без карантина: сказать
+/// пользователю про повреждение обязан вызывающий, через
+/// [`load_quarantine_checked`].
 pub fn load_quarantine() -> Vec<QuarantineEntry> {
-    crate::storage::read_json(&quarantine_path()).unwrap_or_default()
+    load_quarantine_checked().unwrap_or_default()
 }
 
 /// Схема в карантине? Сравнение по GUID, регистронезависимое.
@@ -208,19 +229,34 @@ pub fn quarantine_add(
         plan_guid: plan_guid.to_string(),
     };
     let mut added = false;
-    crate::storage::update_file(&path, |cur| {
-        let mut entries: Vec<QuarantineEntry> = serde_json::from_slice(cur).unwrap_or_default();
+    // `update_file_checked`, а не `update_file`: повреждённый файл обязан
+    // остановить запись, а не быть молча заменённым пустым списком (регресс
+    // H39 — иначе все прежние записи карантина стирались безвозвратно).
+    crate::storage::update_file_checked(&path, |cur| {
+        let mut entries = parse_entries(cur, &path)?;
         if entries
             .iter()
             .any(|e| e.scheme_id.eq_ignore_ascii_case(&scheme_id))
         {
-            return serde_json::to_vec_pretty(&entries).unwrap_or_default();
+            return serde_json::to_vec_pretty(&entries).map_err(json_to_io);
         }
         entries.push(entry.clone());
         added = true;
-        serde_json::to_vec_pretty(&entries).unwrap_or_default()
+        serde_json::to_vec_pretty(&entries).map_err(json_to_io)
     })?;
     Ok(added)
+}
+
+/// Разобрать содержимое файла карантина; пустой файл — пустой список.
+fn parse_entries(bytes: &[u8], path: &std::path::Path) -> io::Result<Vec<QuarantineEntry>> {
+    crate::storage::parse_user_file::<Vec<QuarantineEntry>>(bytes, path)
+        .map(|opt| opt.unwrap_or_default())
+        .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))
+}
+
+/// Ошибка сериализации как `io::Error` (общий для всех мест записи JSON).
+fn json_to_io(e: serde_json::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, e)
 }
 
 /// Убрать схему из карантина (возврат пользователем). `true` — была запись.
@@ -228,12 +264,13 @@ pub fn quarantine_remove(scheme_id: &str) -> io::Result<bool> {
     let path = quarantine_path();
     let scheme_id = scheme_id.to_string();
     let mut removed = false;
-    crate::storage::update_file(&path, |cur| {
-        let mut entries: Vec<QuarantineEntry> = serde_json::from_slice(cur).unwrap_or_default();
+    // Как и в `quarantine_add`: повреждённый файл не перезаписывается.
+    crate::storage::update_file_checked(&path, |cur| {
+        let mut entries = parse_entries(cur, &path)?;
         let before = entries.len();
         entries.retain(|e| !e.scheme_id.eq_ignore_ascii_case(&scheme_id));
         removed = entries.len() != before;
-        serde_json::to_vec_pretty(&entries).unwrap_or_default()
+        serde_json::to_vec_pretty(&entries).map_err(json_to_io)
     })?;
     Ok(removed)
 }
@@ -368,6 +405,178 @@ pub fn catastrophic_share(median: f64, best_median: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Регресс H39: разбор карантина обязан отличать «нет файла» и «файл
+    /// повреждён».
+    #[test]
+    fn quarantine_parsing_separates_absence_from_corruption() {
+        let dir = std::env::temp_dir().join("powerbench-quarantine-parse");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(QUARANTINE_FILE_NAME);
+
+        // Отсутствующий файл — это «карантина нет», а не ошибка.
+        assert!(parse_entries(b"", &path).unwrap().is_empty());
+        assert!(parse_entries(b"  \n ", &path).unwrap().is_empty());
+
+        // Целый файл читается.
+        let good = serde_json::to_vec(&vec![QuarantineEntry {
+            scheme_id: "s1".to_string(),
+            scheme_name: None,
+            kind: QuarantineKind::Degraded,
+            reason: "причина".to_string(),
+            at_ns: 1,
+            plan_guid: "p".to_string(),
+        }])
+        .unwrap();
+        assert_eq!(parse_entries(&good, &path).unwrap().len(), 1);
+
+        // Усечённый — ошибка, а не пустой список.
+        let err = parse_entries(b"[{\"scheme_id\": \"s1\"", &path)
+            .expect_err("битый карантин обязан быть ошибкой");
+        assert!(
+            err.to_string().contains("повреждён"),
+            "нет диагноза: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Регресс H39: запись в карантин идёт через проверяемый путь, и повреждённый
+    /// файл ею не перезаписывается.
+    ///
+    /// Иначе первая же новая браковка стирала бы всю прежнюю историю молча.
+    #[test]
+    fn quarantine_writes_go_through_the_checked_path() {
+        let src = include_str!("quarantine.rs");
+        for (fn_name, next) in [
+            ("pub fn quarantine_add(", "/// Разобрать содержимое файла карантина"),
+            ("pub fn quarantine_remove(", "/// Записать маркер активного прогона"),
+        ] {
+            let start = src
+                .find(fn_name)
+                .unwrap_or_else(|| panic!("не найдена {fn_name}"));
+            let body = &src[start..];
+            let end = body
+                .find(next)
+                .unwrap_or_else(|| panic!("не найден конец {fn_name}"));
+            let body = &body[..end];
+            assert!(
+                body.contains("update_file_checked"),
+                "{fn_name} перезаписывает повреждённый файл дефолтами: нужна \
+                 update_file_checked"
+            );
+            assert!(
+                !body.contains("serde_json::from_slice(cur).unwrap_or_default()"),
+                "{fn_name} читает повреждённый файл как пустой список"
+            );
+        }
+    }
+
+    /// Регресс H39: сообщение о повреждённом файле обязано дойти до пользователя.
+    ///
+    /// Повреждённый `quarantine.json` разбирается как пустой список, и запись в
+    /// него запрещена — это правильно. Но если об этом никто не скажет,
+    /// пользователь увидит «все схемы разрешены» и не поймёт, почему ранее
+    /// заблокированная схема снова попала в замер. Поэтому `run_session`
+    /// обязан один раз за сессию сообщить о повреждении.
+    #[test]
+    fn a_corrupted_quarantine_is_reported_to_the_user() {
+        let src = include_str!("session.rs");
+        let start = src
+            .find("let quarantine = match crate::quarantine::load_quarantine_checked()")
+            .expect("run_session не читает карантин через проверяющий путь");
+        let body = &src[start..];
+        let end = body
+            .find("let plan = {")
+            .expect("не найден конец чтения карантина");
+        let body = &body[..end];
+
+        // Повреждение обязано превратиться в предупреждение, а не в тишину.
+        assert!(
+            body.contains("Err(cause)"),
+            "ошибка чтения карантина проглочена: {body}"
+        );
+        assert!(
+            body.contains("SessionEvent::Warn"),
+            "повреждение карантина не сообщается пользователю: {body}"
+        );
+        // Сообщение обязано объяснять последствие и путь выхода.
+        assert!(
+            body.contains("Карантин не применялся"),
+            "не сказано, что карантин не был применён: {body}"
+        );
+        assert!(
+            body.contains("удалите"),
+            "не сказано, что делать с повреждённым файлом: {body}"
+        );
+        // И это единственное место чтения: молчаливый `load_quarantine` рядом
+        // вернул бы пустой список и снова убрал бы предупреждение.
+        assert!(
+            !body.contains("load_quarantine()"),
+            "рядом с проверяющим чтением стоит молчаливое: {body}"
+        );
+    }
+
+    /// Молчаливый загрузчик не имеет права быть единственным путём в сессии.
+    #[test]
+    fn the_silent_quarantine_loader_is_not_used_for_the_session_plan() {
+        let src = include_str!("session.rs");
+        // `load_quarantine()` без `_checked` в `session.rs` означал бы, что
+        // повреждение снова разобралось молча.
+        for (line, text) in (1..).zip(src.lines()) {
+            if text.contains("load_quarantine()") {
+                panic!(
+                    "session.rs:{line}: используется молчаливый load_quarantine() — \
+                     повреждение файла должно сообщаться через Warn"
+                );
+            }
+        }
+    }
+
+    /// Регресс H40: обвал темпа — это проблема машины, а не повод каранить
+    /// схему навсегда.
+    ///
+    /// Карантин переживает перезапуск и блокирует план пользователя до ручного
+    /// вмешательства. Приписывать схеме термальный троттлинг нельзя.
+    #[test]
+    fn a_collapsed_phase_does_not_quarantine_the_scheme() {
+        let src = include_str!("session.rs");
+        // Именно ОБРАБОТЧИК, а не конструктор в `run_phase`: последнее вхождение —
+        // это `=> Err(PhaseFailure::Collapsed {` в самом цикле раундов.
+        let start = src
+            .rfind("Err(PhaseFailure::Collapsed {")
+            .expect("не найдена ветка Collapsed");
+        let body = &src[start..];
+        let end = body
+            .find("Err(PhaseFailure::UserCancelled)")
+            .expect("не найден конец ветки Collapsed");
+        let body = &body[..end];
+        assert!(
+            !body.contains("quarantine_scheme"),
+            "обвал темпа снова отправляет схему в перманентный карантин"
+        );
+        assert!(
+            !body.contains("checkpoint.rejections.insert"),
+            "обвал темпа снова помечает схему забракованной: её перестанут мерить"
+        );
+        assert!(
+            body.contains("SessionEvent::RunInvalid"),
+            "прогон должен быть помечен невалидным, а не забракованным"
+        );
+        // А зависание самой схемы карантинить по-прежнему обязано. Ищем последние
+        // вхождения: первые — конструкторы в `run_phase`, а не обработчики.
+        let hung_at = src
+            .rfind("Err(PhaseFailure::Hung {")
+            .expect("не найдена ветка Hung");
+        let hung = &src[hung_at..];
+        let hung_end = hung
+            .find("Err(PhaseFailure::Collapsed {")
+            .expect("не найден конец ветки Hung");
+        assert!(
+            hung[..hung_end].contains("quarantine_scheme"),
+            "зависание схемы перестало караниться — это ломает защиту от висящих планов"
+        );
+    }
 
     #[test]
     fn kind_labels_are_russian() {

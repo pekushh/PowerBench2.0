@@ -53,6 +53,11 @@ pub struct TestRequestDto {
     pub cooling_seconds: Option<u64>,
     pub repetitions: Option<u32>,
     pub background_threshold_percent: Option<f64>,
+    /// Пользователь нажал «продолжить с риском»: замер разрешено начать при
+    /// загруженной фоне. Без этого поля кнопка прятала себя, но не снимала
+    /// гейт — все прогоны всё равно пропускались.
+    #[serde(default)]
+    pub accept_dirty_background: bool,
     pub worker_count: Option<usize>,
     pub scheme_ids: Vec<String>,
     /// Продолжить текущую контрольную точку (план берётся из неё).
@@ -121,6 +126,7 @@ fn build_plan(req: &TestRequestDto) -> Result<SessionConfig, String> {
         background_threshold_percent: req
             .background_threshold_percent
             .unwrap_or(powerbench_orchestrator::config::DEFAULT_BACKGROUND_PERCENT),
+        accept_dirty_background: req.accept_dirty_background,
         worker_count: req.worker_count,
         scheme_ids: req.scheme_ids.clone(),
         plan_guid: crate::new_plan_guid(),
@@ -341,12 +347,21 @@ pub fn checkpoint_status() -> Result<Option<CheckpointDto>, String> {
         .map(|opt| opt.as_ref().map(CheckpointDto::from_cp))
 }
 
+/// Идентичность машины и замера для интерфейса.
+///
+/// Регресс H34: здесь гонялась полная самопроверка ядра (`self_check`) — это
+/// несколько сотен тиков в четырёх фазах, то есть секунды работы на всех ядрах.
+/// Команда объявлена `async` и выполняется на пуле tokio, поэтому страница
+/// «Схемы» (а она зовёт это при каждом открытии) наглухо занимала процессор и
+/// мешала всему остальному. Для идентичности она ничего не даёт: нужны только
+/// метаданные движка — версия, хэш конфигурации, seed, число воркеров и
+/// подпись привязки, а эталоны контрольных сумм в подписи не участвуют.
+///
+/// Собственно самопроверка запускается один раз перед сессией
+/// ([`runner::start`] → `prepare_engine`).
 #[tauri::command(async)]
 pub fn identity_info() -> Result<serde_json::Value, String> {
-    let mut engine = Engine::new(None);
-    engine
-        .self_check()
-        .map_err(|e| format!("самопроверка ядра не прошла: {e:?}"))?;
+    let engine = Engine::new(None);
     serde_json::to_value(runner::identity_of(&engine)).map_err(|e| e.to_string())
 }
 
@@ -429,6 +444,67 @@ fn discard_stale_checkpoint(app: &tauri::AppHandle, state: &AppState) {
     }
 }
 
+/// Итог сброса контрольной точки: что реально оказалось на диске и что
+/// сказать пользователю.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardReport {
+    /// Файл контрольной точки снят с диска.
+    pub cleared: bool,
+    /// Сообщение для журнала и интерфейса.
+    pub message: String,
+    /// Нужен ли `warn` вместо `info`: есть что поправить руками.
+    pub warn: bool,
+}
+
+/// Снять точку прерванной сессии: вернуть исходную схему и удалить файл.
+///
+/// Точка удаляется **всегда**, даже если возврат схемы не удался. Файл
+/// чекпоинта и состояние схемы — разные сущности: оставлять файл только
+/// из-за неудачной схемы незачем, он всё равно не помогает.
+///
+/// Обратный порядок был прямо в команде: при `outcome.error` она возвращала
+/// `Err("точка удалена, но есть замечание: …")` и уходила **до** вызова
+/// `clear_checkpoint()`. Пользователь читал «удалено», файл лежал на диске,
+/// и следующий запуск снова упирался в `CheckpointPlanMismatch`.
+///
+/// Ядро вынесено из tauri-команды, чтобы проверялось тестом: воспроизвести
+/// отказ ОС через `AppHandle` нельзя, а регресс здесь молчаливый — код
+/// компилируется и работает, пока не встретит именно тот случай.
+fn discard_report(
+    restore: &dyn Fn() -> powerbench_orchestrator::recovery::RecoveryOutcome,
+    clear: &dyn Fn() -> std::io::Result<()>,
+) -> DiscardReport {
+    let outcome = restore();
+    // Сначала снимаем файл, и только потом формируем сообщение.
+    let cleared = clear();
+    let warning = outcome.error.as_deref();
+    match cleared {
+        Ok(()) => DiscardReport {
+            cleared: true,
+            warn: warning.is_some(),
+            message: match warning {
+                // Замечание не теряем: оно объясняет, почему схема осталась.
+                Some(cause) => format!(
+                    "точка удалена, но схему питания вернуть не удалось: {cause}. \
+                     Верните свой план вручную: powercfg /list, затем \
+                     powercfg /setactive <GUID>"
+                ),
+                None => "прерванная сессия забыта".to_string(),
+            },
+        },
+        Err(e) => DiscardReport {
+            cleared: false,
+            warn: true,
+            message: format!(
+                "точка осталась на диске: не удалось её удалить ({e}). Пока она лежит, \
+                 новый план не запустится — удалите файл {CHECKPOINT_FILE} \
+                 в каталоге данных PowerBench вручную",
+                CHECKPOINT_FILE = powerbench_orchestrator::checkpoint::CHECKPOINT_FILE_NAME,
+            ),
+        },
+    }
+}
+
 /// Забыть прерванную сессию: вернуть исходную схему и удалить точку.
 #[tauri::command(async)]
 pub fn checkpoint_discard(
@@ -439,18 +515,20 @@ pub fn checkpoint_discard(
     use powerbench_orchestrator::recovery::recover_interrupted_session;
     use powerbench_orchestrator::session::RealSchemeDriver;
 
-    let outcome = recover_interrupted_session(&RealSchemeDriver);
-    if let Some(cause) = outcome.error.as_deref() {
-        // Замечание не теряем: оно объясняет, почему схема могла остаться.
-        let text = format!("точка удалена, но есть замечание: {cause}");
-        state.log.append("warn", &text);
-        runner::emit_log(&app, "warn", &text);
-        return Err(text);
+    let report = discard_report(
+        &|| recover_interrupted_session(&RealSchemeDriver),
+        &clear_checkpoint,
+    );
+    let level = if report.warn { "warn" } else { "info" };
+    state.log.append(level, &report.message);
+    runner::emit_log(&app, level, &report.message);
+    // Успех — только если файл действительно снят с диска. Иначе сообщение
+    // об удалении было бы ложью, а именно его пользователь и ждёт.
+    if report.cleared {
+        Ok(())
+    } else {
+        Err(report.message)
     }
-    clear_checkpoint().map_err(|e| format!("не удалось удалить контрольную точку: {e}"))?;
-    state.log.append("info", "прерванная сессия забыта");
-    runner::emit_log(&app, "info", "прерванная сессия забыта");
-    Ok(())
 }
 
 #[tauri::command]
@@ -717,7 +795,14 @@ pub fn history_export_to(
         if plan_guid != "all" && !s.plan_guid.eq_ignore_ascii_case(&plan_guid) {
             continue;
         }
-        let file = dir.join(format!("{}.{format}", s.plan_guid));
+        // Регресс H37: `plan_guid` подставлялся в имя файла как есть. Значение приходит
+        // из JSON-файла истории, который пользователь вправе отредактировать или
+        // подложить: `..\..\..\Автозагрузка\startup` уводил запись за пределы
+        // выбранного каталога экспорта. Через `sanitize` в имя попадают только
+        // ASCII-буквы, цифры, дефис, подчёркивание и точка — ни разделителя
+        // пути, ни буквы диска там быть не может.
+        let stem = history::sanitize_for_filename(&s.plan_guid);
+        let file = dir.join(format!("{stem}.{format}"));
         let r: Result<(), String> = if format == "json" {
             export_json(&s, &file).map_err(|e| e.to_string())
         } else {
@@ -1018,10 +1103,13 @@ pub fn save_diagnostics(
     if target.as_os_str().is_empty() {
         return Err("не выбран путь для отчёта".to_string());
     }
-    let log = state.log.snapshot();
+let log = state.log.snapshot();
     // Перед сборкой дописываем журнал на диск: отчёт читает состояние из
     // памяти, но пользователь может приложить к обращению и сам `AppLog.json`.
     state.log.flush();
+    // Если файл журнала не записался, сказать об этом здесь — последнее
+    // честное место: дальше пользователь пойдёт искать в нём записи.
+    state.log.warn_if_not_persisted("warn");
     let session = runner::session_description(&state.runner);
     let snapshot = crate::diagnostics::Snapshot::new(
         std::time::SystemTime::now(),
@@ -1162,7 +1250,94 @@ fn now_unix_ns() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::unique_path;
+    use super::{DiscardReport, TestRequestDto, build_plan, discard_report, unique_path};
+    use powerbench_orchestrator::recovery::RecoveryOutcome;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Итог восстановления: схема не вернулась, точка на месте.
+    fn restore_failed() -> RecoveryOutcome {
+        RecoveryOutcome {
+            interrupted_checkpoint: true,
+            needed_restore: true,
+            restored: false,
+            already_ok: false,
+            error: Some("ОС не переключила схему".to_string()),
+        }
+    }
+
+    /// Итог восстановления: всё в порядке.
+    fn restore_clean() -> RecoveryOutcome {
+        RecoveryOutcome {
+            interrupted_checkpoint: true,
+            needed_restore: true,
+            restored: true,
+            already_ok: true,
+            error: None,
+        }
+    }
+
+    /// Запрос минимального вида: все поля, которые обязательны для десериализации.
+    fn request(accept_dirty_background: bool) -> TestRequestDto {
+        TestRequestDto {
+            preset: "quick".to_string(),
+            duration_seconds: Some(20),
+            warmup_seconds: Some(2),
+            cooling_seconds: Some(0),
+            repetitions: Some(1),
+            background_threshold_percent: Some(5.0),
+            accept_dirty_background,
+            worker_count: None,
+            scheme_ids: vec!["381b4222-f694-41f0-9685-ff5bb260df2e".to_string()],
+            resume: false,
+            active_scheme_id: None,
+        }
+    }
+
+    /// Кнопка «продолжить с риском» обязана снимать гейт по фону, а не только
+    /// прятать себя: флаг из запроса должен попасть в план сессии.
+    #[test]
+    fn risk_consent_reaches_the_plan() {
+        assert!(
+            build_plan(&request(true))
+                .expect("план строится")
+                .accept_dirty_background
+        );
+    }
+
+    /// Обычный запуск риск не включает — иначе гейт перестал бы работать.
+    #[test]
+    fn ordinary_start_does_not_accept_risk() {
+        assert!(
+            !build_plan(&request(false))
+                .expect("план строится")
+                .accept_dirty_background
+        );
+    }
+
+    /// Старый интерфейс (или сохранённый запрос) без нового поля читается как
+    /// «риск не принимали»: десериализация не должна падать на отсутствии поля.
+    #[test]
+    fn request_without_the_flag_is_backward_compatible() {
+        let back: TestRequestDto = serde_json::from_str(
+            r#"{
+                "preset": "quick",
+                "duration_seconds": 20,
+                "warmup_seconds": 2,
+                "cooling_seconds": 0,
+                "repetitions": 1,
+                "background_threshold_percent": 5.0,
+                "worker_count": null,
+                "scheme_ids": ["381b4222-f694-41f0-9685-ff5bb260df2e"],
+                "resume": false
+            }"#,
+        )
+        .expect("старый запрос читается");
+        assert!(
+            !build_plan(&back)
+                .expect("план строится")
+                .accept_dirty_background
+        );
+    }
 
     /// Имя без расширения не должно превращаться в `имя_2.` — Windows такой
     /// файл не создаёт, то есть экспорт отчёта падал бы на каждом повторе.
@@ -1195,5 +1370,78 @@ mod tests {
         // Скрытый файл в стиле Unix не должен терять своё расширение.
         assert_eq!(unique_path(&dir, ".hidden"), dir.join(".hidden"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Регресс C11: команда «забыть прерванную сессию» сообщала
+    /// «точка удалена, но есть замечание» и уходила с `Err` **до** вызова
+    /// `clear_checkpoint()`. Файл оставался на диске навсегда, а следующий
+    /// запуск падал с `CheckpointPlanMismatch` — то есть «удаление» было
+    /// ровно тем, чем не являлось.
+    #[test]
+    fn discard_removes_the_file_even_when_the_scheme_was_not_restored() {
+        let clears = AtomicUsize::new(0);
+        let report = discard_report(
+            &restore_failed,
+            &|| {
+                clears.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert_eq!(clears.load(Ordering::SeqCst), 1, "файл точки не снят с диска");
+        assert!(
+            report.cleared,
+            "точка удалена, но сообщение об этом не поверили: {}",
+            report.message
+        );
+        // Сообщение правдиво: файл снят, и про схему сказано отдельно.
+        assert!(report.message.contains("точка удалена"), "{}", report.message);
+        assert!(
+            report.message.contains("powercfg /setactive"),
+            "нужна инструкция, как вернуть план руками: {}",
+            report.message
+        );
+        assert!(report.warn, "неудача возврата схемы — это предупреждение");
+    }
+
+    /// Штатный сброс: файл снят, сообщение спокойное.
+    #[test]
+    fn clean_discard_is_reported_as_info() {
+        let report = discard_report(&restore_clean, &|| Ok(()));
+        assert_eq!(
+            report,
+            DiscardReport {
+                cleared: true,
+                message: "прерванная сессия забыта".to_string(),
+                warn: false,
+            }
+        );
+    }
+
+    /// Неудача самого удаления не должна выглядеть как успех: пользователь
+    /// должен получить «точка осталась», а не «удалено».
+    #[test]
+    fn failed_removal_is_reported_as_the_file_staying_on_disk() {
+        let report = discard_report(&restore_clean, &|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "файл занят другим процессом",
+            ))
+        });
+        assert!(
+            !report.cleared,
+            "неудача удаления выдана за успех: {}",
+            report.message
+        );
+        assert!(
+            report.message.contains("осталась на диске"),
+            "{}",
+            report.message
+        );
+        assert!(
+            report.message.contains(powerbench_orchestrator::checkpoint::CHECKPOINT_FILE_NAME),
+            "в ошибке нужно имя файла, который надо удалить руками: {}",
+            report.message
+        );
+        assert!(report.warn);
     }
 }

@@ -247,17 +247,17 @@ const SKELETON = `
     <div class="titlebar-brand"><button class="titlebar-btn menu"></button><span class="mark"></span><span>PowerBench</span></div>
     <span class="split"></span><span class="titlebar-section is-in">Готово</span>
     <div class="titlebar-chips"><span class="titlebar-chip on"><span class="dot-live"></span>Тихий режим: вкл</span><span class="titlebar-chip trunc" data-prio="1">Ryzen 9 7950X · 32 ГБ</span></div>
-    <div class="titlebar-controls"><button class="titlebar-toggle" data-prio="2">Анимации</button><span class="window-group"><button class="titlebar-btn"></button><button class="titlebar-btn close"></button></span></div>
+    <div class="titlebar-controls"><span class="window-group"><button class="titlebar-btn"></button><button class="titlebar-btn close"></button></span></div>
   </div>
   <div class="body">
     <aside class="sidebar collapsed" id="rail">
-      <nav class="sidebar-nav">
-        <button class="nav-item active"><span class="nav-glyph">${'<svg viewBox="0 0 24 24"><path d="M4 6h16" stroke="currentColor" fill="none"/></svg>'}</span><span class="nav-label">Бенчмарк</span></button>
-        <button class="nav-item"><span class="nav-glyph">${'<svg viewBox="0 0 24 24"><path d="M4 6h16" stroke="currentColor" fill="none"/></svg>'}</span><span class="nav-label">Схемы питания</span></button>
-        <button class="nav-item"><span class="nav-glyph">${'<svg viewBox="0 0 24 24"><path d="M4 6h16" stroke="currentColor" fill="none"/></svg>'}</span><span class="nav-label">Результаты</span></button>
-        <button class="nav-item"><span class="nav-glyph">${'<svg viewBox="0 0 24 24"><path d="M4 6h16" stroke="currentColor" fill="none"/></svg>'}</span><span class="nav-label">Логи</span></button>
+<nav class="sidebar-nav" id="nav">
+        <button class="nav-item active" data-tip="Бенчмарк"><span class="nav-glyph">${'<svg viewBox="0 0 24 24"><path d="M4 6h16" stroke="currentColor" fill="none"/></svg>'}</span><span class="nav-label">Бенчмарк</span></button>
+        <button class="nav-item" data-tip="Схемы питания"><span class="nav-glyph">${'<svg viewBox="0 0 24 24"><path d="M4 6h16" stroke="currentColor" fill="none"/></svg>'}</span><span class="nav-label">Схемы питания</span></button>
+        <button class="nav-item" data-tip="Результаты"><span class="nav-glyph">${'<svg viewBox="0 0 24 24"><path d="M4 6h16" stroke="currentColor" fill="none"/></svg>'}</span><span class="nav-label">Результаты</span></button>
+        <button class="nav-item" data-tip="Логи"><span class="nav-glyph">${'<svg viewBox="0 0 24 24"><path d="M4 6h16" stroke="currentColor" fill="none"/></svg>'}</span><span class="nav-label">Логи</span></button>
       </nav>
-      <div class="sidebar-foot"><button class="nav-item"><span class="nav-glyph">${'<svg viewBox="0 0 24 24"><path d="M4 6h16" stroke="currentColor" fill="none"/></svg>'}</span><span class="nav-label">Настройки</span></button></div>
+      <div class="sidebar-foot" id="foot"><button class="nav-item" data-tip="Настройки"><span class="nav-glyph">${'<svg viewBox="0 0 24 24"><path d="M4 6h16" stroke="currentColor" fill="none"/></svg>'}</span><span class="nav-label">Настройки</span></button></div>
     </aside>
     <main class="main">
       <div class="page">
@@ -336,13 +336,32 @@ window.measure = () => {
   // смещена вправо.
   const railEl = document.querySelector(".sidebar");
   const bodyEl = document.querySelector(".body");
+  const mainEl = document.querySelector(".main");
   const pr = pageEl.getBoundingClientRect();
   const rr = railEl.getBoundingClientRect();
   const br = bodyEl.getBoundingClientRect();
   const inner = window.innerWidth;
   const logRow = document.querySelector(".log-row");
+  // Границы ПОЛЕЗНОЙ области .main: рамка и отступы сняты, а зарезервированный
+  // под полосу прокрутки глоб (scrollbar-gutter: stable) — тоже. Именно внутри
+  // этой области колонка должна стоять симметрично: глоб отнимается справа, и
+  // сравнение с рамкой панели давало бы постоянные «10 px асимметрии», которых
+  // на экране нет.
+  // (Комментарий без обратных кавычек: он лежит внутри шаблонного литерала.)
+  const mcs = getComputedStyle(mainEl);
+  const mRect = mainEl.getBoundingClientRect();
+  const bL = parseFloat(mcs.borderLeftWidth) || 0;
+  const pL = parseFloat(mcs.paddingLeft) || 0;
+  const pR = parseFloat(mcs.paddingRight) || 0;
+  // clientWidth — ширина ПЕДИНГ-бокса минус полоса/глоб, то есть отсчёт
+  // идёт от внутреннего края левой рамки. Поэтому правый край = левый край
+  // рамки + clientWidth минус правый отступ.
+  const contentLeft = mRect.left + bL + pL;
+  const contentRight = mRect.left + bL + mainEl.clientWidth - pR;
   return {
     tokens,
+    contentLeft: Math.round(contentLeft * 100) / 100,
+    contentRight: Math.round(contentRight * 100) / 100,
     padLeft: cs2(main).paddingLeft,
     mainOverflowX: main.scrollWidth - main.clientWidth,
     bodyOverflowX: document.body.scrollWidth - document.body.clientWidth,
@@ -359,13 +378,48 @@ window.measure = () => {
     innerWidth: inner,
     navItem: cs2(item).width,
     navGlyph: cs2(glyph).width,
+    // Геометрия нижней кнопки «Настройки» сравнивается с верхней: обе
+    // обязаны быть одного размера, с одинаковыми отступами от краёв рельсы
+    // и одинаковым радиусом. Считаем отступы ОТ РЕЛЬСЫ, а не абсолютные
+    // координаты — те сдвинуты на её ширину и ничего не сравнивают.
+    footItem: (() => {
+      const f = document.querySelector("#foot .nav-item");
+      if (!f) return null;
+      const fr = f.getBoundingClientRect();
+      const ir = item.getBoundingClientRect();
+      const rr2 = railEl.getBoundingClientRect();
+      const fcs = getComputedStyle(f);
+      return {
+        w: Math.round(fr.width * 100) / 100,
+        h: Math.round(fr.height * 100) / 100,
+        insetL: Math.round((fr.left - rr2.left) * 100) / 100,
+        gapR: Math.round((rr2.right - fr.right) * 100) / 100,
+        radius: fcs.borderRadius,
+        padT: fcs.paddingTop,
+        padB: fcs.paddingBottom,
+        // Ширина блока-контейнера: если подвал шире списка, кнопка внутри него
+        // тоже шире, даже когда отступы совпадают.
+        footBoxW: Math.round(document.querySelector("#foot").getBoundingClientRect().width * 100) / 100,
+        topBoxW: Math.round(document.querySelector("#nav").getBoundingClientRect().width * 100) / 100,
+        topInsetL: Math.round((ir.left - rr2.left) * 100) / 100,
+        topGapR: Math.round((rr2.right - ir.right) * 100) / 100,
+        // Высота — отдельно: у подвала своё выравнивание по умолчанию, и при
+        // растягивании кнопка во всю высоту блока, а у списка блок по
+        // контенту. На глаз это читается как «кнопка внизу крупнее».
+        topH: Math.round(ir.height * 100) / 100,
+        topMinH: getComputedStyle(item).minHeight,
+        topAlign: getComputedStyle(document.querySelector("#nav")).alignItems,
+        footAlign: getComputedStyle(document.querySelector("#foot")).alignItems,
+        footPadAll: getComputedStyle(document.querySelector("#foot")).padding,
+        navPadAll: getComputedStyle(document.querySelector("#nav")).padding,
+      };
+    })(),
     railWidth: document.getElementById("rail").getBoundingClientRect().width,
     bodyFont: cs2(document.body).fontSize,
     schemesCols: cols("#schemes"),
     kpiCols: cols("#kpis"),
     phaseCols: cols("#phases"),
     prio1: shown('[data-prio="1"]'),
-    prio2: shown('[data-prio="2"]'),
     logCols: logRow ? getComputedStyle(logRow).gridTemplateColumns.split(" ").filter(Boolean).length : null,
   };
 };
@@ -408,8 +462,18 @@ const BENCH_PAGE = `<!DOCTYPE html><html lang="ru" data-theme="Graphite" data-mo
   </div>
 </div>
 <script>
-window.measureBench = (open) => {
+// Переключение панели параметров и её замер — РАЗНЫЕ шаги.
+//
+// Раньше measureBench делал и то и другое одним вызовом, то есть мерил высоту
+// в тот же кадр, в который менялся класс .open. Но раскрытие анимируется
+// (grid-template-rows, --t-3 = .26s), и мгновенный замер попадал в середину
+// перехода: панель выглядела обрезанной (54 px при содержимом 84 px), и проверка
+// писала «сжато adv 54<84». После окончания перехода (348 px при содержимом
+// 346 px на 1440x900) обрезки нет — ломалась сама проверка, а не вёрстка.
+window.setBench = (open) => {
   document.getElementById("adv").classList.toggle("open", open);
+};
+window.measureBench = () => {
   const px = (v) => Math.round(v * 100) / 100;
   const main = document.querySelector(".main");
   const m = main.getBoundingClientRect();
@@ -455,6 +519,373 @@ window.measureBench = (open) => {
 };
 </script></body></html>`;
 
+// ===== Стенд «Логи» =====
+// Разметка повторяет `LogPage`: колонка `.page.fill` с шапкой, рядом фильтров
+// и карточкой журнала, внутри шапка карточки и лента записей. Лента длинная —
+// именно случай, на котором ломалась геометрия: колонка без определённой
+// высоты росла вместе с записями, и прокручивал `.main`, а не лента.
+// Строки собираются отдельно: вложенный шаблонный литерал внутри шаблонного
+// литерала закрывает внешний обратной кавычкой.
+// 200 записей — заведомо больше окна любой высоты, которое проверяет стенд.
+const LOG_ROWS = Array.from({ length: 200 }, (_, i) =>
+  '<div class="log-row" data-level="info"><span class="l-time">14:' +
+  String(i % 60).padStart(2, "0") + ':02</span><span class="l-badge info">Инфо</span>' +
+  '<span class="l-msg">Запись номер ' + i +
+  ' — достаточно длинный текст, чтобы строка переносилась и список был выше окна</span></div>',
+).join("");
+
+// ===== Стенд «Результаты» =====
+// Разметка повторяет `ResultsPage`: колонка `.page.fill`, тулбар и список
+// карточек `.session-list` внутри `.fade-list`. Нужен, чтобы поймать
+// горизонтальную прокрутку и срезание карточки при подъёме: на общей
+// странице стенда этих блоков нет, а ломаются они именно здесь.
+//
+// Карточки собираются склейкой строк: вложенный шаблонный литерал внутри
+// шаблонного литерала закрыл бы внешний обратной кавычкой.
+const RESULT_CARDS = Array.from({ length: 4 }, (_, i) =>
+  '<article class="session-card"><div class="sc-main"><div class="sc-top">' +
+  '<span class="sc-winner-tag">ЛИДЕР</span><span class="sc-title">Powerplan</span></div>' +
+  '<div class="sc-sub"><span>01.10.2026 · 20:03</span><span class="dot-sep">·</span>' +
+  '<span class="badge">Скрининг</span></div></div>' +
+  '<div class="sc-metrics"><div><small>РЕЗУЛЬТАТ</small><b class="num">' +
+  (3515 - i) +
+  '</b><i>тик/с</i></div><div><small>СХЕМ</small><b class="num">2</b>' +
+  '<i>— мало данных</i></div></div>' +
+  '<div class="sc-actions"><button class="btn-report">Отчёт HTML</button></div></article>',
+).join("");
+
+const RESULTS_PAGE = `<!doctype html><html lang="ru" data-theme="Graphite" data-mode="Dark" data-density="normal" data-text="m" data-motion="on">
+<head><meta charset="utf-8">
+<link rel="stylesheet" href="/assets/${cssHref}">
+<style>html,body{margin:0;height:100%}</style>
+</head><body>
+<div class="shell"><div class="titlebar"><div class="titlebar-brand"><span>PowerBench</span></div></div>
+<div class="body">
+<aside class="sidebar collapsed"><nav class="sidebar-nav"><button class="nav-item"><span class="nav-glyph"><svg viewBox="0 0 24 24"></svg></span><span class="nav-label">Результаты</span></button></nav></aside>
+<main class="main">
+<div class="page-host on pb-host-in"><div class="page fill">
+  <div class="page-head"><h1>Результаты</h1><span class="sub">3 из 200 сессий · 793.4 КБ</span>
+    <div class="actions"><button class="act-secondary">Экспорт…</button><button class="act-secondary">Папка</button></div>
+  </div>
+  <div class="res-toolbar">
+    <div class="search-box res-search"><svg viewBox="0 0 24 24"></svg><input class="search" placeholder="Поиск по схеме или дате."></div>
+    <div class="filter-tabs pb-pill-host"><button class="ftab active">Все</button><button class="ftab">Скрининг</button></div>
+    <select class="dd-btn">По дате</select>
+  </div>
+  <div class="session-list fill-list">${RESULT_CARDS}</div>
+</div></div>
+</main>
+</div></div>
+<script>
+window.measureResults = () => {
+  const box = (sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    return {
+      l: Math.round(r.left), r: Math.round(r.right), w: Math.round(r.width),
+      sw: el.scrollWidth, cw: el.clientWidth,
+      ovx: cs.overflowX, ovy: cs.overflowY,
+      overX: el.scrollWidth - el.clientWidth,
+    };
+  };
+  return {
+    html: box("html"), body: box("body"), main: box(".main"),
+    host: box(".page-host"), page: box(".page"),
+    list: box(".session-list"), card: box(".session-card"),
+    docScrollW: document.documentElement.scrollWidth,
+    docClientW: document.documentElement.clientWidth,
+  };
+};
+// Положение карточки ДО наведения: подъём измеряется как разница.
+window.armLift = () => {
+  window.__liftTop = document.querySelector(".session-card").getBoundingClientRect().top;
+};
+window.liftGap = () => {
+  const list = document.querySelector(".session-list");
+  const card = document.querySelector(".session-card");
+  const lr = list.getBoundingClientRect();
+  const cr = card.getBoundingClientRect();
+  return {
+    gap: Math.round(cr.top - lr.top),
+    lift: Math.round(window.__liftTop - cr.top),
+  };
+};
+window.hoverCard = () => {
+  const r = document.querySelector(".session-card").getBoundingClientRect();
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+};
+</script></body></html>`;
+
+const LOG_PAGE = `<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<link rel="stylesheet" href="/assets/${cssHref}"></head><body>
+<div class="shell"><div class="titlebar"><div class="titlebar-brand"><span>PowerBench</span></div></div>
+<div class="body">
+  <aside class="sidebar collapsed"><nav class="sidebar-nav"><button class="nav-item active"><span class="nav-glyph"><svg viewBox="0 0 24 24"></svg></span><span class="nav-label">Логи</span></button></nav></aside>
+  <main class="main">
+    <div class="page-host on pb-host-in"><div class="page fill" id="lp">
+      <div class="page-head"><h1>Логи</h1></div>
+      <div class="log-controls"><div class="filter-tabs pb-pill-host"><button class="ftab active">Все</button></div></div>
+      <div class="log-card">
+        <div class="log-card-head"><span class="log-meta">5000 записей</span></div>
+        <div class="log-list" id="ll">${LOG_ROWS}</div>
+      </div>
+    </div></div>
+  </main>
+</div></div>
+<script>
+window.measureLog = () => {
+  const px = (v) => Math.round(v * 100) / 100;
+  const main = document.querySelector(".main");
+  const list = document.getElementById("ll");
+  const head = document.querySelector(".log-card-head");
+  const card = document.querySelector(".log-card");
+  const m = main.getBoundingClientRect();
+  const padBottom = parseFloat(getComputedStyle(main).paddingBottom);
+  const bottom = m.bottom - padBottom;
+  return {
+    // Лента обязана прокручиваться сама: иначе список либо не виден вовсе,
+    // либо страницу прокручивает .main и колесо мыши уезжает из ленты.
+    // Комментарии внутри этого литерала не должны содержать обратную
+    // кавычку: она закрыла бы шаблон и остаток файла стал бы кодом.
+    listScrolls: list.scrollHeight > list.clientHeight + 1,
+    listOverflowY: getComputedStyle(list).overflowY,
+    mainScrolls: main.scrollHeight > main.clientHeight + 1,
+    // Нижняя граница карточки не должна уезжать за нижний край рабочей области.
+    cardBottom: px(card.getBoundingClientRect().bottom - bottom),
+    listH: px(list.clientHeight),
+    // Шапка карточки зафиксирована: она не уезжает при прокрутке ленты.
+    headBefore: head.getBoundingClientRect().top,
+    headAfter: (() => { list.scrollTop = list.scrollHeight; return head.getBoundingClientRect().top; })(),
+  };
+};
+</script></body></html>`;
+
+  // ===== Стенд «Результат сессии» (модальное окно) =====
+// Разметка повторяет `SessionDetail`: баннер замечаний, блок лидера с
+// метриками, таблица фаз и — по переключателю — таблица сравнения. Проверяем
+// три вещи, которые ломались по отдельности: баннер не занимает треть окна
+// (три плашки занимали), у внутренних блоков нет жёстких рамок, и при одной
+// схеме таблица сравнения не выводится вовсе — сравнивать не с чем.
+const SESSION_MODAL_PAGE = `<!doctype html><html lang="ru" data-theme="Graphite" data-mode="Dark" data-density="normal" data-text="m" data-motion="on">
+<head><meta charset="utf-8">
+<link rel="stylesheet" href="/assets/${cssHref}">
+<style>html,body{margin:0;height:100%}</style>
+</head><body>
+<div class="modal-overlay">
+  <div class="modal session-modal">
+    <div class="modal-head"><span class="modal-title"><span class="sm-title">Результат сессии<span class="sm-hw-meta">01.10.2026 20:03 &middot; Ryzen 9 7950X (16 ядер) &middot; 32 ГБ ОЗУ</span></span></span><button class="modal-close">×</button></div>
+    <div class="modal-body">
+      <div class="alerts-banner">
+        <span class="alerts-mark">⚠</span>
+        <div class="alerts-body">
+          <span class="alerts-title">Замечания к результату</span>
+          <span class="alert-row"><b>Скрининг &middot; 1 прогон:</b><span>нужно от 3 для доверительного интервала</span></span>
+          <span class="alert-row is-strong"><b>Фон до 98 % CPU:</b><span>95-й перцентиль фоновой нагрузки выше порога.</span></span>
+          <span class="alert-row is-strong"><b>Замечание:</b><span>замер проведён с риском: гейт отложенных прогонов отключён по вашему выбору</span></span>
+          <span class="alert-more">ещё <b>2</b> замечания</span>
+        </div>
+      </div>
+      <section class="leader-hero">
+        <div class="lh-left">
+          <div class="lh-eyebrow">
+            <span class="badge-leader">★ Лидер сессии</span>
+            <span class="badge-pill">Скрининг, 1 прогон</span>
+            <span class="badge-pill">Уверенность: н/д</span>
+          </div>
+          <h3 class="lh-name">Максимальная производительность</h3>
+        </div>
+        <div class="lh-metrics">
+          <div class="m-box"><small>Медиана лидера</small><b class="green">3515</b><span>тик/с</span></div>
+          <div class="m-box"><small>Перевес</small><b class="green">+2.14%</b></div>
+          <div class="m-box"><small>Замерено схем</small><b>1</b><span>из 1</span></div>
+          <div class="m-box"><small>Прогонов</small><b>1</b><span>всего</span></div>
+        </div>
+      </section>
+      <section class="section-card">
+        <div class="sc-bar"><h4 class="sc-title">Показатели лидера по фазам</h4></div>
+        <table class="phases-tbl">
+          <thead><tr><th>Фаза нагрузки</th><th>Медиана, тик/с</th><th>P1 (мин. 1%), тик/с</th><th>Стабильность</th><th>Частота CPU</th></tr></thead>
+          <tbody>
+            <tr><td>1. Лёгкая</td><td>2980.2</td><td>2901.1</td><td>99.1 %</td><td>4200 МГц</td></tr>
+            <tr><td>2. Частичная</td><td>3402.8</td><td>3310.4</td><td>98.4 %</td><td>4200 МГц</td></tr>
+            <tr><td>3. Тяжёлая</td><td>3515.0</td><td>3444.9</td><td>97.9 %</td><td>3900 МГц ↓7%</td></tr>
+            <tr><td>4. Отклик</td><td>2710.5</td><td>2690.2</td><td>99.5 %</td><td>4200 МГц</td></tr>
+          </tbody>
+        </table>
+      </section>
+      <section class="section-card" id="compare">
+        <div class="schemes-toolbar"><div class="st-left"><h4 class="sc-title">Сравнение схем питания</h4></div></div>
+        <div class="schemes-scroll">
+          <table class="schemes-tbl">
+            <thead><tr><th>Схема питания</th><th>Медиана, тик/с</th><th>ДИ 95%</th><th>Прогонов</th><th>Статус</th></tr></thead>
+            <tbody>
+              <tr class="is-leader"><td><span class="rk-num">#1</span>★ Максимальная производительность<span class="guid-tail">381b4222…</span></td><td><span class="score-cell"><span class="score-bar"><i style="width:100%"></i></span><b>3515.0</b></span></td><td class="mut">[3480.1; 3549.9]</td><td>1</td><td><span class="st-badge leader">лидер</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+    <div class="modal-foot"><div class="sm-foot-inner"><div class="sm-foot-meta"><span>✓ Исходная схема «Сбалансированная» восстановлена</span></div><div class="sm-foot-actions"><button class="btn-delete">Удалить запись</button><button class="btn-open-report">Открыть HTML-отчёт</button></div></div></div>
+  </div>
+</div>
+<script>
+// Доли окна, которые занимают баннер замечаний и таблица сравнения. Раньше
+// три плашки занимали около трети окна, поэтому порог задан жёстко.
+window.measureSession = () => {
+  const px = (v) => Math.round(v * 100) / 100;
+  const modal = document.querySelector(".session-modal");
+  const body = document.querySelector(".modal-body");
+  const box = (sel) => {
+    const el = document.querySelector(sel);
+    return el ? px(el.getBoundingClientRect().height) : null;
+  };
+  // Рамки внутренних блоков: у лидера, метрик и баннера их быть не должно —
+  // вместо них заливка/разделитель.
+  const borders = {};
+  for (const [name, sel] of [["hero", ".leader-hero"], ["box", ".m-box"], ["alerts", ".alerts-banner"], ["chip", ".alert-row"]]) {
+    const el = document.querySelector(sel);
+    if (!el) continue;
+    const cs = getComputedStyle(el);
+    borders[name] = [
+      cs.borderTopWidth, cs.borderRightWidth, cs.borderBottomWidth, cs.borderLeftWidth,
+    ].join(" ");
+  }
+  return {
+    modalH: px(modal.getBoundingClientRect().height),
+    bodyH: px(body.getBoundingClientRect().height),
+    alertsH: box(".alerts-banner"),
+    compareH: box("#compare"),
+    heroH: box(".leader-hero"),
+    // Высота тулбара секции сравнения: по ней видно, ушёл ли блок целиком, а не
+    // осталась ли его шапка над пустым местом.
+    toolbarH: box("#compare .schemes-toolbar"),
+    // Подсказка скрытых замечаний: значок обязан быть, иначе часть причин
+    // исчезла бы из окна молча.
+    hasMore: !!document.querySelector(".alert-more"),
+    borders,
+  };
+};
+// Показать/скрыть таблицу сравнения — переключатель проверки правила
+// «при одной схеме таблицы нет».
+window.setCompare = (on) => {
+  document.getElementById("compare").style.display = on ? "" : "none";
+};
+</script></body></html>`;
+
+  // ===== Стенд подсказки =====
+// Проверяет ровно тот баг, который видел пользователь: подсказка появлялась
+// «в углу экрана», а не рядом со значком. Корневая причина — `position: fixed`
+// не значит «от окна»: любой предок с `transform`, `filter`, `will-change:
+// transform`, `perspective` или `contain` становится containing block для
+// фиксированного потомка, и координаты окна применяются к нему со смещением.
+//
+// В приложении подсказка выносится порталом в `document.body`, поэтому у неё
+// нет ни одного предка кроме body и перехватить позиционирование нечему.
+// Стенд повторяет именно эту разметку: значок — внутри модалки, пузырь —
+// прямым потомком body. Так проверяется то, что действительно поставляется.
+const TIP_PAGE = `<!doctype html><html lang="ru" data-theme="Graphite" data-mode="Dark" data-density="normal" data-text="m" data-motion="on">
+<head><meta charset="utf-8">
+<link rel="stylesheet" href="/assets/${cssHref}">
+<style>html,body{margin:0;height:100%}</style>
+</head><body>
+<div class="modal-overlay">
+  <div class="modal session-modal" style="width:min(620px,92vw)">
+    <div class="modal-head"><span class="modal-title">Схема</span><button class="modal-close">×</button></div>
+    <div class="modal-body">
+      <div class="section-card">
+        <div class="sc-bar"><h4 class="sc-title">Показатели по фазам</h4>
+          <span class="tt" id="anchor"><span class="tt-icon" tabindex="0" role="img">i</span></span>
+        </div>
+      </div>
+      <div class="section-card">
+        <div class="sc-bar"><h4 class="sc-title">Блок у самого низа окна</h4>
+          <span class="tt" id="anchor2"><span class="tt-icon" tabindex="0" role="img">i</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<span class="tt-bubble glass float" id="bubble" role="tooltip" style="visibility:hidden">Значения сравнимы только внутри одной фазы. Стрелка вниз означает снижение частоты CPU — это и есть эффект схемы.</span>
+<span class="tt-bubble glass float" id="bubble2" role="tooltip" style="visibility:hidden">Нижняя подсказка тоже должна стоять у своего значка, а не в углу окна.</span>
+<script>
+// Позиционирование подсказки целиком на JS — ровно так, как это делает
+// components/Tooltip.tsx: координаты берутся у значка и задаются пузырю.
+//
+// Сторона выбирается ТАК ЖЕ, как в компоненте: сначала запрошенная, а если в
+// ней не хватает места — противоположная. Раньше стенд знал только нижнюю
+// сторону и прижимал пузырь к нижнему краю окна, поэтому на 1180×720 (где
+// значок у самого низа) он «наезжал» на значок и вылезал вбок — и проверка
+// писала «пузырь на 98 px ниже значка» и «упирается в край окна». Раскладка
+// при этом была в порядке: расходились стенд и компонент.
+window.placeTip = (anchorId, bubbleId) => {
+  const a = document.getElementById(anchorId).querySelector(".tt-icon").getBoundingClientRect();
+  const b = document.getElementById(bubbleId);
+  b.style.visibility = "visible";
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const w = Math.min(340, Math.max(b.offsetWidth, 160), vw - 16);
+  const h = b.offsetHeight;
+  const GAP = 8, EDGE = 8;
+  const roomBottom = vh - a.bottom;
+  const roomTop = a.top;
+  let side = "bottom";
+  if (roomBottom < h + GAP + EDGE && roomTop > roomBottom) side = "top";
+  let top = side === "bottom" ? a.bottom + GAP : a.top - h - GAP;
+  if (top + h > vh - EDGE) top = vh - EDGE - h;
+  if (top < EDGE) top = EDGE;
+  let left = a.left;
+  if (left + w > vw - EDGE) left = vw - EDGE - w;
+  if (left < EDGE) left = EDGE;
+  // Переходы на позиции выключены: иначе заданное значение и нарисованное
+  // расходились бы на время анимации, и замер видел бы не то место, куда
+  // подсказка встала.
+  const prevTransition = b.style.transition;
+  b.style.transition = "none";
+  b.style.top = top + "px";
+  b.style.left = left + "px";
+  b.style.transition = prevTransition;
+  return true;
+};
+window.measureTip = (anchorId, bubbleId) => {
+  const a = document.getElementById(anchorId).querySelector(".tt-icon").getBoundingClientRect();
+  const el = document.getElementById(bubbleId);
+  const b = el.getBoundingClientRect();
+  const cs = getComputedStyle(el);
+  // Диагностика containing block: при top:0/left:0 фиксированный элемент
+  // обязан лечь в (0,0). Любое смещение — значит, позиционирование
+  // перехватил какой-то предок.
+  //
+  // Перед замером переходы выключаются: иначе getComputedStyle и
+  // getBoundingClientRect() возвращают текущее значение АНИМИРУЕМОГО
+  // top/left, а не заданное, и замер читает предыдущую позицию пузыря.
+  const prevTop = el.style.top, prevLeft = el.style.left, prevTransition = el.style.transition;
+  el.style.transition = "none";
+  el.style.top = "0px";
+  el.style.left = "0px";
+  const origin = el.getBoundingClientRect();
+  el.style.top = prevTop;
+  el.style.left = prevLeft;
+  el.style.transition = prevTransition;
+  return {
+    dy: Math.round((b.top - a.bottom) * 100) / 100,
+    dx: Math.round((b.left - a.left) * 100) / 100,
+    insideX: b.left >= -0.5 && b.right <= window.innerWidth + 0.5,
+    insideY: b.top >= -0.5 && b.bottom <= window.innerHeight + 0.5,
+    // Отступы от краёв окна: подсказка не должна упираться в границу.
+    marginL: Math.round(b.left * 100) / 100,
+    marginR: Math.round((window.innerWidth - b.right) * 100) / 100,
+    w: Math.round(b.width), h: Math.round(b.height),
+    position: cs.position,
+    // Портал: пузырь — прямой потомок body. Пока это так, ни один элемент
+    // страницы не может стать для него containing block.
+    inBody: el.parentElement === document.body,
+    originX: Math.round(origin.left), originY: Math.round(origin.top),
+  };
+};
+</script></body></html>`;
+
   const server = http.createServer((req, res) => {
     const url = req.url.split("?")[0];
     if (url === "/" || url === "/stand.html") {
@@ -472,6 +903,22 @@ window.measureBench = (open) => {
     if (url === "/bench") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       return res.end(BENCH_PAGE);
+    }
+    if (url === "/results") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      return res.end(RESULTS_PAGE);
+    }
+    if (url === "/tip") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      return res.end(TIP_PAGE);
+    }
+    if (url === "/session") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      return res.end(SESSION_MODAL_PAGE);
+    }
+    if (url === "/log") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      return res.end(LOG_PAGE);
     }
     const file = path.join(BUILD, decodeURIComponent(url).replace(/^\/+/, ""));
     if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); return res.end("нет"); }
@@ -537,7 +984,7 @@ window.measureBench = (open) => {
   if (!(await evalJs("typeof window.measure === 'function'"))) { console.log("стенд не загрузился"); cleanup(); return; }
 
   let bad = 0;
-  console.log("\n  ширина  колонка  рельса  схемы  метрики  фазы  лог  чип1  чип2  статус");
+  console.log("\n  ширина  колонка  рельса  схемы  метрики  фазы  лог  чип1  статус");
   for (const w of WIDTHS) {
     await send("Emulation.setDeviceMetricsOverride", { width: w, height: 900, deviceScaleFactor: 1, mobile: false });
     await new Promise((r) => setTimeout(r, 350));
@@ -547,12 +994,13 @@ window.measureBench = (open) => {
     if (m.mainOverflowX > 2) p.push(`переполнение .main ${m.mainOverflowX}`);
     if (m.bodyOverflowX > 2) p.push(`переполнение body ${m.bodyOverflowX}`);
     if (px(m.column) > 1121) p.push(`колонка ${px(m.column)}`);
-    if (px(m.navGlyph) !== 16) p.push(`иконка ${m.navGlyph}`);
+    if (px(m.navGlyph) !== 20) p.push(`иконка ${m.navGlyph}`);
     if (Math.abs(px(m.padLeft) - px(t["--pad-x"])) > 0.6) p.push(`pad-x ${m.padLeft} != ${t["--pad-x"]}`);
     // Пороги из ТЗ III.3 и III.4.
-    const rail = w >= 1080 ? 64 : w >= 900 ? 56 : 52;
+    const rail = 64;
     if (px(m.railWidth) !== rail) p.push(`рельса ${px(m.railWidth)}, ожидалось ${rail}`);
-    if (m.prio2 !== (w >= 1280)) p.push(`чип «Анимации» ${m.prio2 ? "виден" : "скрыт"} при ${w}`);
+    // Кнопки «Анимации» в шапке больше нет — проверять её скрытие нечего,
+    // и порог 1280 px остался только за чипом железа.
     if (m.prio1 !== (w >= 1080)) p.push(`чип железа ${m.prio1 ? "виден" : "скрыт"} при ${w}`);
     const logCols = w >= 1080 ? 3 : 2;
     if (m.logCols !== logCols) p.push(`колонок в строке лога ${m.logCols}, ожидалось ${logCols}`);
@@ -562,31 +1010,72 @@ window.measureBench = (open) => {
     // запрет «колонок больше, чем помещается»).
     const schemes = w >= 1120 ? 3 : 2;
     if (m.schemesCols !== schemes) p.push(`схем ${m.schemesCols}, ожидалось ${schemes}`);
-    if (px(m.railWidth) === 52 && m.kpiCols !== 1) p.push(`метрик ${m.kpiCols} при рельсе 52`);
+    // Рельса теперь 64 px на всех ширинах, поэтому порог привязан к ширине
+    // окна, а не к ширине рельсы: ниже 900 px метрики обязаны стать одной
+    // колонкой, иначе три карточки не поместятся.
+    if (w < 900 && m.kpiCols !== 1) p.push(`метрик ${m.kpiCols} на ${w}`);
     for (const [k, v] of Object.entries(EXPECT[w] || {})) {
       const got = px(t[k]);
       if (Math.abs(got - v) > TOL) p.push(`${k}=${got}, ожидалось ${v}`);
     }
     if (p.length) bad++;
-    console.log(`  ${String(w).padStart(6)}  ${String(px(m.column)).padStart(7)}  ${String(px(m.railWidth)).padStart(6)}  ${String(m.schemesCols).padStart(5)}  ${String(m.kpiCols).padStart(7)}  ${String(m.phaseCols).padStart(4)}  ${String(m.logCols).padStart(3)}  ${(m.prio1 ? "да" : "нет").padStart(4)}  ${(m.prio2 ? "да" : "нет").padStart(4)}  ${p.length ? "✗ " + p.join("; ") : "ok"}`);
+    console.log(`  ${String(w).padStart(6)}  ${String(px(m.column)).padStart(7)}  ${String(px(m.railWidth)).padStart(6)}  ${String(m.schemesCols).padStart(5)}  ${String(m.kpiCols).padStart(7)}  ${String(m.phaseCols).padStart(4)}  ${String(m.logCols).padStart(3)}  ${(m.prio1 ? "да" : "нет").padStart(4)}  ${p.length ? "✗ " + p.join("; ") : "ok"}`);
   }
 
   // Свёрнутая рельса: иконка обязана остаться 16 px.
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   const col = await evalJs("window.measure()");
   const cp = [];
-  if (px(col.navGlyph) !== 16) cp.push(`иконка ${col.navGlyph}`);
-  if (px(col.navItem) !== 38) cp.push(`квадрат ${px(col.navItem)}`);
+  // Рельса — ровно 64 px, кнопки в ней — ровно 40×40 и по центру, иконка
+  // 20 px в обоих состояниях: размеры активной и неактивных обязаны
+  // совпадать, иначе белая плашка вылезает за пределы рельсы.
+  if (px(col.navGlyph) !== 20) cp.push(`иконка ${col.navGlyph}`);
+  if (px(col.navItem) !== 40) cp.push(`пункт ${px(col.navItem)}`);
+  // Подсказка свёрнутого меню: подпись схлопнута, и пункт безымянен. Она
+  // рисуется на CSS и выходит за панель вправо, поэтому пункт обязан быть
+  // без `overflow:hidden` — иначе подсказка срезалась бы по краю рельсы.
+  const tip = await evalJs(
+    "(() => { const el = document.querySelectorAll('#rail .nav-item')[2];" +
+      " const cs = getComputedStyle(el, '::after');" +
+      " return { tip: el.getAttribute('data-tip'), content: cs.content, overflow: getComputedStyle(el).overflow }; })()",
+  );
+  if (!tip.tip) cp.push("нет data-tip");
+  if (!tip.content || tip.content === '""' || tip.content === "none") cp.push("подсказка не задана");
+  if (tip.overflow !== "visible") cp.push(`пункт обрезает подсказку (${tip.overflow})`);
   if (cp.length) bad++;
-  console.log(`\n  свёрнутая рельса на 1440: иконка ${col.navGlyph}, квадрат ${col.navItem}, панель ${px(col.railWidth)}  ${cp.length ? "✗ " + cp.join("; ") : "ok"}`);
-  // Развёрнутая рельса: пункт во всю колонку, иконка всё так же 16 px.
+  console.log(
+    `\n  свёрнутая рельса на 1440: иконка ${col.navGlyph}, пункт ${col.navItem}, панель ${px(col.railWidth)}, подсказка «${tip.tip}» ${cp.length ? "✗ " + cp.join("; ") : "ok"}`,
+  );
+  // Развёрнутая рельса: пункт во всю колонку, иконка всё так же 20 px.
   await evalJs("window.collapse(false)");
   await new Promise((r) => setTimeout(r, 400));
   const exp2 = await evalJs("window.measure()");
   const cp2 = [];
-  if (px(exp2.navGlyph) !== 16) cp2.push(`иконка ${exp2.navGlyph}`);
+  if (px(exp2.navGlyph) !== 20) cp2.push(`иконка ${exp2.navGlyph}`);
+  // «Настройки» в подвале обязана совпадать с верхними пунктами по габаритам и
+  // отступам. Раньше подвал имел собственные `padding`, из-за чего активная
+  // белая плашка выглядела отдельной, более крупной кнопкой, и меню
+  // читалось как две несвязанные части.
+  const f = exp2.footItem;
+  if (f) {
+    if (Math.abs(f.w - exp2.navItem) > 0.5) cp2.push(`ширина «Настроек» ${f.w} против ${px(exp2.navItem)}`);
+    if (Math.abs(f.h - f.topH) > 0.5) cp2.push(`высота «Настроек» ${f.h} против ${f.topH}`);
+    if (Math.abs(f.insetL - f.topInsetL) > 0.5) cp2.push(`отступ слева ${f.insetL} против ${f.topInsetL}`);
+    if (Math.abs(f.gapR - f.topGapR) > 0.5) cp2.push(`отступ справа ${f.gapR} против ${f.topGapR}`);
+    if (Math.abs(f.footBoxW - f.topBoxW) > 0.5) cp2.push(`блок подвала ${f.footBoxW} против списка ${f.topBoxW}`);
+    if (Math.abs(parseFloat(f.padT) - parseFloat(f.padB)) > 0.5) cp2.push(`вертикальные отступы ${f.padT}/${f.padB}`);
+    // Отступы блоков обязаны совпадать: свои у `.sidebar-nav` и
+    // `.sidebar-foot` — источник «нижняя кнопка вылезла за верхние».
+    if (f.navPadAll !== f.footPadAll) cp2.push(`padding блоков ${f.navPadAll} против ${f.footPadAll}`);
+  } else {
+    cp2.push("нет кнопки «Настройки» в подвале");
+  }
   if (cp2.length) bad++;
-  console.log(`  развёрнутая рельса: иконка ${exp2.navGlyph}, панель ${px(exp2.railWidth)}  ${cp2.length ? "✗ " + cp2.join("; ") : "ok"}`);
+  console.log(
+    `  развёрнутая рельса: иконка ${exp2.navGlyph}, панель ${px(exp2.railWidth)}` +
+      (f ? `, «Настройки» ${f.w}×${f.h} отступ ${f.insetL}/${f.gapR}` : "") +
+      `  ${cp2.length ? "✗ " + cp2.join("; ") : "ok"}`,
+  );
   await evalJs("window.collapse(true)");
 
 // Положение содержимого на отдельной странице: и короткий, и длинный экран
@@ -678,17 +1167,34 @@ window.measureBench = (open) => {
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/bench` });
 await new Promise((r) => setTimeout(r, 1200));
 const bc = [];
+// Высоты карточек режимов, сгруппированные по ширине окна. Раньше здесь стояла
+// обратная проверка (`cardHeight < 200` — плохо), она требовала растянутых
+// карточек: на 1920×1080 сетка отдавала им всю высоту шага, и блок из двух
+// строк текста с рядом плашек занимал пол-экрана.
+const cardByWidth = new Map();
+const pushH = (w, h) => {
+  if (!cardByWidth.has(w)) cardByWidth.set(w, []);
+  cardByWidth.get(w).push(h);
+};
 console.log("\n  раскладка «Бенчмарка» (шапка наверху, блоки на всю высоту):");
 for (const [w, h] of [[1920, 1080], [1440, 900], [1180, 720]]) {
   await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false });
   await new Promise((r) => setTimeout(r, 300));
   for (const open of [true, false]) {
-    const b = await evalJs(`window.measureBench(${open})`);
+    await evalJs(`window.setBench(${open})`);
+    // Ждём окончания раскрытия/схлопывания панели параметров: замер на
+    // середине перехода даёт ложную обрезку (см. `window.setBench`).
+    await new Promise((r) => setTimeout(r, 600));
+    const b = await evalJs(`window.measureBench()`);
     const tag = open ? "раскрыта " : "свёрнута ";
     if (b.headerTop > 2) bc.push(`${w}×${h}: шапка опустилась на ${px(b.headerTop)} px`);
     if (b.squashed.length) bc.push(`${w}×${h}: сжато ${b.squashed.join(",")}`);
     if (b.overflowBottom > 2) bc.push(`${w}×${h}: низ ушёл за область на ${px(b.overflowBottom)} px`);
-    if (b.cardHeight < 200) bc.push(`${w}×${h} (${tag}): карточки режимов не растянуты (${px(b.cardHeight)} px)`);
+    // Карточка не должна ни схлопнуться, ни растянуться: сжатие срезает
+    // заголовок, растяжение оставляет пустоту внутри карточки.
+    if (b.cardHeight < 100) bc.push(`${w}×${h} (${tag}): карточка схлопнулась (${px(b.cardHeight)} px)`);
+    if (b.cardHeight > 260) bc.push(`${w}×${h} (${tag}): карточка растянута (${px(b.cardHeight)} px)`);
+    pushH(w, px(b.cardHeight));
     // Раскрытая панель забирает высоту целиком; свёрнутая ограничена потолком
     // карточек, и небольшой воздух внизу допустим.
     const limit = open ? 20 : 360;
@@ -697,13 +1203,255 @@ for (const [w, h] of [[1920, 1080], [1440, 900], [1180, 720]]) {
     console.log(`        цепочка: host ${px(b.hostHeight)} → page ${px(b.pageHeight)} → wizard ${px(b.wizardHeight)} → stage ${px(b.stageHeight)} (доступно ${px(b.avail)}) flex=${b.chain}`);
   }
 }
+// Высота карточки задана контентом: растянутая карточка меняла бы высоту
+// вместе с окном. Сравнивать нужно при ОДНОЙ ширине и разной высоте: при
+// разной ширине описание переносится на строку больше, и сама по себе эта
+// разница высот — не растяжение, а перенос текста.
+let stretched = false;
+const allCardHeights = [];
+for (const [w, hs] of cardByWidth) {
+  const spread = Math.max(...hs) - Math.min(...hs);
+  allCardHeights.push(...hs);
+  if (spread > 2) {
+    stretched = true;
+    bc.push(`карточки тянутся за высотой окна при ширине ${w}: ${Math.min(...hs)}…${Math.max(...hs)} px`);
+  }
+}
+const lo = Math.min(...allCardHeights);
+const hi = Math.max(...allCardHeights);
 if (bc.length) bad++;
-console.log(`    ${bc.length ? "вњ— " + bc.join("; ") : "ok"}`);
+console.log(`    карточки режимов: ${stretched ? "растянуты" : "высота по контенту"}, ${lo}…${hi} px  ${bc.length ? "✗ " + bc.join("; ") : "ok"}`);
+
+// Прокрутка «Логов»: лента записей обязана прокручиваться сама, шапка —
+// оставаться на месте, а `.main` не прокручиваться. Иначе колесо мыши
+// уезжает из ленты на страницу, а низ списка не достаётся.
+console.log("\n  прокрутка лога:");
+await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/log` });
+await new Promise((r) => setTimeout(r, 1200));
+const lcs = [];
+for (const [w, h] of [[1440, 900], [1180, 720]]) {
+  await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false });
+  await new Promise((r) => setTimeout(r, 350));
+  const lg = await evalJs("window.measureLog()");
+  if (!lg.listScrolls) lcs.push(`${w}×${h}: лента не прокручивается`);
+  if (lg.listOverflowY !== "auto") lcs.push(`${w}×${h}: overflow-y ленты ${lg.listOverflowY}`);
+  if (lg.mainScrolls) lcs.push(`${w}×${h}: прокручивается страница вместо ленты`);
+  if (lg.cardBottom > 2) lcs.push(`${w}×${h}: низ карточки ушёл на ${px(lg.cardBottom)} px за край`);
+  if (Math.abs(lg.headAfter - lg.headBefore) > 1) lcs.push(`${w}×${h}: шапка лента уводит (${px(lg.headBefore)} → ${px(lg.headAfter)})`);
+  console.log(`    ${String(w).padStart(4)}×${h}: лента ${px(lg.listH)} px, overflow-y ${lg.listOverflowY}, страница ${lg.mainScrolls ? "прокручивается" : "на месте"}, шапка ${Math.abs(lg.headAfter - lg.headBefore) <= 1 ? "на месте" : "уезжает"}  ${lcs.length ? "✗ " + lcs.join("; ") : "ok"}`);
+}
+if (lcs.length) bad++;
+console.log(`    ${lcs.length ? "✗ " + lcs.join("; ") : "ok"}`);
+
+// «Результаты»: список карточек не должен прокручиваться по горизонтали, а
+// подъём карточки при наведении — срезаться верхней кромкой списка.
+console.log("\n  «Результаты»: переполнение и подъём карточки:");
+await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/results` });
+await new Promise((r) => setTimeout(r, 1500));
+const rcs = [];
+for (const [w, h] of [[1440, 900], [1160, 910], [1180, 720]]) {
+  await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false });
+  await new Promise((r) => setTimeout(r, 400));
+  const m = await evalJs("window.measureResults()");
+  for (const key of ["html", "body", "main", "host", "page", "list", "card"]) {
+    const b = m[key];
+    if (b.overX > 2) rcs.push(`${w}×${h}: ${key} прокручивается по X на ${b.overX}`);
+  }
+  if (m.docScrollW > m.docClientW + 2) rcs.push(`${w}×${h}: документ шире окна (${m.docScrollW} > ${m.docClientW})`);
+  // Колонка обязана лежать внутри панели: сдвиг `-рельса/2` выносил её за
+  // левый край, и заголовок экрана срезался краем окна.
+  if (m.page.l < m.main.l - 1) rcs.push(`${w}×${h}: колонка вылезает влево на ${px(m.main.l - m.page.l)} px`);
+  if (m.page.r > m.main.r + 1) rcs.push(`${w}×${h}: колонка вылезает вправо на ${px(m.page.r - m.main.r)} px`);
+  if (m.list.ovx !== "hidden") rcs.push(`${w}×${h}: overflow-x списка ${m.list.ovx}`);
+
+  // Подъём карточки: карточка под курсором едет вверх на 2 px, и список
+  // должен иметь на это место, иначе верхняя кромка срезается.
+  await evalJs("window.armLift()");
+  const cb = await evalJs("window.hoverCard()");
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: cb.x, y: cb.y });
+  await new Promise((r) => setTimeout(r, 600));
+  const lift = await evalJs("window.liftGap()");
+  if (lift.gap < 0) rcs.push(`${w}×${h}: карточка срезана сверху на ${px(-lift.gap)} px`);
+  if (lift.lift === 0) rcs.push(`${w}×${h}: подъём карточки не сработал`);
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: w - 30, y: h - 30 });
+  await new Promise((r) => setTimeout(r, 300));
+  console.log(`    ${String(w).padStart(4)}×${h}: вынос ${m.page.l - m.main.l}px, overflow-x списка ${m.list.ovx}, подъём ${lift.lift}px, запас сверху ${lift.gap}px  ${rcs.length ? "✗ " + rcs.join("; ") : "ok"}`);
+}
+if (rcs.length) bad++;
+console.log(`    ${rcs.length ? "✗ " + rcs.join("; ") : "ok"}`);
+
+// Модальное окно «Результат сессии»: баннер замечаний не должен съедать
+// треть окна (три отдельные плашки занимали именно столько), внутренние
+// блоки — без жёстких рамок, а строка «ещё N замечаний» обязана быть: без
+// неё часть причин исчезла бы из окна молча.
+console.log("\n  модалка «Результат сессии»:");
+await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/session` });
+await new Promise((r) => setTimeout(r, 1500));
+const mcs2 = [];
+for (const [w, h] of [[1440, 900], [1180, 720]]) {
+  await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false });
+  await new Promise((r) => setTimeout(r, 400));
+  const s = await evalJs("window.measureSession()");
+  const share = (s.alertsH / s.bodyH) * 100;
+  if (share > 22) mcs2.push(`${w}×${h}: баннер замечаний ${px(share)} % тела (порог 22 %)`);
+  if (!s.hasMore) mcs2.push(`${w}×${h}: нет строки «ещё N замечаний»`);
+  // Внутренние блоки держатся на заливке и разделителях, а не на рамках:
+  // рамка 1 px вокруг лидера, метрик и баннера — это ровно тот визуальный шум,
+  // который окно полировкой снимало.
+  for (const name of ["hero", "alerts", "chip"]) {
+    const bw = (s.borders[name] || "").split(" ").map(parseFloat);
+    if (bw.some((v) => v > 0.01)) mcs2.push(`${w}×${h}: у .${name} есть рамка ${s.borders[name]}`);
+  }
+  console.log(`    ${String(w).padStart(4)}×${h}: окно ${s.modalH}, тело ${s.bodyH}, замечания ${s.alertsH} (${px(share)} %), лидер ${s.heroH}, сравнение ${s.compareH}  ${mcs2.length ? "✗" : "ok"}`);
+}
+// Правило «сравнивать не с чем»: при одной замере схеме таблица не выводится.
+// Саму условную логику проверяет код, а стенд — что блок уходит ЦЕЛИКОМ, а не
+// наполовину: освободиться должно больше, чем занимает один только тулбар
+// секции. Иначе «скрытие» оставило бы шапку с поиском и сортировкой висеть
+// над пустотой — то есть ровно тот визуальный мусор, который правило убирает.
+await evalJs("window.setCompare(false)");
+await new Promise((r) => setTimeout(r, 300));
+const without = await evalJs("window.measureSession()");
+await evalJs("window.setCompare(true)");
+await new Promise((r) => setTimeout(r, 300));
+const withTbl = await evalJs("window.measureSession()");
+const freed = withTbl.bodyH - without.bodyH;
+if (freed < withTbl.toolbarH) {
+  mcs2.push(`скрытие таблицы освободило ${px(freed)} px — меньше одного тулбара (${px(withTbl.toolbarH)} px)`);
+}
+console.log(`    скрытие блока при одной схеме: +${px(freed)} px тела (тулбар занимает ${px(withTbl.toolbarH)} px)  ${freed >= withTbl.toolbarH ? "ok" : "✗"}`);
+if (mcs2.length) bad++;
+console.log(`    ${mcs2.length ? "✗ " + mcs2.join("; ") : "ok"}`);
+
+// Снимок окна — чтобы правку баннера и метрик можно было посмотреть глазами,
+// а не только по числам. Пишется в TEMP, в репозиторий не попадает.
+if (process.env.PB_SHOT) {
+  try {
+    const shot = await send("Page.captureScreenshot", { format: "png" });
+    require("fs").writeFileSync(path.join(OUT, "session-modal.png"), Buffer.from(shot.result.data, "base64"));
+    console.log(`    снимок: ${path.join(OUT, "session-modal.png")}`);
+  } catch (e) {
+    console.log("    снимок не сделан:", e.message);
+  }
+}
+
+// Подсказка внутри модалки: главный регресс этой правки. Подсказка обязана
+// стоять у своего значка и быть порталом в `body` — иначе она снова уедет в
+// угол, как только предок получит `transform` или `contain`.
+console.log("\n  подсказка внутри модалки:");
+await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/tip` });
+await new Promise((r) => setTimeout(r, 1500));
+const tps = [];
+for (const [w, h] of [[1440, 900], [1180, 720]]) {
+  await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false });
+  await new Promise((r) => setTimeout(r, 400));
+  // Перезагрузка после смены размера окна — обязательна именно здесь.
+  // `setDeviceMetricsOverride` меняет окно, но НЕ переносит уже
+  // отрисовавшиеся элементы `position: fixed`: пузырь оставался на старом
+  // месте (981/468 при новом `window.innerWidth` 1180), хотя его inline-стиль
+  // уже был верным. Замер читал именно старый прямоугольник и сообщал
+  // «пузырь на 98 px ниже значка» и «упирается в край окна». Остальные
+  // разделы проверки так не страдают: там нет фиксированных элементов,
+  // положение которых переносилось бы при смене окна.
+  await send("Page.reload");
+  await new Promise((r) => setTimeout(r, 900));
+  for (const [a, b] of [["anchor", "bubble"], ["anchor2", "bubble2"]]) {
+    await evalJs(`window.placeTip(${JSON.stringify(a)}, ${JSON.stringify(b)})`);
+    const t = await evalJs(`window.measureTip(${JSON.stringify(a)}, ${JSON.stringify(b)})`);
+    if (t.dy < 6 || t.dy > 10) tps.push(`${w}×${h} ${a}: пузырь на ${t.dy} px ниже значка (ожидалось 8)`);
+    // По горизонтали пузырь у значка только когда помещается справа; у правого
+    // края окна он прижимается к нему — это и есть штатная прижимка, а не
+    // ошибка. Поэтому проверяем не сдвиг, а результат: пузырь целиком в окне и
+    // не упирается в его границы.
+    if (!t.insideX || !t.insideY) tps.push(`${w}×${h} ${a}: пузырь вышел за окно`);
+    if (t.marginL < 7.5 || t.marginR < 7.5) tps.push(`${w}×${h} ${a}: пузырь упирается в край окна (${t.marginL}/${t.marginR})`);
+    if (t.position !== "fixed") tps.push(`${w}×${h} ${a}: position ${t.position}, ожидался fixed`);
+    if (!t.inBody) tps.push(`${w}×${h} ${a}: пузырь не портал в body — позиционирование снова могут перехватить`);
+    if (t.originX !== 0 || t.originY !== 0) tps.push(`${w}×${h} ${a}: containing block со смещением (${t.originX},${t.originY})`);
+    console.log(`    ${String(w).padStart(4)}×${h} ${a}: сдвиг ${t.dx}/${t.dy} px, ${t.w}×${t.h}, начало ${t.originX}/${t.originY}, портал ${t.inBody ? "да" : "нет"}`);
+  }
+}
+if (tps.length) bad++;
+console.log(`    ${tps.length ? "✗ " + tps.join("; ") : "ok"}`);
+
+// Ловушка, из-за которой подсказка уезжала в угол, стоит в самом CSS:
+// `fill-mode: forwards|both` сохраняет последний кадр анимации, и если в нём
+// `transform` НЕ `none`, элемент навсегда остаётся containing block для
+// `position: fixed` потомков. Проверяем по тексту собранного CSS: у каждого
+// keyframes, который где-либо играет с удержанием, последний кадр обязан
+// заканчиваться на `transform: none` (или вообще без transform).
+const cssText = fs.readFileSync(path.join(BUILD, "assets", cssHref), "utf8");
+const kf = {};
+const kfRe = /@keyframes\s+([\w-]+)\s*\{/g;
+let m2;
+while ((m2 = kfRe.exec(cssText))) kf[m2[1]] = m2.index;
+const holders = new Set();
+for (const mm of cssText.matchAll(/animation(?:-name)?\s*:\s*([^;}]+)/g)) {
+  const v = mm[1];
+  if (!/\b(forwards|both)\b/.test(v)) continue;
+  for (const name of v.matchAll(/([\w-]+)/g)) {
+    const n = name[1];
+    if (kf[n] !== undefined) holders.add(n);
+  }
+}
+const badKf = [];
+// Опасна только УДЕРЖИВАЕМАЯ анимация, которая заканчивается ВИДИМОЙ:
+// элемент остаётся в потоке и продолжает быть containing block для
+// position:fixed потомков. Выходные кадры ( Ripple, уезжающий тост и
+// уходящая вкладка) заканчиваются `opacity: 0` — их элемент либо убирается из
+// DOM, либо прозрачен, и перехват позиционирования через него невозможен.
+// Именно так выглядел баг с подсказкой: `.modal` играл `pb-pop-in` с
+// `both`, последний кадр был `opacity: 1; transform: scale(1)`.
+for (const name of holders) {
+  // Тело keyframes вырезается по балансу фигурных скобок: вложенных блоков
+  // внутри keyframes не бывает.
+  const start = kf[name];
+  const rest = cssText.slice(start);
+  const open = rest.indexOf("{");
+  let depth = 0, end = open;
+  for (let i = open; i < rest.length; i++) {
+    if (rest[i] === "{") depth++;
+    else if (rest[i] === "}") {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  const body = rest.slice(open + 1, end);
+  // Последний ключевой кадр: `to{...}` либо `100%{...}`.
+  const blocks = [...body.matchAll(/([\w%]+)\s*\{([^}]*)\}/g)];
+  if (!blocks.length) continue;
+  const last = blocks[blocks.length - 1][2];
+  const tf = last.match(/transform\s*:\s*([^;}]+)/);
+  if (!tf) continue;
+  const val = tf[1].trim();
+  if (val === "none") continue;
+  const op = last.match(/opacity\s*:\s*([^;}]+)/);
+  const visible = !op || parseFloat(op[1]) > 0.01;
+  if (visible) badKf.push(`${name} (последний кадр transform: ${val}, opacity ${op ? op[1].trim() : "1"})`);
+}
+if (badKf.length) {
+  bad++;
+  console.log(`\n  удержание анимации оставляет containing block: ${badKf.join("; ")}`);
+  console.log(`    эти keyframes играют с forwards/both и заканчиваются не на transform:none —`);
+  console.log(`    любой position:fixed потомок внутри них уедет на смещение предка.`);
+} else {
+  console.log(`\n  удерживаемых анимаций: ${holders.size}, ни одна не оставляет containing block  ok`);
+}
+
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/` });
 await new Promise((r) => setTimeout(r, 1200));
-  // симметрия относительно окна. Колонка уже `max-width`, поэтому на 1280+
-  // есть что центрировать, а на 1080 она занимает всю область.
-  console.log("  поля вокруг колонки (окно):");
+
+await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/` });
+await new Promise((r) => setTimeout(r, 1200));
+  // Симметрия колонки и отсутствие горизонтального выноса.
+  //
+  // Проверяется симметрия ВНУТРИ панели `.main`, а не относительно окна.
+  // Раньше колонка сдвигалась на половину рельсы, чтобы её центр совпал с
+  // центром окна; с отдельными панелями такой сдвиг выносил колонку за левый
+  // край панели (замер: `.main` с 84 px, `.page` с −3 px), заголовок срезался
+  // краем окна, а вынос давал горизонтальную прокрутку. Теперь колонка
+  // центрируется внутри своей панели, и симметрия считается от её краёв.
+  console.log("  поля вокруг колонки (панель):");
   const gp = [];
   for (const rail of [true, false]) {
     await evalJs(`window.collapse(${rail})`);
@@ -713,11 +1461,19 @@ await new Promise((r) => setTimeout(r, 1200));
       await send("Emulation.setDeviceMetricsOverride", { width: w, height: 900, deviceScaleFactor: 1, mobile: false });
       await new Promise((r) => setTimeout(r, 300));
       const g = await evalJs("window.measure()");
-      const diff = px(g.gapRight) - px(g.gapLeft);
-      // Колонка во всю область не центрируется: слева её отделяет рельса.
-      const fits = g.column < g.innerWidth - 300;
-      if (fits && Math.abs(diff) > 1) gp.push(`${label} ${w}: разница ${px(diff)} px`);
-      console.log(`    ${label.padEnd(11)} ${String(w).padStart(4)}: слева ${px(g.gapLeft)}  справа ${px(g.gapRight)}  разница ${String(px(diff)).padStart(5)}  колонка ${px(g.column)}  рельса ${px(g.railRight - g.railLeft)}  main[${px(g.mainLeft)}..${px(g.mainRight)}] body-right−main-right ${px(g.bodyRight - g.mainRight)}`);
+      const mainW = px(g.mainRight - g.mainLeft);
+      // Поля колонки внутри ПОЛЕЗНОЙ области панели (без глоба под полосу).
+      const gapL = px(g.columnLeft - g.contentLeft);
+      const gapR = px(g.contentRight - (g.columnLeft + g.column));
+      const diff = gapR - gapL;
+      // Колонка во всю область не центрируется — тогда поля равны нулю.
+      const fits = g.column < mainW - 300;
+      if (fits && Math.abs(diff) > 1) gp.push(`${label} ${w}: разница полей ${px(diff)} px`);
+      // Колонка обязана целиком лежать внутри панели: иначе она срезается.
+      if (gapL < -1) gp.push(`${label} ${w}: колонка вылезает влево на ${px(-gapL)} px`);
+      if (g.mainOverflowX > 2) gp.push(`${label} ${w}: панель прокручивается по X на ${g.mainOverflowX}`);
+      if (g.bodyOverflowX > 2) gp.push(`${label} ${w}: документ прокручивается по X на ${g.bodyOverflowX}`);
+      console.log(`    ${label.padEnd(11)} ${String(w).padStart(4)}: слева ${gapL}  справа ${gapR}  разница ${String(px(diff)).padStart(5)}  колонка ${px(g.column)}  панель ${mainW}  вынос ${g.mainOverflowX}/${g.bodyOverflowX}`);
     }
   }
   await evalJs("window.collapse(true)");
@@ -737,7 +1493,7 @@ await new Promise((r) => setTimeout(r, 1200));
       const p = [];
       if (m.bodyOverflowX > 2) p.push(`body ${m.bodyOverflowX}`);
       if (m.mainOverflowX > 2) p.push(`main ${m.mainOverflowX}`);
-      if (px(m.navGlyph) !== 16) p.push(`иконка ${m.navGlyph}`);
+      if (px(m.navGlyph) !== 20) p.push(`иконка ${m.navGlyph}`);
       if (p.length) bad++;
       console.log(`    ${d.padEnd(8)} ${t}: h1 ${String(px(m.tokens["--fs-h1"])).padEnd(5)} body ${String(px(m.bodyFont)).padEnd(5)} ctrl ${String(px(m.tokens["--ctrl-h"])).padEnd(5)} gap ${String(px(m.tokens["--gap"])).padEnd(5)} ${p.length ? "вњ— " + p.join("; ") : "ok"}`);
     }

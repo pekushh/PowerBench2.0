@@ -437,7 +437,15 @@ pub fn build_session_report_verbose(s: &SessionJson) -> String {
     let winner = rec
         .recommended_scheme
         .as_ref()
-        .and_then(|g| s.schemes.iter().find(|x| x.scheme_id == *g));
+        // Регресс H48/H49: GUID сравнивается регистронезависимо. `powercfg`
+        // отдаёт идентификаторы в верхнем регистре, а рекомендация могла прийти
+        // из чекпоинта, сохранённого в нижнем, — и победитель в отчёте просто
+        // исчезал («рекомендация: —» при непустой рекомендации).
+        .and_then(|g| {
+            s.schemes
+                .iter()
+                .find(|x| x.scheme_id.eq_ignore_ascii_case(g))
+        });
     let winner_name = winner
         .map(|w| esc(&w.name.clone().unwrap_or_else(|| w.scheme_id.clone())))
         .unwrap_or_else(|| "—".to_string());
@@ -939,7 +947,11 @@ fn render_sessions(sessions: &[&SessionJson]) -> String {
         let start = session_started_at_ns(s).unwrap_or(0);
         let stamp = date_time_stamp(start);
         let day = date_slice(&stamp, 6, 8);
-        let time = &stamp[9..15];
+        // Регресс H44: время бралось срезом `HHMMSS` и попадало в таблицу
+        // сырой строкой — «221320» вместо «22:13». Секунды в сводке сессий не
+        // нужны, а разделитель обязателен: метка времени в истории должна
+        // читаться как время, а не как слипшиеся цифры.
+        let time = time_hm(&stamp);
         let best = best_scheme(s);
         let name = best
             .and_then(|b| b.name.clone().or(Some(b.scheme_id.clone())))
@@ -990,13 +1002,17 @@ fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
     let winner = rec
         .recommended_scheme
         .as_ref()
-        .and_then(|id| s.schemes.iter().find(|x| &x.scheme_id == id));
+        .and_then(|id| {
+            s.schemes
+                .iter()
+                .find(|x| x.scheme_id.eq_ignore_ascii_case(id))
+        });
     let tie = matches!(rec.level.as_str(), "Equivalent" | "KeepCurrent");
     let has_winner = !tie && winner.is_some();
     for sch in &s.schemes {
         let is_win = has_winner
             && winner
-                .map(|w| w.scheme_id == sch.scheme_id)
+                .map(|w| w.scheme_id.eq_ignore_ascii_case(&sch.scheme_id))
                 .unwrap_or(false);
         let row_status = if sch.rejected {
             "rejected"
@@ -1350,14 +1366,18 @@ fn conditions_section(s: &SessionJson) -> String {
             bg_p95 = bg_p95.max(r.background_cpu_p95);
             let hits = sch.phases.iter().filter(|p| p.frequency_dropped()).count();
             if hits > 0 {
-                let name = sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone());
+                // Экранируем здесь, а не на выводе: строки собираются в
+                // список и уходят в разметку через `join`, где забыть про
+                // экранирование легко (регресс H45). Имя схемы приходит из
+                // `powercfg /list` и может содержать теги.
+                let name = esc(&sch.name.clone().unwrap_or_else(|| sch.scheme_id.clone()));
                 let entry = format!("{name} ({hits})");
                 if !dropped.contains(&entry) {
                     dropped.push(entry);
                 }
             }
             if let Some(p) = r.power.as_ref().and_then(|p| p.note()) {
-                let entry = format!("{}: {p}", name_of(sch));
+                let entry = format!("{}: {}", esc(&name_of(sch)), esc(&p));
                 if !power.contains(&entry) {
                     power.push(entry);
                 }
@@ -1665,6 +1685,19 @@ fn date_slice(stamp: &str, day0: usize, day1: usize) -> String {
         return stamp.to_string();
     }
     format!("{}.{}.{}", &stamp[day0..day1], &stamp[4..6], &stamp[0..4])
+}
+
+/// `ЧЧ:ММ` из UTC-метки `YYYYMMDDTHHMMSSZ###`.
+///
+/// Регресс H44. Отдельная функция, потому что срез времени использовался в
+/// двух местах, и в одном из них разделитель забыли: в таблице истории
+/// сессий выводилось `221320` вместо `22:13`. Метки короче 13 байт
+/// (неполная дата) возвращаются как есть, а не режутся по границе UTF-8.
+fn time_hm(stamp: &str) -> String {
+    if stamp.len() < 13 {
+        return stamp.to_string();
+    }
+    format!("{}:{}", &stamp[9..11], &stamp[11..13])
 }
 
 fn short_date(s: &SessionJson) -> String {
@@ -2077,6 +2110,7 @@ mod tests {
                 phase_index: 0,
                 stats: zero,
                 power: None,
+                seconds: 4,
             }],
             combined: zero,
             cross_phase_consistency: 0.0,
@@ -2092,9 +2126,14 @@ mod tests {
             }],
             spike_windows: 8,
             power: None,
+            scheme_dump: None,
             background_cpu_p50: 0.0,
             background_cpu_p95: 0.0,
             background_sample_seconds: 0,
+            worker_count: 4,
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:test".to_string(),
+            config_hash: "cfg-test".to_string(),
         }
     }
 
@@ -2229,6 +2268,10 @@ mod tests {
                         consistency_percent: 90.0,
                         frequency_drop_percent: if i == 2 { 6.0 } else { 0.0 },
                         frequency_mhz: if i == 2 { 4400.0 } else { 5200.0 },
+                        seconds: 10,
+                        samples_used: 3000,
+                        samples_raw: 3157,
+                        excluded_fraction: 0.05,
                     })
                     .collect();
                 a
@@ -2243,6 +2286,10 @@ mod tests {
                         consistency_percent: 88.0,
                         frequency_drop_percent: 0.0,
                         frequency_mhz: 5200.0,
+                        seconds: 10,
+                        samples_used: 3000,
+                        samples_raw: 3157,
+                        excluded_fraction: 0.05,
                     })
                     .collect();
                 b
@@ -2407,9 +2454,11 @@ mod tests {
                 throttled: true,
                 thermal_throttle: false,
                 policy_reason: 0,
+                max_idle_minutes: 0,
                 on_ac: true,
                 unavailable: true,
             }),
+            seconds: 4,
         }];
         s.schemes[0].per_run = vec![run];
         // Падение задаётся в сводке фаз, а не во флаге снимка питания.
@@ -2420,6 +2469,10 @@ mod tests {
             consistency_percent: 90.0,
             frequency_drop_percent: 6.0,
             frequency_mhz: 4400.0,
+            seconds: 10,
+            samples_used: 3000,
+            samples_raw: 3157,
+            excluded_fraction: 0.05,
         }];
         let html = build_session_report_verbose(&s);
         assert!(
@@ -2438,6 +2491,7 @@ mod tests {
             phase_index: 0,
             stats,
             power: None,
+            seconds: 4,
         });
         s.schemes[0].per_run = vec![run];
         s.schemes[0].phases = crate::result::SchemeJson::from_aggregate(
@@ -2479,6 +2533,10 @@ mod tests {
                 consistency_percent: 90.0,
                 frequency_drop_percent: 0.0,
                 frequency_mhz: 5200.0,
+                seconds: 10,
+                samples_used: 3000,
+                samples_raw: 3157,
+                excluded_fraction: 0.05,
             });
             s.schemes[1].phases.push(crate::result::PhaseSummaryJson {
                 name: format!("Фаза {i}"),
@@ -2487,6 +2545,10 @@ mod tests {
                 consistency_percent: 88.0,
                 frequency_drop_percent: 0.0,
                 frequency_mhz: 5200.0,
+                seconds: 10,
+                samples_used: 3000,
+                samples_raw: 3157,
+                excluded_fraction: 0.05,
             });
         }
         let html = build_session_report_verbose(&s);
@@ -2632,5 +2694,108 @@ mod tests {
         let html = build_session_report_verbose(&s);
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    /// Регресс H45: имя схемы в блоке «Условия замера» тоже экранируется.
+    ///
+    /// Эти строки собираются в список и уходят в разметку через `join`, где
+    /// `esc` легко забыть. Имя схемы приходит из `powercfg /list`, то есть это
+    /// данные извне: без экранирования отчёт выполнял бы HTML из имени
+    /// пользовательского плана питания.
+    #[test]
+    fn scheme_names_are_escaped_in_the_measurement_conditions_block() {
+        let mut s = sample_session("LEAD", 900.0);
+        let injection = "<img src=x onerror=alert(1)>";
+        let mut sch = SchemeJson::from_aggregate(
+            "COND".into(),
+            false,
+            None,
+            &empty_aggregate(500.0),
+            Vec::new(),
+        );
+        sch.name = Some(injection.to_string());
+        // Снижение частоты обязано попасть в этот блок.
+        sch.phases = vec![crate::result::PhaseSummaryJson {
+            name: "Лёгкая фаза".into(),
+            median_throughput: 500.0,
+            p1_throughput: 500.0,
+            consistency_percent: 90.0,
+            frequency_drop_percent: 55.0,
+            ..Default::default()
+        }];
+        s.schemes.push(sch);
+        let html = build_session_report_verbose(&s);
+        assert!(
+            !html.contains(injection),
+            "имя схемы попало в разметку без экранирования (HTML-инъекция)"
+        );
+        assert!(
+            html.contains("&lt;img src=x onerror=alert(1)&gt;"),
+            "имя схемы должно быть видно как текст"
+        );
+    }
+
+    /// Регресс H44: время в таблице истории — `ЧЧ:ММ`, а не слипшиеся `ЧЧММСС`.
+    #[test]
+    fn history_time_label_is_formatted_not_raw() {
+        // Метка ровно того вида, который даёт `date_time_stamp`.
+        let stamp = "20260927T221320Z000";
+        assert_eq!(time_hm(stamp), "22:13");
+        assert_eq!(
+            &stamp[9..15], "221320",
+            "тест должен воспроизводить исходный дефект"
+        );
+        // Короткая (неполная) метка не режется по границе UTF-8.
+        assert_eq!(time_hm("2026"), "2026");
+    }
+
+    /// В таблице сессий время выводится через `time_hm`, а не срезом `HHMMSS`.
+    #[test]
+    fn history_table_never_shows_a_raw_hhmmss_slice() {
+        let src = include_str!("report.rs");
+        let start = src
+            .find("fn render_sessions(")
+            .expect("не найден генератор таблицы истории");
+        let body = &src[start..];
+        let end = body[1..]
+            .find("\n/// ")
+            .map(|i| i + 1)
+            .expect("не найден конец генератора");
+        assert!(
+            !body[..end].contains("9..15"),
+            "сырой срез HHMMSS снова попал в отчёт: в истории будет «221320»"
+        );
+        assert!(
+            src.contains("let time = time_hm(&stamp);"),
+            "время в таблице истории обязано идти через time_hm"
+        );
+    }
+
+    /// Регресс H48: рекомендация ищется среди схем регистронезависимо.
+    ///
+    /// `powercfg` отдаёт GUID в верхнем регистре, а чекпоинт может хранить его
+    /// в нижнем. При точном `==` победитель в отчёте просто исчезал.
+    #[test]
+    fn winner_lookup_ignores_case() {
+        let mut s = sample_session("LEAD", 900.0);
+        let plain = build_session_report_verbose(&s);
+        // Имя победителя обязано попасть в отчёт: при не найденной схеме
+        // на его месте стоит прочерк.
+        assert!(
+            !plain.contains("Рекомендация: <b>-</b>"),
+            "подготовка: победитель не найден даже при точном регистре"
+        );
+        // Рекомендация записана в другом регистре, чем идентификатор схемы.
+        s.recommendation.recommended_scheme = Some("lead".to_string());
+        let lower = build_session_report_verbose(&s);
+        assert_eq!(
+            lower, plain,
+            "отчёт зависит от регистра GUID: схема с рекомендацией в другом регистре \
+             выглядит иначе"
+        );
+        assert!(
+            !lower.contains("Рекомендация: <b>-</b>"),
+            "победитель потерян из-за разного регистра GUID"
+        );
     }
 }

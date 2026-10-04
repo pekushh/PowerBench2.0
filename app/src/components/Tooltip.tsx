@@ -8,11 +8,32 @@
 //    один) в `title` нечитаема: она вылезает за край окна и обрезается.
 //
 // Здесь подсказка — обычный узел с `role="tooltip"`, показывается по наведению
-// и по фокусу, закрывается по Escape и при уходе указателя. Положение считается
-// после отрисовки: сначала сверху или снизу (по наличию места), затем по ширине
-// с прижатием к краю окна. Подсказка никогда не перекрывает сам контрол.
+// и по фокусу, закрывается по Escape и при уходе указателя.
+//
+// Два решения, из-за которых подсказка стояла не там, где надо:
+//
+// 1. `position: fixed` не означает «от окна». Любой предок с `transform`,
+//    `filter`, `will-change: transform` или `contain: layout` становится
+//    содержащим блоком для фиксированного потомка. В приложении таких
+//    предков два: `.modal` играет `pb-pop-in` с `fill-mode: both`, а
+//    последний кадр анимации заканчивается на `transform: scale(1)` — это
+//    не `none`, поэтому модалка остаётся containing block и после конца
+//    анимации; и `.scheme-card` / `.pick-card` с `contain: layout`.
+//    Координаты из `getBoundingClientRect()` относятся к окну, а применились
+//    они к модалке — и подсказка уезжала на её смещение от верхнего левого
+//    угла, то есть визуально «куда-то в угол». Поэтому подсказка рендерится
+//    порталом в `document.body`: её предком становится сам `body`, и ни один
+//    элемент страницы уже не может перехватить позиционирование.
+//
+// 2. Портал снимает и обрезание: скроллящийся предок с `overflow: hidden`
+//    (`.section-card`, `.schemes-scroll`) подсказку больше не срезает.
+//
+// Положение считается после отрисовки (размер известен только тогда): сначала
+// выбирается сторона по наличию места, затем ширина прижимается к краям окна.
+// Подсказка никогда не перекрывает свой контрол.
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 /** Сколько ждать наведения, прежде чем показать подсказку. */
 const OPEN_DELAY_MS = 350;
@@ -23,6 +44,10 @@ const GAP_PX = 8;
 /** Отступ от края окна: подсказка не должна упираться в границу. */
 const EDGE_PX = 8;
 const MAX_W = 340;
+const MIN_W = 160;
+
+/** Куда можно показать подсказку: четыре стороны, выбирается по месту. */
+type Side = "top" | "bottom";
 
 export function Tooltip({
   children,
@@ -34,7 +59,7 @@ export function Tooltip({
   text: ReactNode;
   /** Куда раскрывать по умолчанию. Если там не хватает места — в другую
    *  сторону: обрезанная подсказка хуже, чем не с той стороны. */
-  side?: "top" | "bottom";
+  side?: Side;
 }) {
   const id = useId();
   const anchor = useRef<HTMLSpanElement>(null);
@@ -50,26 +75,53 @@ export function Tooltip({
 
   useEffect(() => clear, [clear]);
 
-  // Положение считаем после того, как подсказка появилась в DOM: её размер
-  // известен только тогда, а без него нельзя ни выбрать сторону, ни прижать
-  // к краю окна.
+  // Положение пересчитываем не только при открытии. Пока подсказка видна,
+  // страницу можно прокрутить, а окно — изменить в размере (перетащили или
+  // развернули): без подписей подсказка остаётся на старом месте и уезжает
+  // от своего значка. Подписываемся в фазе захвата, потому что прокручиваются
+  // вложенные прокручиваемые области, а не только окно.
   useLayoutEffect(() => {
     if (!open) return;
-    const a = anchor.current;
-    const b = bubble.current;
-    if (!a || !b) return;
-    const r = a.getBoundingClientRect();
-    const bw = b.offsetWidth;
-    const bh = b.offsetHeight;
-    const room = side === "bottom" ? window.innerHeight - r.bottom : r.top;
-    const flip = room < bh + GAP_PX + EDGE_PX;
-    const top = (flip ? r.top - bh : r.bottom) + (flip ? -GAP_PX : GAP_PX);
-    const width = Math.min(MAX_W, Math.max(bw, 160), window.innerWidth - EDGE_PX * 2);
-    let left = r.left;
-    if (left + width > window.innerWidth - EDGE_PX) left = window.innerWidth - EDGE_PX - width;
-    if (left < EDGE_PX) left = EDGE_PX;
-    setPos({ top, left });
-  }, [open, side]);
+    const place = () => {
+      const a = anchor.current;
+      const b = bubble.current;
+      if (!a || !b) return;
+      const r = a.getBoundingClientRect();
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      // ШиринаKnown только после отрисовки, и она же ограничивается окном:
+      // на узком окне подсказка не должна быть шире его полезной части.
+      const width = Math.min(MAX_W, Math.max(b.offsetWidth, MIN_W), vw - EDGE_PX * 2);
+      const height = b.offsetHeight;
+
+      // Сторона: сперва запрошенная, противоположная — если в ней больше
+      // места. Затем прижимание к краям: подсказка показывается целиком
+      // либо не показывается вовсе, но никогда не наезжает на контрол.
+      let chosen: Side = side;
+      if ((side === "bottom" ? vh - r.bottom : r.top) < height + GAP_PX + EDGE_PX) {
+        const other: Side = side === "bottom" ? "top" : "bottom";
+        if ((other === "bottom" ? vh - r.bottom : r.top) > (side === "bottom" ? vh - r.bottom : r.top)) {
+          chosen = other;
+        }
+      }
+      let top = chosen === "bottom" ? r.bottom + GAP_PX : r.top - height - GAP_PX;
+      if (top + height > vh - EDGE_PX) top = vh - EDGE_PX - height;
+      if (top < EDGE_PX) top = EDGE_PX;
+
+      let left = r.left;
+      if (left + width > vw - EDGE_PX) left = vw - EDGE_PX - width;
+      if (left < EDGE_PX) left = EDGE_PX;
+      setPos({ top, left });
+    };
+
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, side, text]);
 
   const show = useCallback(() => {
     clear();
@@ -103,21 +155,30 @@ export function Tooltip({
       }}
     >
       {children}
-      {open ? (
-        <span
-          className="tt-bubble glass float"
-          ref={bubble}
-          role="tooltip"
-          id={id}
-          style={pos ? { top: pos.top, left: pos.left } : { visibility: "hidden" }}
-          // Указатель не должен наезжать на саму подсказку: наведение на текст
-          // внутри неё иначе вызывает hide.
-          onPointerEnter={clear}
-          onPointerLeave={hide}
-        >
-          {text}
-        </span>
-      ) : null}
+      {open
+        ? createPortal(
+            <span
+              className="tt-bubble glass float"
+              ref={bubble}
+              role="tooltip"
+              id={id}
+              // До первого расчёта подсказка невидима, но уже в потоке, иначе
+              // при первом кадре она мелькнёт в верхнем левом углу окна.
+              style={{
+                top: pos?.top ?? 0,
+                left: pos?.left ?? 0,
+                visibility: pos ? "visible" : "hidden",
+              }}
+              // Указатель не должен наезжать на саму подсказку: наведение на
+              // текст внутри неё иначе вызывает hide.
+              onPointerEnter={clear}
+              onPointerLeave={hide}
+            >
+              {text}
+            </span>,
+            document.body,
+          )
+        : null}
     </span>
   );
 }

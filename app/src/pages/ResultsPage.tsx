@@ -873,6 +873,22 @@ function SessionDetail({
   const leaderMedian = leader?.median_throughput ?? 0;
   const modeName = s.screening ? "Скрининг" : "Детально";
 
+  // Сравнивать не с чем — таблица не нужна.
+  //
+  // При одной схеме в сессии таблица «Сравнение схем питания» состояла из
+  // одной строки, повторявшей блок лидера выше: то же имя, то же число
+  // прогонов, та же медиана. Плюс тулбар с поиском, сортировкой и
+  // переключателем «С замерами / Все в сессии», где обе вкладки вели в
+  // один и тот же ряд. Ничего нового блок не сообщал и занимал около
+  // четверти окна.
+  //
+  // Условие — ДВЕ схемы с замерами, а не две в сессии: если одна из двух
+  // схем не набрала прогонов (карантин, ранняя остановка), сравнивать
+  // всё равно не с чем, и таблица с одним заполненным рядом так же
+  // бесполезна.
+  const comparableCount = s.schemes.filter((x) => x.runs > 0).length;
+  const showCompare = comparableCount >= 2;
+
   // Фильтр таблицы: пустые схемы (0 прогонов) по умолчанию скрыты, иначе
   // сессия на сотню схем выглядит как таблица из нулей.
   const [tblFilter, setTblFilter] = useState<"tested" | "all">("tested");
@@ -916,7 +932,7 @@ function SessionDetail({
     return has ? max : null;
   }, [s.schemes]);
 
-  const alerts: { title: string; text: string }[] = [];
+  const alerts: { title: string; text: string; strong?: boolean }[] = [];
   const leaderRuns = leader?.runs ?? 0;
   if (leaderRuns > 0 && leaderRuns < 3) {
     alerts.push({
@@ -934,20 +950,31 @@ function SessionDetail({
     alerts.push({
       title: `Фон до ${bgP95.toFixed(0)} % CPU:`,
       text: "95-й перцентиль фоновой нагрузки выше порога.",
+      // Фон и замер с риском меняют смысл числа, а не просто информируют:
+      // их видно первыми и без сокращения, даже если пунктов много.
+      strong: true,
     });
   }
   for (const w of s.warnings) {
     if (showBgChip && /фон/i.test(w) && /%/i.test(w)) continue;
     const cut = w.indexOf(": ");
-    alerts.push(
+    const row =
       cut > 0 && cut < 46
         ? { title: w.slice(0, cut + 1), text: w.slice(cut + 2) }
-        : { title: "Замечание:", text: w },
-    );
+        : { title: "Замечание:", text: w };
+    // Замер с риском — то же, что и перегруженный фон: пользователь шёл на
+    // этот компромисс сознательно, и в баннере оно должно быть видно сразу.
+    alerts.push(/риск/i.test(w) ? { ...row, strong: true } : row);
   }
   if (s.early_stop_reason) {
     alerts.push({ title: "Ранняя остановка:", text: s.early_stop_reason });
   }
+  // Баннер показывает первые несколько пунктов целиком, остальные — счётчиком.
+  // Три замечания — обычное дело для одиночного замера, а пять уже переполняют
+  // окно; лишние не выбрасываем, а сворачиваем в «ещё N».
+  const ALERTS_VISIBLE = 3;
+  const alertsShown = alerts.slice(0, ALERTS_VISIBLE);
+  const alertsHidden = alerts.length - alertsShown.length;
 
   const trustTitle = !leader
     ? "Сравнивать нечего: все схемы забракованы."
@@ -1030,13 +1057,46 @@ function SessionDetail({
       </section>
 
       {alerts.length > 0 ? (
-        <div className="alerts-strip">
-          {alerts.map((a, i) => (
-            <div className="alert-chip" key={i}>
-              <b>{a.title}</b>
-              {a.text}
-            </div>
-          ))}
+        /* Один баннер вместо трёх плашек: заведения в сетке по автоподбору
+           колонок занимали почти треть окна, и все они говорили об одном —
+           «результату нельзя доверять без оговорок». */
+        <div className="alerts-banner">
+          <span className="alerts-mark" aria-hidden="true">
+            ⚠
+          </span>
+          <div className="alerts-body">
+            <span className="alerts-title">
+              {alerts.length === 1 ? "Одно замечание к результату" : "Замечания к результату"}
+            </span>
+            {alertsShown.map((a, i) => (
+              <span className={`alert-row${a.strong ? " is-strong" : ""}`} key={i}>
+                <b>{a.title}</b>
+                <span>{a.text}</span>
+              </span>
+            ))}
+            {alertsHidden > 0 ? (
+              <span className="alert-more">
+                {/* Скрытые замечания не выбрасываются: полный список — в
+                    подсказке, иначе пользователь терял часть причин, по
+                    которым результату нельзя доверять. */}
+                <InfoTip
+                  text={
+                    <>
+                      {alerts
+                        .slice(ALERTS_VISIBLE)
+                        .map((a) => (
+                          <span key={a.title} style={{ display: "block" }}>
+                            <b>{a.title}</b> {a.text}
+                          </span>
+                        ))}
+                    </>
+                  }
+                />
+                {" ещё "}
+                {alertsHidden} {plural(alertsHidden, "замечание", "замечания", "замечаний")}
+              </span>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
@@ -1088,175 +1148,180 @@ function SessionDetail({
         </section>
       ) : null}
 
-      <section className="section-card">
-        <div className="schemes-toolbar">
-          <div className="st-left">
-            <h4 className="sc-title">Сравнение схем питания</h4>
-            {hasEmpty ? (
-              <div className="mini-tabs" role="tablist" aria-label="Какие схемы показывать">
+      {showCompare ? (
+        <section className="section-card">
+          <div className="schemes-toolbar">
+            <div className="st-left">
+              <h4 className="sc-title">Сравнение схем питания</h4>
+              {hasEmpty ? (
+                <div className="mini-tabs" role="tablist" aria-label="Какие схемы показывать">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={tblFilter === "tested"}
+                    className={`mtab${tblFilter === "tested" ? " active" : ""}`}
+                    onClick={() => setTblFilter("tested")}
+                  >
+                    С замерами ({testedCount})
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={tblFilter === "all"}
+                    className={`mtab${tblFilter === "all" ? " active" : ""}`}
+                    onClick={() => setTblFilter("all")}
+                  >
+                    Все в сессии ({s.schemes.length})
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            <div className="st-right">
+              {hasEmpty ? (
+                <label className="hide-empty" title="Схемы без прогонов при ранней остановке">
+                  <input
+                    type="checkbox"
+                    checked={tblFilter === "tested"}
+                    onChange={(e) => setTblFilter(e.target.checked ? "tested" : "all")}
+                  />
+                  Скрыть без замеров
+                </label>
+              ) : null}
+              <div className="mini-tabs">
                 <button
                   type="button"
-                  role="tab"
-                  aria-selected={tblFilter === "tested"}
-                  className={`mtab${tblFilter === "tested" ? " active" : ""}`}
-                  onClick={() => setTblFilter("tested")}
+                  className={`mtab${tblSort === "speed" ? " active" : ""}`}
+                  title="Сортировка по результату"
+                  onClick={() => setTblSort("speed")}
                 >
-                  С замерами ({testedCount})
+                  По скорости
                 </button>
                 <button
                   type="button"
-                  role="tab"
-                  aria-selected={tblFilter === "all"}
-                  className={`mtab${tblFilter === "all" ? " active" : ""}`}
-                  onClick={() => setTblFilter("all")}
+                  className={`mtab${tblSort === "alpha" ? " active" : ""}`}
+                  title="Сортировка по названию"
+                  onClick={() => setTblSort("alpha")}
                 >
-                  Все в сессии ({s.schemes.length})
+                  По названию
                 </button>
               </div>
-            ) : null}
-          </div>
-          <div className="st-right">
-            {hasEmpty ? (
-              <label className="hide-empty" title="Схемы без прогонов при ранней остановке">
-                <input
-                  type="checkbox"
-                  checked={tblFilter === "tested"}
-                  onChange={(e) => setTblFilter(e.target.checked ? "tested" : "all")}
-                />
-                Скрыть без замеров
-              </label>
-            ) : null}
-            <div className="mini-tabs">
-              <button
-                type="button"
-                className={`mtab${tblSort === "speed" ? " active" : ""}`}
-                title="Сортировка по результату"
-                onClick={() => setTblSort("speed")}
-              >
-                По скорости
-              </button>
-              <button
-                type="button"
-                className={`mtab${tblSort === "alpha" ? " active" : ""}`}
-                title="Сортировка по названию"
-                onClick={() => setTblSort("alpha")}
-              >
-                По названию
-              </button>
+              <input
+                type="search"
+                className="mini-search"
+                value={schemeQuery}
+                onChange={(e) => setSchemeQuery(e.target.value)}
+                placeholder="Поиск схемы…"
+                aria-label="Поиск схемы в таблице"
+              />
             </div>
-            <input
-              type="search"
-              className="mini-search"
-              value={schemeQuery}
-              onChange={(e) => setSchemeQuery(e.target.value)}
-              placeholder="Поиск схемы…"
-              aria-label="Поиск схемы в таблице"
-            />
           </div>
-        </div>
 
-        <div className="schemes-scroll">
-          <table className="schemes-tbl">
-            <thead>
-              <tr>
-                <th>Схема питания</th>
-                <th>Медиана, тик/с</th>
-                <th>ДИ 95%</th>
-                <th>Прогонов</th>
-                <th>Статус</th>
-              </tr>
-            </thead>
-            <tbody>
-              {shownSchemes.length === 0 ? (
+          <div className="schemes-scroll">
+            <table className="schemes-tbl">
+              <thead>
                 <tr>
-                  <td colSpan={5} className="tbl-empty">
-                    Ничего не найдено
-                  </td>
+                  <th>Схема питания</th>
+                  <th>Медиана, тик/с</th>
+                  <th>ДИ 95%</th>
+                  <th>Прогонов</th>
+                  <th>Статус</th>
                 </tr>
-              ) : (
-                shownSchemes.map((sch, i) => {
-                  const isLeader = leader != null && sch.scheme_id === leader.scheme_id;
-                  const isTested = sch.runs > 0;
-                  const pct =
-                    isTested && leaderMedian > 0
-                      ? Math.max(2, Math.min(100, Math.round((sch.median_throughput / leaderMedian) * 100)))
-                      : 0;
-                  const name =
-                    (sch.name ?? "").trim() ||
-                    schemeNames.get(sch.scheme_id.toLowerCase()) ||
-                    `Схема ${sch.scheme_id.slice(0, 8)}…`;
-                  return (
-                    <tr
-                      key={sch.scheme_id}
-                      className={
-                        isLeader ? "is-leader" : !isTested ? "is-untested" : undefined
-                      }
-                    >
-                      <td>
-                        <span className="rk-num">#{i + 1}</span>
-                        {isLeader ? "★ " : ""}
-                        {name}
-                        <span className="guid-tail">{sch.scheme_id.slice(0, 8)}…</span>
-                      </td>
-                      <td>
-                        {isTested ? (
-                          <span className="score-cell">
-                            <span className="score-bar">
-                              <i style={{ width: `${pct}%` }} />
+              </thead>
+              <tbody>
+                {shownSchemes.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="tbl-empty">
+                      Ничего не найдено
+                    </td>
+                  </tr>
+                ) : (
+                  shownSchemes.map((sch, i) => {
+                    const isLeader = leader != null && sch.scheme_id === leader.scheme_id;
+                    const isTested = sch.runs > 0;
+                    const pct =
+                      isTested && leaderMedian > 0
+                        ? Math.max(
+                            2,
+                            Math.min(100, Math.round((sch.median_throughput / leaderMedian) * 100)),
+                          )
+                        : 0;
+                    const name =
+                      (sch.name ?? "").trim() ||
+                      schemeNames.get(sch.scheme_id.toLowerCase()) ||
+                      `Схема ${sch.scheme_id.slice(0, 8)}…`;
+                    return (
+                      <tr
+                        key={sch.scheme_id}
+                        className={
+                          isLeader ? "is-leader" : !isTested ? "is-untested" : undefined
+                        }
+                      >
+                        <td>
+                          <span className="rk-num">#{i + 1}</span>
+                          {isLeader ? "★ " : ""}
+                          {name}
+                          <span className="guid-tail">{sch.scheme_id.slice(0, 8)}…</span>
+                        </td>
+                        <td>
+                          {isTested ? (
+                            <span className="score-cell">
+                              <span className="score-bar">
+                                <i style={{ width: `${pct}%` }} />
+                              </span>
+                              <b>{f1(sch.median_throughput)}</b>
                             </span>
-                            <b>{f1(sch.median_throughput)}</b>
-                          </span>
-                        ) : (
-                          "—"
-                        )}
-                      </td>
-                      <td className="mut">
-                        {isTested && sch.ci_95[0] > 0
-                          ? `[${f1(sch.ci_95[0])}; ${f1(sch.ci_95[1])}]`
-                          : "—"}
-                      </td>
-                      <td>{sch.runs}</td>
-                      <td>
-                        {!isTested ? (
-                          // Схема без прогонов: медиана неизвестна, а не ноль.
-                          // Причину брака (если она есть) отдаём в подсказке —
-                          // иначе строка молча теряет объяснение.
-                          <span
-                            className="st-badge skipped"
-                            title={sch.rejection_reason ?? undefined}
-                          >
-                            пропущена
-                          </span>
-                        ) : sch.rejected ? (
-                          // Причина брака — главное, ради чего строка и есть:
-                          // «забракована» без объяснения ни о чём не говорит.
-                          <span
-                            className="st-badge rejected"
-                            title={sch.rejection_reason ?? undefined}
-                          >
-                            забракована
-                            {sch.rejection_reason ? `: ${sch.rejection_reason}` : ""}
-                          </span>
-                        ) : isLeader ? (
-                          <span className="st-badge leader">лидер</span>
-                        ) : (
-                          <span className="st-badge">допущена</span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-        {rejectedCount > 0 ? (
-          <div className="tbl-note">
-            Забраковано схем: {rejectedCount}
-            {tblFilter === "tested" ? " — они спрятаны вкладкой «Все в сессии»." : "."}
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className="mut">
+                          {isTested && sch.ci_95[0] > 0
+                            ? `[${f1(sch.ci_95[0])}; ${f1(sch.ci_95[1])}]`
+                            : "—"}
+                        </td>
+                        <td>{sch.runs}</td>
+                        <td>
+                          {!isTested ? (
+                            // Схема без прогонов: медиана неизвестна, а не ноль.
+                            // Причину брака (если она есть) отдаём в подсказке —
+                            // иначе строка молча теряет объяснение.
+                            <span
+                              className="st-badge skipped"
+                              title={sch.rejection_reason ?? undefined}
+                            >
+                              пропущена
+                            </span>
+                          ) : sch.rejected ? (
+                            // Причина брака — главное, ради чего строка и есть:
+                            // «забракована» без объяснения ни о чём не говорит.
+                            <span
+                              className="st-badge rejected"
+                              title={sch.rejection_reason ?? undefined}
+                            >
+                              забракована
+                              {sch.rejection_reason ? `: ${sch.rejection_reason}` : ""}
+                            </span>
+                          ) : isLeader ? (
+                            <span className="st-badge leader">лидер</span>
+                          ) : (
+                            <span className="st-badge">допущена</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
           </div>
-        ) : null}
-      </section>
+          {rejectedCount > 0 ? (
+            <div className="tbl-note">
+              Забраковано схем: {rejectedCount}
+              {tblFilter === "tested" ? " — они спрятаны вкладкой «Все в сессии»." : "."}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
     </div>
   );
 }

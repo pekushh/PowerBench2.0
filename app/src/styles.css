@@ -1,11 +1,14 @@
-@font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-cyrillic-ext.woff2) format("woff2-variations");unicode-range:U+0460-052F,U+1C80-1C88,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
+﻿@font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-cyrillic-ext.woff2) format("woff2-variations");unicode-range:U+0460-052F,U+1C80-1C88,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-cyrillic.woff2) format("woff2-variations");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-latin-ext.woff2) format("woff2-variations");unicode-range:U+0100-02AF,U+0304,U+0308,U+0329,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
 @font-face{font-family:Inter Variable;font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-latin.woff2) format("woff2-variations");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
-:root{--bg-0: #0F0F0F;--bg-1: #1B1B1B;--bg-2: #2B2B2B;--bg-3: #303030;--line-1: #f3f3f31c;--line-2: #f3f3f338;--fg: #F3F3F3;--fg-dim: #ECECEC;--fg-mute: #7E7E7E;--accent: #FDFDFD;--ok: #6fd0a0;--warn: #e4b46f;--err: #e57979;--info: #5aa2f2;--okline: #6fd0a06b;--warnline: #e4b46f6b;--errline: #e579796b;--okbg: #6fd0a01f;--warnbg: #e4b46f1f;--errbg: #e579791f;--radius: 18px;color-scheme:dark}
+:root{--bg-0: #0F0F0F;--bg-1: #1B1B1B;--bg-2: #2B2B2B;--bg-3: #303030;--line-1: #f3f3f31c;--line-2: #f3f3f338;--fg: #F3F3F3;--fg-dim: #ECECEC;--fg-mute: #7E7E7E;--accent: #FDFDFD;--ok: #6fd0a0;--warn: #e4b46f;--err: #e57979;--info: #5aa2f2;--okline: #6fd0a06b;--warnline: #e4b46f6b;--errline: #e579796b;--okbg: #6fd0a01f;--warnbg: #e4b46f1f;--errbg: #e579791f;--radius: 18px;/* Текст на заливке `--accent`. В тёмной теме accent почти белый, и
+  нужен тёмный текст; в светлой accent — насыщенный (синий/фиолетовый), и
+  тёмный текст на нём нечитаем, поэтому там текст светлый. */
+  --on-accent: #111;color-scheme:dark}
 [data-theme=Ocean]{--accent: #58c7ee;--info: #4ab3e2;--bg-0: #0b1319;--bg-1: #0e1720}
 [data-theme=Violet]{--accent: #b8acff;--info: #8d8ffc;--bg-0: #110f1b;--bg-1: #141223}
-[data-mode=Light]{--bg-0: #eef1f6;--bg-1: #f3f5fa;--bg-2: #ffffff;--bg-3: #e8ebf2;--line-1: #10141f14;--line-2: #10141f2e;--fg: #15181f;--fg-dim: #4c5563;--fg-mute: #7b8496;color-scheme:light}
+[data-mode=Light]{--bg-0: #eef1f6;--bg-1: #f3f5fa;--bg-2: #ffffff;--bg-3: #e8ebf2;--line-1: #10141f14;--line-2: #10141f2e;--fg: #15181f;--fg-dim: #4c5563;--fg-mute: #7b8496;--on-accent: #fff;color-scheme:light}
 [data-mode=Light][data-theme=Graphite]{--accent: #4f6996;--info: #2f7fc0}
 [data-mode=Light][data-theme=Ocean]{--accent: #1e8fb8;--info: #1d84b4}
 [data-mode=Light][data-theme=Violet]{--accent: #6d5ae0;--info: #5b5fd0}
@@ -27,7 +30,7 @@
   --kt: 1;
 
   /* Раскладка окна. */
-  --rail-w: 64px; --side-w: 200px;
+  --rail-w: 64px; --side-w: 236px;
   --pad-x: clamp(14px, 2.6cqw, 40px);
   --content-max: 1120px;
   --content-w: min(var(--content-max), 100%);
@@ -88,7 +91,19 @@ html[data-text="l"]{--kt: 1.08}
    и та же кнопка тянула переходы из обеих. Псевдонимы убраны бы нельзя: на них
    ссылается больше сотни правил, и переписывать их — риск без выигрыша. */
   --ease: var(--e-out);--spring: var(--e-spring);
-  --dur-fast: var(--t-1);--dur: var(--t-2);--dur-slow: var(--t-3);--motion-pulse:1.6s
+  --dur-fast: var(--t-1);--dur: var(--t-2);--dur-slow: var(--t-3);--motion-pulse:1.6s;
+  /* Шкала слоёв наложения. Числа разнесены по decade-шагам, чтобы новый слой
+     нельзя было вклинить «между» двумя существующими: порядок задаётся
+     именем, а не величиной. Модалка перекрывает выпадающие меню, тосты лежат
+     над модалкой (иначе их не видно поверх затемнения), а подсказка — выше
+     всего: она живёт в портале на `body` и обязана быть видна и над
+     модалкой, и над тостом. */
+  --z-nav: 2;      /* рельса и её полоса-индикатор */
+  --z-sticky: 20;  /* липкие шапки таблиц внутри прокрутки */
+  --z-menu: 60;    /* выпадающие списки внутри страницы */
+  --z-modal: 70;   /* затемнение и окно */
+  --z-toast: 80;   /* уведомления поверх затемнения */
+  --z-tip: 90      /* подсказки: выше всего, портал в body */
 }
 *{box-sizing:border-box}
 /* Контейнер приложения: `cqw` и `@container` считают от ширины ОКНА, а не
@@ -109,56 +124,122 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 /* `.shell` — каркас окна. Контейнер для формул и порогов — `<html>`: его ширина
    равна ширине ОКНА, а у `.shell` есть отступы 10 px, и пороги сдвинулись бы на
    них (1280 превратился бы в 1260). */
-.shell{height:100vh;display:flex;flex-direction:column;gap:0;padding:10px;background:var(--bg-0)}
+/* ===== Оболочка: три отдельные скруглённые панели на общей подложке =====
+   Меню ТОЛКАЕТ контент, а не накрывает его: у сайдбара и рабочей области
+   своя рамка и свой радиус, между ними — зазор. Раньше шапка, меню и контент
+   были склеены в одну форму (радиус только у двух углов), и при переходе
+   между вкладками край панели «плыл» рядом с содержимым. */
+.shell{height:100vh;display:flex;flex-direction:column;gap:10px;padding:10px;background:var(--bg-0)}
 /* Текущая ширина рельсы нужна `.page` для компенсации (см. `.page`), поэтому она
    объявляется на `.body` — общем предке рельсы и рабочей области: и `.sidebar`
    берёт оттуда `flex-basis`, и `.page` — сдвиг под центровку в окне. */
 .shell .body{--rail-cur:var(--side-w)}
 .shell.rail-collapsed .body{--rail-cur:var(--rail-w)}
-.titlebar{flex:0 0 48px;display:flex;align-items:center;gap:4px;padding:0 10px 0 16px;background:var(--bg-1);border:1px solid var(--line-1);border-bottom:0;border-radius:var(--radius-lg) var(--radius-lg) var(--radius-lg) 0;-webkit-user-select:none;user-select:none}
+
+/* ===== Шапка =====
+   Высота 52 px, кнопка меню 38×38 со скруглением 10 px, название — с
+   отступом слева, состояние приложения отбито вертикальной чертой, чип железа
+   — пилюля, кнопки окна — 42×32 со скруглением 8 px. */
+.titlebar{flex:0 0 52px;display:flex;align-items:center;gap:6px;padding:0 10px;background:var(--bg-1);border:1px solid var(--line-1);border-radius:var(--radius-lg);overflow:hidden;-webkit-user-select:none;user-select:none}
 /* Бренд не тянется: иначе `flex: 1` съедал всё свободное место и название
    раздела с чипами прижимались к кнопкам окна вплотную. */
-.titlebar-brand{display:flex;align-items:center;gap:10px;flex:0 0 auto;min-width:0;font-size:var(--fs-body);font-weight:600;color:var(--fg);letter-spacing:.1px}
+.titlebar-brand{display:flex;align-items:center;gap:8px;flex:0 0 auto;min-width:0;margin-left:4px;font-size:var(--fs-body);font-weight:700;color:var(--fg);letter-spacing:.2px}
+/* Состояние приложения: тонкая вертикальная черта отделяет его от названия.
+   Название раздела сюда не выводится — оно уже написано крупно на странице,
+   и в шапке полезнее то, чего на экране нет («Идёт замер · раунд 2»). */
+.titlebar-section{margin-left:8px;padding-left:14px;border-left:1px solid var(--line-2);color:var(--fg-mute);font-size:var(--fs-meta);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .titlebar-chips{display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;margin-left:auto;overflow:hidden}
-.titlebar-brand .mark{width:12px;height:12px;border-radius:4px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 52%,#fff));box-shadow:0 0 14px -3px var(--accent)}
-.titlebar-controls{display:flex;align-items:center;gap:4px}
-.titlebar-btn{height:32px;min-width:40px;display:grid;place-items:center;border:0;background:transparent;color:var(--fg-dim);border-radius:var(--radius-sm);cursor:pointer;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.titlebar-controls{display:flex;align-items:center;gap:2px}
+.titlebar-btn{width:42px;height:32px;display:grid;place-items:center;border:0;background:transparent;color:var(--fg-mute);border-radius:8px;cursor:pointer;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease)}
 .titlebar-btn:hover{background:var(--bg-3);color:var(--fg)}
-.titlebar-btn.close:hover{background:var(--err);color:#fff}
+.titlebar-btn:active{transform:translateY(1px)}
+.titlebar-btn.close:hover{background:#d3453c;color:#fff}
 .titlebar-btn svg{width:15px;height:15px}
 
-.titlebar .split{width:1px;height:20px;background:var(--line-2);margin:0 6px}
 .body{flex:1;display:flex;min-height:0;gap:10px}
 /* Ширина панели задаётся токеном `--side-w`, а не числом: раньше здесь стояло
    `flex: 0 0 200px`, а `--side-w` из той же строки `:root` читался только для
    сдвига колонки под центр окна. Правка токена двигала сдвиг, но не саму
    панель, и поля вокруг колонки переставали быть симметричными. */
-.sidebar{position:relative;flex:0 0 var(--side-w);display:flex;flex-direction:column;padding:12px 10px;gap:4px;background:var(--bg-1);border:1px solid var(--line-1);border-top:0;border-radius:0 0 var(--radius-lg) var(--radius-lg);overflow:hidden;transition:flex-basis var(--t-3) var(--e-out)}
-.sidebar.collapsed{flex-basis:var(--rail-w)}
-.sidebar-nav{display:flex;flex-direction:column;gap:4px}
-.sidebar-foot{margin-top:auto;display:flex;flex-direction:column;gap:4px;border-top:1px solid var(--line-1);padding-top:8px}
-.nav-item{position:relative;display:flex;align-items:center;justify-content:center;gap:10px;padding:10px 12px;text-align:center;border-radius:var(--radius-md);color:var(--fg-dim);font-size:var(--fs-body);font-weight:500;cursor:pointer;white-space:nowrap;background:transparent;border:0;font-family:inherit;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease)}
-/* Активный пункт: мягкий фон и белая иконка. Полоса-акцент убрана — при
-   ширине колонки 200 px она стояла вплотную к краю и выглядела случайной. */
-.nav-item:before{display:none}
-/* Активный пункт: мягкая заливка и обводка, без рамки вокруг иконки. */
-.nav-item:hover{background:rgba(255,255,255,.035);color:var(--fg-dim)}
-.nav-item.active{background:rgba(255,255,255,.06);border-color:var(--line-2);color:var(--fg)}
-.nav-item.active .nav-glyph{color:var(--accent)}
-.nav-glyph{flex:0 0 auto;display:grid;place-items:center;width:22px;height:22px;color:var(--fg-mute)}
+/* `overflow:hidden` у панели убран намеренно: он срезал бы подсказку
+   свёрнутого меню, которая выходит за панель вправо.
 
-/* Свёрнутый сайдбар: ровные квадраты, состояние показывают фон и цвет иконки.
-   Геометрия свёрнутого вида задана ниже, в блоке «Рельса: геометрия по
-   замерам в пикселях»; здесь только нижний блок настроек, который не должен
-   отделяться линией, и общая ширина панели. */
-.sidebar.collapsed .sidebar-foot{border-top:0;padding-top:8px}
+   Взамен обязателен `min-width:0`. У flex-элемента `min-width:auto`
+   разрешается в min-content, и снятие `overflow:hidden` это вернуло: панель
+   перестала помещаться в `flex-basis` и на всех узких окнах залипала на
+   min-content (64 px) вместо 62/58 — токен `--rail-w` переставал влиять на
+   ширину вовсе. Обрезать углы теперь нечего: все children лежат внутри
+   отступов 10 px, а линия подвала проведена с отступом (см. `.sidebar-foot`).
+
+   `z-index: 2` — панель поднимается над `.main`. Иначе подсказка свёрнутого
+   меню, которая по замыслу выходит за панель вправо, оказывалась под
+   содержимым: `.main` идёт в разметке позже и заливал собой её правую
+   часть. Собственного контекста у `position:relative; z-index:auto` нет,
+   поэтому `z-index` на подсказке сравнивался с корнем, а не с `.main`. */
+.sidebar{position:relative;z-index:var(--z-nav);flex:0 0 var(--side-w);min-width:0;display:flex;flex-direction:column;background:var(--bg-1);border:1px solid var(--line-1);border-radius:var(--radius-lg);transition:flex-basis var(--t-3) var(--e-out);will-change:flex-basis}
+/* `will-change: flex-basis` поднимает панель в отдельный слой композиции, и
+   анимация ширины идёт без пересчёта раскладки в каждом кадре.
+
+   `overflow` здесь ставить нельзя: подсказка свёрнутого пункта выходит за
+   правый край панели вправо (`.nav-item::after`, `left: calc(100% + 14px)`),
+   и любое обрезание срезало бы её по краю рельсы — см. правило ниже. Горизонтальная
+   полоса прокрутки при сворачивании и не появляется: панель стоит слева, её
+   ширина уменьшается, а подсказка уходит вправо уже по месту. */
+.sidebar.collapsed{flex-basis:var(--rail-w)}
+.sidebar-nav{display:flex;flex-direction:column;gap:2px;padding:10px}
+/* Линия подвала — с отступом, а не `border-top` во всю ширину: панель больше
+   не обрезается по скруглению, и линия во всю ширину выглядывала бы за
+   нижние углы на пару пикселей.
+
+   Отступы блока заданы ТЕМИ ЖЕ значениями, что у `.sidebar-nav`. Раньше здесь
+   стояло `padding: 10px`, а у списка — `10px 10px 0`: нижний отступ differed,
+   и нижняя кнопка стояла на 10 px выше нижней грани панели, тогда как верхние
+   пункты упирались в неё вплотную. На глаз активная «Настройки» выглядела
+   отдельной, «приподнятой» кнопкой — читалось как другой элемент, а не как
+   пункт того же меню. */
+.sidebar-foot{position:relative;margin-top:auto;display:flex;flex-direction:column;gap:2px;padding:10px}
+.sidebar-foot::before{content:"";display:block;height:1px;margin:0 0 8px;background:var(--line-1);flex:0 0 auto}
+/* Пункт меню. Высота не задана: её даёт `padding` 10 px плюс иконка 20 px,
+   то есть 40 px — ровно столько же, сколько занимает кнопка в свёрнутом
+   виде. Оба состояния поэтому совпадают по высоте, и при сворачивании меню
+   набор пунктов не прыгает.
+   `gap: 12px` и `padding: 10px 14px` — иконка и подпись стоят в ряд слева,
+   обе по центру по вертикали. */
+.nav-item{position:relative;display:flex;align-items:center;gap:12px;width:100%;padding:10px 14px;border-radius:10px;color:var(--fg-mute);font-size:var(--fs-body);font-weight:600;cursor:pointer;white-space:nowrap;background:transparent;border:0;font-family:inherit;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),width var(--t-3) var(--e-out)}
+/* Активный пункт: заливка accent и текст на ней. Полоса-индикатор рисуется
+   отдельным элементом (`.pb-nav-ind`), а не `:before`: он должен переезжать
+   между пунктами плавно и гаснуть, когда пункт ушёл за прокрутку. */
+.nav-item:before{display:none}
+.nav-item:hover{background:var(--bg-2);color:var(--fg)}
+.nav-item.active{background:var(--accent);color:var(--on-accent)}
+.nav-item.active:hover{background:var(--accent);color:var(--on-accent)}
+/* Иконка пункта: 20 px, оптическая масса одна на всех. Размер задан на
+   обёртке, а не на `svg`: правило для `svg` перебило бы правило для обёртки
+   по специфичности, и иконки разъезжались бы по пунктам. */
+.nav-glyph{flex:0 0 20px;display:flex;align-items:center;justify-content:center;color:currentColor}
+.nav-glyph svg{width:20px;height:20px;flex:0 0 20px}
+/* Подпись схлопывается по ширине, а не исчезает: `display:none` обрывал бы
+   анимацию, и набор пунктов дёргался при сворачивании меню.
+
+   Ширина кнопки анимируется синхронно (`transition: width` у `.nav-item`),
+   поэтому подпись всё время остаётся внутри своей кнопки и не вылезает
+   поверх содержимого, пока панель сужается. */
+.nav-label{margin-left:12px;max-width:calc(var(--side-w) - 60px);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:1;transition:max-width var(--t-3) var(--e-out),margin-left var(--t-3) var(--e-out),opacity var(--dur-fast) var(--ease)}
+.sidebar.collapsed .nav-label{max-width:0;margin-left:0;opacity:0}
 /* Отступы контента: по бокам адаптивный `--pad-x` (14–40 px), сверху и снизу
    смысловые интервалы `--sp-5` / `--sp-6` (ТЗ С-4, C.4). */
 /* Отступы контента — один стандарт для всех экранов: сверху и снизу
    `--sp-5` (16–24 px), по бокам `--pad-x` (14–40 px). Раньше снизу стоял
    `--sp-6` (20–32 px), и низ длинной страницы отходил от края окна сильнее,
    чем верх. */
-.main{flex:1;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding:var(--sp-5) var(--pad-x);display:flex;flex-direction:column}
+/* Рабочая область — третья панель оболочки: своя рамка и свой радиус, зазор
+   10 px до сайдбара.
+
+   Фон — `--bg-0`, а не `--bg-1` как у шапки и меню: контентная область
+   должна остаться той же подложкой, что и окно. На `--bg-1` светлая
+   центральная панель залипала белым и по палитре отличалась от остальной
+   тёмной темы. */
+.main{flex:1;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding:var(--sp-5) var(--pad-x);display:flex;flex-direction:column;background:var(--bg-0);border:1px solid var(--line-1);border-radius:var(--radius-lg)}
 .page-host{display:none}
 /* Обёртка страницы — flex-элемент `.main`. `1 1 auto` позволял ей сжаться до
    высоты окна: длинная страница тогда не росла, её низ уходил за пределы
@@ -190,17 +271,18 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
    верху. `safe` здесь обязателен: без него flexbox центрирует и слишком
    высокий блок, и верхняя его часть становится недоступной для прокрутки.
 
-   `left: -рельса / 2` — сдвиг под горизонтальный центр ОКНА. `margin: 0 auto`
-   центрирует колонку внутри области ПОСЛЕ рельсы, поэтому её центр уезжает
-   вправо на половину ширины рельсы (замер на окне 1440: 192 px слева против
-   128 px справа). Сдвиг на половину рельсы даёт равные поля. Именно сдвиг, а не
-   `margin-right` у `.main`: сужение области на 74 px роняло сетку схем с трёх
-   колонок до двух на окне 1120.
+   Сдвига `left: -рельса / 2` больше нет. Он ставил колонку по центру ОКНА,
+   игнорируя рельсу, и был уместен, пока шапка, меню и контент были одной
+   склеенной формой. Теперь это три отдельные панели, у контента своя рамка и
+   свои отступы, и сдвиг выносил колонку ЗА левый край панели: замер на окне
+   1160 давал `.main` с 84 px и `.page` с −3 px. Заголовок экрана срезался краем
+   окна, а вынос за пределы панели давал горизонтальную прокрутку. Колонка
+   теперь центрируется внутри своей панели, и вылезать ей больше некуда.
 
-   Остаток — `scrollbar-gutter`: полоса прокрутки отнимается у `.main` только
-   справа, поэтому при глобе 15 px (WebView2) центр сместится ещё на ~7 px.
-   `both-edges` дал бы точность, но забрал бы лишние 30 px ширины на узких
-   окнах, поэтому оставлен `stable`.
+   `scrollbar-gutter`: полоса прокрутки отнимается у `.main` только справа, и
+   колонка центрируется по оставшейся области, а не по рамке панели. `both-edges`
+   дал бы симметрию с точностью до пикселя, но забрал бы лишние 30 px ширины на
+   узких окнах, поэтому оставлен `stable`.
 
    `justify-content: flex-start` — один для всех экранов. Раньше здесь стояло
    `safe center`, и короткая страница (настройки, схемы) вставала по центру по
@@ -208,7 +290,7 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
    между вкладками содержимое прыгало на треть высоты окна, а заголовок — на
    сотни пикселей. «Воздух» короткого экрана теперь просто пустое место под
    содержимым, и оно одинаково на всех вкладках. */
-.page{width:100%;max-width:var(--content-max);margin:0 auto;min-height:100%;display:flex;flex-direction:column;justify-content:flex-start;gap:var(--sp-4);position:relative;left:calc(var(--rail-cur) / -2);flex:0 0 auto}
+.page{width:100%;max-width:var(--content-max);margin:0 auto;min-height:100%;display:flex;flex-direction:column;justify-content:flex-start;gap:var(--sp-4);position:relative;flex:0 0 auto}
 /* Блоки страницы не сжимаются по высоте.
    `.page` — flex-контейнер, а у его детей `flex-shrink` по умолчанию равен 1.
    Если содержимое длиннее окна, карточки сжимались вместо того, чтобы страница
@@ -267,8 +349,16 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
    `max-height: min(52vh, 420px)`, и на низких окнах между ними и панелью
    параметров оставалась гарантированная пустота; у панели parameters был
    отдельный `margin-top: 14px`, из-за чего блок читался как три
-   разрозненные части, а не как «режим + его настройки». */
-.mode-grid{flex:1 1 auto}
+   разрозненные части, а не как «режим + его настройки».
+
+   Карточки больше не растягиваются на всю высоту шага. Сетка отдаёт всю
+   свободную высоту (`flex:1 1 auto`), но строки в ней не растут
+   (`align-content:center`), а сами карточки не растягиваются
+   (`align-items:center`). Без этого `align-content:stretch` по умолчанию
+   отдавал всю высоту единственной строке, а карточки заполняли её целиком:
+   две строки текста и ряд плашек с цифрами растягивались на пол-экрана и
+   читались пустыми. */
+.mode-grid{flex:1 1 auto;align-content:center;align-items:center;justify-content:center}
 /* Раскрытая панель параметров забирает свою долю высоты и растягивается
    изнутри: `.adv-body` — единая строка `1fr`, иначе карточка выросла бы, а
    поля остались бы прижаты к её верху. Свёрнутая (без `.open`) не растёт. */
@@ -376,7 +466,7 @@ table.grid tr:last-child td{border-bottom:0}
    Оверлей получает `isolation: isolate`: это его собственный контекст наложения,
    и всё, что внутри (строки таблиц с `z-index`, пилюли вкладок), больше не
    конкурирует с элементами снаружи. */
-.modal-overlay{position:fixed;top:0;right:0;bottom:0;left:0;z-index:70;display:grid;place-items:center;background:#0405098c;padding:var(--sp-6);isolation:isolate;animation:pb-veil-in var(--t-2) var(--e-out) both}
+.modal-overlay{position:fixed;top:0;right:0;bottom:0;left:0;z-index:var(--z-modal);display:grid;place-items:center;background:#0405098c;padding:var(--sp-6);isolation:isolate;animation:pb-veil-in var(--t-2) var(--e-out) both}
 .modal{width:min(460px,92vw);max-height:min(80vh,720px);display:flex;flex-direction:column;background:var(--bg-2);border:1px solid var(--line-2);border-radius:var(--radius-lg);box-shadow:var(--shadow-modal);animation:pb-pop-in var(--t-3) var(--e-spring) both}
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);padding:var(--sp-4) var(--sp-4) var(--sp-2)}
 .modal-title{font-size:var(--fs-title);font-weight:600}
@@ -455,23 +545,29 @@ table.grid .date{white-space:nowrap;font-variant-numeric:tabular-nums}
 @media (max-width: 560px){
 }
 /* --- ╨Т╨╛╤Б╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╤А╨╕ ╤А╨╡╨║╨╛╨╜╤Б╤В╤А╤Г╨║╤Ж╨╕╨╕: ╤Г╨▓╨╡╨┤╨╛╨╝╨╗╨╡╨╜╨╕╤П, ╤Б╨┐╨╕╨╜╨╜╨╡╤А╤Л num-in, ╤Г╨╖╨║╨╕╨╡ ╤Н╨║╤А╨░╨╜╤Л, ╨┐╨╡╤А╤Д ╤Б╨┐╨╕╤Б╨║╨░ --- */
-.toasts{position:fixed;right:16px;bottom:16px;z-index:80;display:flex;flex-direction:column;gap:8px;max-width:min(380px,90vw)}
+.toasts{position:fixed;right:16px;bottom:16px;z-index:var(--z-toast);display:flex;flex-direction:column;gap:8px;max-width:min(380px,90vw)}
 
 /* ===== Подсказки =====
    Уровень ниже тостов (90 против 80): подсказка живёт дольше тоста и не
    должна закрывать сообщение об ошибке. `isolation: isolate` — чтобы её
    `z-index` не конкурировал с элементами снаружи группы. */
+/* Подсказка живёт в портале на `document.body` (см. Tooltip.tsx), поэтому
+   позиционируется от окна и не зависит ни от `transform` предков (`.modal`
+   играет `pb-pop-in` с `fill-mode: both`), ни от их `overflow`. Ширину
+   ограничиваем и `max-width`, и `width`: второе нужно, чтобы длинный текст
+   переносился, а не уезжал за край окна. */
 .tt{position:relative;display:inline-flex;align-items:center}
 .tt-bubble{
   position:fixed;
-  z-index:90;
+  z-index:var(--z-tip);
   width:max-content;
-  max-width:340px;
+  max-width:min(340px,calc(100vw - 16px));
   padding:8px 10px;
   font-size:var(--fs-meta);
   line-height:1.45;
   color:var(--fg-dim);
   white-space:normal;
+  overflow-wrap:anywhere;
   pointer-events:auto;
   animation:tt-in var(--t-1) var(--e-out) both;
 }
@@ -508,7 +604,7 @@ table.grid .date{white-space:nowrap;font-variant-numeric:tabular-nums}
 
 .dd-btn{height:var(--ctrl-h);padding:0 34px 0 14px;border-radius:var(--radius-md);background:var(--bg-1);border:1px solid var(--line-2);color:var(--fg);font-size:var(--fs-body);font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
 .dd-btn:hover{border-color:color-mix(in srgb,var(--fg) 26%,var(--line-2))}
-.dd-menu{position:absolute;top:calc(100% + 6px);left:0;min-width:100%;z-index:60;display:flex;flex-direction:column;padding:6px;gap:2px}
+.dd-menu{position:absolute;top:calc(100% + 6px);left:0;min-width:100%;z-index:var(--z-menu);display:flex;flex-direction:column;padding:6px;gap:2px}
 .dd-item{border:0;background:transparent;color:var(--fg-dim);text-align:left;padding:8px 12px;border-radius:calc(var(--radius-md) - 3px);font-size:var(--fs-body);font-weight:500;cursor:pointer;white-space:nowrap}
 .dd-item:hover{background:var(--bg-3);color:var(--fg)}
 .dd-item.on{color:var(--accent)}
@@ -520,8 +616,35 @@ table.grid .date{white-space:nowrap;font-variant-numeric:tabular-nums}
 
 .dd-item.on{font-weight:600}
 /* Экраны с собственной прокруткой (логи, результаты) занимают всю высоту:
-   их список прокручивается внутри колонки и должен доходить до низа окна. */
-.page.fill{height:100%;min-height:0}
+   их список прокручивается внутри колонки и должен доходить до низа окна.
+
+   `overflow:hidden` — обязательная часть схемы, а не украшение. Прокрутка
+   внутри flex-колонки работает только если у самой колонки есть определённая
+   высота И запрет на собственный рост: при `min-height:0` без `hidden`
+   содержимое всё равно распирает колонку снизу, и полоса прокрутки уезжает
+   за нижний край окна. Ниже — правила, которые дают колонке эту высоту.
+
+   Две следующие схемы разные и обе нужны: на широком окне лента прокручивается
+   внутри карточки, на узком (≤780 px, см. правило ниже) страница не влезает в
+   окно целиком, там прокручивает `.main`. Смешивать их нельзя: если при
+   `height:auto` оставить `overflow:hidden` и запрет прокрутки `.main`,
+   содержимое просто обрежется без полосы прокрутки и до низа не добраться. */
+.page.fill{height:100%;min-height:0;overflow:hidden}
+/* Определённая высота берётся из `.main`: он flex-элемент с известной
+   высотой, а `.page-host` внутри — тоже flex-элемент. Раньше у обёртки стояло
+   `flex:1 0 auto`, её база равна содержимому, и `height:100%` у страницы
+   разрешался в «авто»: лента логов росла, а `.main` прокручивал целиком.
+   Тут важно и `flex-basis:0` (иначе контент снова задаёт базу), и
+   `overflow:hidden` на `.main` — иначе прокручиваются оба контейнера сразу,
+   и колесо мыши «уезжает» из ленты на страницу.
+
+   Порог 781 px — тот же, что и у переключателя ниже: с его стороны страница
+   возвращается к `height:auto` и прокрутке `.main`, и запрещать прокрутку
+   `.main` на узком окне было бы уже нельзя. */
+@media (min-width:781px){
+.main:has(>.page-host.on>.page.fill){overflow:hidden}
+.page-host.on:has(>.page.fill){flex:1 1 0;min-height:0}
+}
 .fill-list{flex:1 1 auto;min-height:160px;max-height:none}
 .section-title{font-size:var(--fs-h2);font-weight:650;margin:0 0 var(--sp-2);letter-spacing:-.1px}
 /* --- Настройки: раскладка «строка настройки» и карточки состояния --------- */
@@ -716,7 +839,14 @@ html.bench-running .modal{
 .ftab[data-level=warn] .cnt{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent)}
 .ftab[data-level=error] .cnt{color:var(--err);background:color-mix(in srgb,var(--err) 12%,transparent)}
 
-/* Карточка журнала. */
+/* Карточка журнала. `flex:1 1 auto` + `min-height:0` — обязательная пара:
+   без `min-height:0` карточка не сжимается ниже высоты ленты, лента не
+   получает ограниченную высоту и `overflow-y:auto` не включается — вместо
+   него страницу прокручивал `.main`, и колесо мыши уезжало из ленты вниз по
+   всей странице. `overflow:hidden` на карточке срезает содержимое по её
+   скруглённым краям, не давая полосе прокрутки вылезти за скругление.
+   Шапка (`flex:0 0 auto`) остаётся зафиксированной: прокручивается только
+   лента записей. */
 .log-card{flex:1 1 auto;min-height:0;background:var(--bg-1);border:1px solid var(--line-1);border-radius:var(--radius-lg);display:flex;flex-direction:column;overflow:hidden}
 .log-card-head{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);padding:9px var(--sp-4);border-bottom:1px solid var(--line-1);background:rgba(255,255,255,.015);font-size:var(--fs-sm);color:var(--fg-mute);flex:0 0 auto}
 .log-meta{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -725,7 +855,9 @@ html.bench-running .modal{
 .tool-btn:hover:not(:disabled){color:var(--fg);background:var(--bg-2);border-color:var(--line-2)}
 .tool-btn:disabled{opacity:.5;cursor:default}
 
-.log-list{flex:1 1 auto;min-height:0;overflow-y:auto;padding:4px 0;font-family:ui-monospace,Cascadia Code,Consolas,Liberation Mono,monospace;font-size:var(--fs-sm)}
+/* `overflow-x: hidden` — по той же причине, что и у `.session-list`: при
+   `overflow-y: auto` вторая ось вычисляется как `auto`. */
+.log-list{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:4px 0;font-family:ui-monospace,Cascadia Code,Consolas,Liberation Mono,monospace;font-size:var(--fs-sm)}
 /* Выравнивание по верху строки, а не по центру: у многострочной записи
    время и плашка уезжали на уровень второй строки. Вторая колонка — 80px,
    слова «ВНИМАНИЕ» в 68px упиралось в скруглённые края пилюли. */
@@ -754,7 +886,11 @@ html.bench-running .modal{
    этими ширинами один экран занимал окно целиком, а другой прокручивался
    внутри `.main`. */
 @media (max-width:780px){
-.page.fill{height:auto;min-height:0}
+/* Узкое окно: страница выше окна, поэтому колонка возвращает обычную
+   прокрутку `.main`. `overflow:visible` обязателен — при `height:auto`
+   оставшийся от широкого окна `hidden` обрезал бы низ ленты без полосы
+   прокрутки. */
+.page.fill{height:auto;min-height:0;overflow:visible}
 .log-controls{justify-content:stretch}
 .log-search{max-width:none}
 .support-bar{width:100%;justify-content:space-between;flex-wrap:wrap}
@@ -863,7 +999,11 @@ html.bench-running .modal{
 .sort-select{background:var(--bg-1);color:var(--fg-dim);border:1px solid var(--line-1);border-radius:9px;padding:6px 11px;font:inherit;font-size:var(--fs-sm);font-weight:500;cursor:pointer;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
 .sort-select:hover,.sort-select:focus{border-color:var(--line-2);color:var(--fg);outline:none}
 
-.session-list{display:flex;flex-direction:column;gap:10px;flex:1 1 auto;min-height:0;max-height:none;overflow-y:auto}
+/* `overflow-x: hidden` обязателен: при `overflow-y: auto` вторая ось
+   вычисляется как `auto`, и любой вынос за ширину — включая подсказку
+   свёрнутого меню, выходящую за панель, — превращался в горизонтальную
+   полосу прокрутки. */
+.session-list{display:flex;flex-direction:column;gap:10px;flex:1 1 auto;min-height:0;max-height:none;overflow-y:auto;overflow-x:hidden;padding:2px 0}
 .session-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:14px;padding:14px 18px;display:grid;grid-template-columns:minmax(200px,1.4fr) auto auto;align-items:center;gap:20px;transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease)}
 .session-card:hover{border-color:var(--line-2);background:color-mix(in srgb,var(--bg-2) 70%,var(--bg-1))}
 .session-card.is-unreadable{opacity:.7}
@@ -914,7 +1054,7 @@ html.bench-running .modal{
 .split-act>.act-secondary:first-child{border-top-right-radius:0;border-bottom-right-radius:0}
 .split-act .caret{padding:7px 7px;margin-left:-1px;border-top-left-radius:0;border-bottom-left-radius:0}
 .split-act .caret svg{width:12px;height:12px}
-.mini-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:40;min-width:104px;background:var(--bg-1);border:1px solid var(--line-2);border-radius:9px;padding:4px;box-shadow:var(--shadow-modal)}
+.mini-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:var(--z-menu);min-width:104px;background:var(--bg-1);border:1px solid var(--line-2);border-radius:9px;padding:4px;box-shadow:var(--shadow-modal)}
 .mini-menu button{display:block;width:100%;text-align:left;padding:6px 9px;border:0;border-radius:6px;background:transparent;color:var(--fg-dim);font:inherit;font-size:var(--fs-sm);cursor:pointer}
 .mini-menu button:hover{background:var(--bg-2);color:var(--fg)}
 /* ===== Правки по «Результатам»: шапка, тулбар, бейджи, кнопка удаления ===== */
@@ -993,29 +1133,56 @@ html.bench-running .modal{
 .sm-title{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;min-width:0}
 .sm-hw-meta{font-size:12px;font-weight:400;color:var(--fg-mute);font-variant-numeric:tabular-nums;line-height:1.4}
 
-/* Блок лидера и четыре метрики в один ряд */
-.leader-hero{background:var(--bg-1);border:1px solid var(--line-1);border-radius:13px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:nowrap;flex:0 0 auto}
+/* Блок лидера и четыре метрики в один ряд.
+   Рамки заменены мягкой заливкой: окно результата — единственное место, где
+   блок в блоке читалось как «список коробок». Та же логика ниже применена к
+   метрикам и баннеру замечаний. Границы остались только там, где без них
+   теряется смысл (липкая шапка таблицы, разделитель подвала). */
+.leader-hero{background:rgba(255,255,255,.045);border:0;border-radius:13px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:nowrap;flex:0 0 auto}
 .lh-left{min-width:0;flex:1 1 auto;overflow:hidden}
 /* Бейджи переносятся, а не наезжают на метрики: при nowrap третий бейдж
    уходил под правый блок и обрезался. */
 .lh-eyebrow{display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap}
 .badge-leader{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:5px;background:var(--okbg);color:var(--ok);border:1px solid var(--okline);white-space:nowrap;flex:0 0 auto}
-.badge-pill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;background:var(--bg-2);color:var(--fg-dim);border:1px solid var(--line-1);white-space:nowrap;flex:0 0 auto}
+.badge-pill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;background:rgba(255,255,255,.06);color:var(--fg-dim);border:0;white-space:nowrap;flex:0 0 auto}
 .badge-pill.level{color:var(--fg);cursor:help}
 .lh-name{font-size:20px;font-weight:800;color:var(--ok);letter-spacing:-.3px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lh-metrics{display:grid;grid-template-columns:repeat(4,auto);gap:6px;flex:0 0 auto;flex-shrink:0}
-.m-box{background:var(--bg-0);border:1px solid var(--line-1);border-radius:9px;padding:6px 10px;min-width:92px}
+/* Метрики — разделители вместо рамок: четыре коробки подряд читались как
+   «коробка в коробке в коробке». Вертикальная черта между ними не занимает
+   места и не добавляет рамок. */
+.m-box{background:transparent;border:0;border-left:1px solid var(--line-1);border-radius:0;padding:2px 10px;min-width:92px}
+.m-box:first-child{border-left:0;padding-left:0}
 .m-box small{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--fg-mute);margin-bottom:2px;white-space:nowrap}
 .m-box b{font-size:15px;font-weight:750;color:var(--fg);font-variant-numeric:tabular-nums}
 .m-box b.green{color:var(--ok)}
 .m-box span{font-size:11px;color:var(--fg-mute);margin-left:3px}
 
-/* Компактная полоса предупреждений: плашки в одну строку каждая, сетка
-   вместо flex — иначе жирный заголовок и текст вставали двумя колонками и
-   текст переносился на четыре строки. */
-.alerts-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px;flex:0 0 auto}
-.alert-chip{display:block;padding:7px 12px;border-radius:9px;background:var(--warnbg);border:1px solid var(--warnline);font-size:12px;line-height:1.35;color:var(--fg-dim);min-width:0}
-.alert-chip b{color:var(--warn);margin-right:4px}
+/* Баннер замечаний.
+   Раньше каждое замечание было отдельной жёлтой плашкой в сетке
+   `auto-fit minmax(280px, 1fr)`: на трёх замечаниях (скрининг, фон, замер с
+   риском) они занимали три колонки и почти треть окна, хотя все говорили об
+   одном — «доверять этому результату можно с оговорками». Теперь это один
+   блок с общим заголовком и списком пунктов: замечания перечисляются, но не
+   занимают отдельные коробки. На обратной стороне — тот же факт, сказанный
+   один раз, а не три раза.
+
+   Значок ⚠ — не текст, а глиф, поэтому предупреждение читается и без
+   цветового канала (при `--warn` близком к фону плашка сливалась). */
+.alerts-banner{display:flex;gap:9px;align-items:flex-start;padding:8px 12px;border-radius:11px;background:var(--warnbg);border:0;box-shadow:inset 2px 0 0 var(--warn);font-size:12px;line-height:1.35;color:var(--fg-dim);flex:0 0 auto}
+.alerts-mark{flex:0 0 auto;color:var(--warn);font-size:13px;line-height:1.35}
+.alerts-body{min-width:0;display:flex;flex-direction:column;gap:1px}
+.alerts-title{color:var(--warn);font-weight:600}
+/* Пункт замечаний: метка и текст в одной строке, метка не переносится.
+   `min-width: 0` у текста обязателен — иначе длинное слово в строке
+   растягивало весь пункт и подсказка уезжала за край окна. */
+.alert-row{display:flex;gap:6px;align-items:baseline;min-width:0}
+.alert-row b{color:var(--fg-dim);font-weight:600;flex:0 0 auto;white-space:nowrap}
+.alert-row span{min-width:0;overflow-wrap:anywhere}
+.alert-more{color:var(--fg-mute);font-size:11.5px;display:inline-flex;align-items:center;gap:2px}
+/* Критичное замечание (риск/загрузка) выделяется текстом, а не рамкой: рамка
+   вернула бы ту самую «коробку», ради ухода от которой всё затевалось. */
+.alert-row.is-strong b{color:var(--warn)}
 
 /* Карточки секций с компактной шапкой */
 .section-card{background:var(--bg-1);border:1px solid var(--line-1);border-radius:12px;overflow:hidden;flex:0 0 auto}
@@ -1029,10 +1196,10 @@ html.bench-running .modal{
 .phases-tbl th{text-align:right;font-size:11px;font-weight:600;color:var(--fg-mute);padding:5px 12px;border-bottom:1px solid var(--line-1);white-space:nowrap}
 /* Первая колонка таблиц прижата: при горизонтальной прокрутке на узком окне
    названия схем и фаз не уезжали за край (ТЗ 3.4). */
-.phases-tbl th:first-child,.schemes-tbl th:first-child{position:sticky;left:0;z-index:1}
+.phases-tbl th:first-child,.schemes-tbl th:first-child{position:sticky;left:0;z-index:var(--z-sticky)}
 .phases-tbl th:first-child{background:var(--bg-1)}
 .phases-tbl td:first-child{position:sticky;left:0;background:#161616}
-.schemes-tbl th:first-child{background:#1c1c1c;z-index:2}
+.schemes-tbl th:first-child{background:#1c1c1c;z-index:calc(var(--z-sticky) + 1)}
 .schemes-tbl td:first-child{position:sticky;left:0;background:#161616}
 .schemes-tbl td:first-child{text-align:left;font-weight:600}
 .phases-tbl th:first-child{text-align:left}
@@ -1134,7 +1301,15 @@ tr.is-leader .score-bar i{background:var(--ok)}
 
 /* Шаг 1: две карточки режимов рядом */
 .mode-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(calc(var(--k)*420px),1fr));gap:var(--gap)}
-.mode-card{background:var(--bg-1);border:1.5px solid var(--line-1);border-radius:14px;padding:18px 20px;cursor:pointer;display:flex;flex-direction:column;justify-content:space-between;gap:16px;transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease)}
+/* Карточка режима. Высота — по содержимому, а не по высоте шага:
+   `height:fit-content` в связке с `align-items:center` у сетки убирает
+   вертикальный stretch (иначе `align-items:stretch` по умолчанию растягивал
+   карточку на всю строку сетки). `justify-content:flex-start` вместо
+   `space-between`: при растянутой карточке `space-between` разводил
+   заголовок и ряд плашек по краям, и блок читался пустым. Теперь отступ
+   между ними задаёт `gap`, и порядок блоков внутри карточки прогляривается
+   без зазора: заголовок с описанием, затем параметры. */
+.mode-card{background:var(--bg-1);border:1.5px solid var(--line-1);border-radius:14px;padding:18px 20px;cursor:pointer;display:flex;flex-direction:column;justify-content:flex-start;gap:16px;height:fit-content;align-self:center;transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease)}
 .mode-card:hover{border-color:var(--line-2);background:#202020}
 .mode-card.selected{border-color:var(--fg-dim);background:linear-gradient(180deg,rgba(255,255,255,.04),var(--bg-1) 65%)}
 .mc-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
@@ -1385,7 +1560,14 @@ tr.is-leader .score-bar i{background:var(--ok)}
 @keyframes pb-fade-up   { from { opacity: 0; transform: translate3d(0, 10px, 0); } to { opacity: 1; transform: none; } }
 @keyframes pb-fade-in   { from { opacity: 0 } to { opacity: 1 } }
 @keyframes pb-veil-in   { from { opacity: 0 } to { opacity: 1 } }
-@keyframes pb-pop-in    { 0% { opacity: 0; transform: scale(.965); } 62% { opacity: 1; transform: scale(1.008); } 100% { opacity: 1; transform: scale(1); } }
+/* `pb-pop-in` заканчивается на `transform: none`, а НЕ на `scale(1)`. Это не
+   одно и то же: `fill-mode: both` у `.modal`, `.section-card` и прочих
+   сохраняет последний кадр анимации, и любой НЕ `none` transform делает
+   элемент containing block для `position: fixed` потомков. Модалка оставалась
+   им навсегда — подсказки внутри неё (`.tt-bubble`, `position: fixed` с
+   координатами окна) уезжали на смещение модалки от верхнего левого угла,
+   то есть визуально «куда-то в угол». */
+@keyframes pb-pop-in    { 0% { opacity: 0; transform: scale(.965); } 62% { opacity: 1; transform: scale(1.008); } 100% { opacity: 1; transform: none; } }
 @keyframes pb-overlay-in{ from { opacity: 0; transform: translate3d(0, 22px, 0) scale(.985); } to { opacity: 1; transform: none; } }
 @keyframes pb-ripple    { from { transform: scale(0); opacity: .30; } to { transform: scale(2.4); opacity: 0; } }
 @keyframes pb-breathe   { 0%, 100% { opacity: .35; transform: scale(1); } 50% { opacity: 1; transform: scale(1.35); } }
@@ -1464,7 +1646,12 @@ button:active,.ic-btn:active,.mini-ic:active,.act-pill:active{transform:scale(.9
 
 
 
-/* --- Аккордеон: раскрытие по высоте, а не по display:none --- */
+/* --- Аккордеон: раскрытие по высоте, а не по display:none ---
+   Раскрытая панель не обрезает содержимое: строка `1fr` получает всю высоту,
+   которую flex выдал `.adv-wrap.open`, а того хватает — панель тянется вместе
+   с окном. Проверять это надо ПОСЛЕ окончания перехода (`--t-3`, .26s):
+   мгновенный замер после переключения класса ловит панель в середине
+   анимации и даёт мнимую обрезку. */
 .adv-body{display:grid!important;grid-template-rows:minmax(0,0fr);opacity:0;padding:0!important;border-top:1px solid transparent!important;transition:grid-template-rows var(--t-3) var(--e-out),opacity var(--t-2) var(--e-out),border-color var(--t-2) var(--e-out)}
 .adv-clip{overflow:hidden;min-height:0;padding:16px 18px}
 .adv-wrap.open .adv-body{grid-template-rows:minmax(0,1fr);opacity:1;border-top-color:var(--line-1)!important}
@@ -1567,43 +1754,45 @@ html[data-motion="off"] *::after{
 .sidebar-nav::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:999px;border:3px solid transparent;background-clip:content-box}
 .sidebar-nav::-webkit-scrollbar-track{background:transparent}
 .sidebar-foot{position:relative;flex:0 0 auto}
-.nav-item{position:relative;overflow:hidden;transition:background-color var(--t-2) var(--e-out),border-color var(--t-2) var(--e-out),color var(--t-2) var(--e-out),transform var(--t-1) var(--e-out)}
+/* `overflow:hidden` у пункта убран: он срезал бы подсказку, которая в
+   свёрнутом виде выходит за панель на 10 px вправо. Волна на пункт не
+   рисуется (его нет в списке `RIPPLE_HOSTS`), срезать было нечего. */
+.nav-item{position:relative;transition:background-color var(--t-2) var(--e-out),color var(--t-2) var(--e-out),transform var(--t-1) var(--e-out)}
 .nav-item:active{transform:scale(.985)}
-.nav-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;transition:opacity var(--t-2) var(--e-out)}
+/* Повтор `.nav-label` ниже удалён: он задавал `transition: opacity` и thereby
+   заменил список переходов целиком (свойство `transition` не накапливается),
+   из-за чего `max-width` схлопывался мгновенно, а не анимировался. Свойства
+   `overflow` / `text-overflow` / `min-width` продублированы в основном правиле
+   выше; здесь осталось только правило для фокуса с клавиатуры. */
+.nav-label:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
 
 /* Уходящая вкладка: вниз на 6 px и гаснет. */
 .page-host.leaving{animation:pb-slide-out var(--t-2) var(--e-in-out) both}
 
 /* Название раздела в шапке: старое уходит вверх, новое приезжает снизу. */
 .titlebar-section{display:inline-flex;align-items:baseline;gap:8px;min-width:0}
-.titlebar-section.is-in{animation:pb-section-in var(--t-1) var(--e-out) both}
 
 
 
 /* Чип железа в шапке: короткое имя, полное — в подсказке. `.titlebar-chip.on`
    и точка `.dot-live` удалены вместе с плашкой «Тихий режим»: чип железа не
    меняет состояние и цвет, и оформления подсветки у него нет. */
-.titlebar-chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 9px;border-radius:var(--radius-full);border:1px solid var(--line-1);background:var(--bg-1);color:var(--fg-mute);font-size:var(--fs-meta);white-space:nowrap;transition:background var(--t-3) var(--e-out),border-color var(--t-3) var(--e-out),color var(--t-3) var(--e-out)}
+.titlebar-chip{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:var(--radius-full);border:1px solid var(--line-2);background:var(--bg-2);color:var(--fg-dim);font-size:var(--fs-meta);white-space:nowrap;transition:background var(--t-3) var(--e-out),border-color var(--t-3) var(--e-out),color var(--t-3) var(--e-out)}
+.titlebar-chip:hover{border-color:var(--line-2);color:var(--fg)}
+.titlebar-chip svg{width:14px;height:14px;flex:0 0 14px;color:var(--fg-mute)}
 /* ===== Шапка и меню по разбору оболочки =====
-   Знак приложения — плитка с молнией, кнопка меню — слева, кнопки окна — в
-   своём блоке за разделителем, чип железа короткий, а в крошке состояние, а
-   не название раздела. */
-.titlebar-brand{gap:8px}
-.titlebar-btn.menu{width:26px;min-width:26px;height:26px;border:1px solid var(--line-1);background:var(--bg-1)}
-.titlebar-btn.menu:hover{background:var(--bg-2);border-color:var(--line-2)}
-.titlebar-btn.menu svg{width:13px;height:13px}
-.titlebar-brand .mark{width:22px;height:22px;border-radius:7px;display:grid;place-items:center;background:linear-gradient(160deg,#2e2e2e,#171717);box-shadow:inset 0 0 0 1px #ffffff1a;color:var(--fg)}
-.titlebar-brand .mark svg{width:12px;height:12px}
-/* Кнопка с подписью: одна иконка без подписи читалась как «питание». */
-.titlebar-toggle{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:7px;border:1px solid var(--line-1);background:var(--bg-1);color:var(--fg-dim);font:600 11.5px/1 inherit;cursor:pointer;white-space:nowrap;transition:background var(--t-2) var(--e-out),border-color var(--t-2) var(--e-out),color var(--t-2) var(--e-out)}
-.titlebar-toggle:hover{background:var(--bg-2);border-color:var(--line-2);color:var(--fg)}
-.titlebar-toggle svg{width:12px;height:12px}
-.titlebar-toggle.off{color:var(--fg-mute);opacity:.8}
+   Кнопка меню — слева, кнопки окна — в своём блоке за разделителем, чип
+   железа короткий, а в крошке состояние, а не название раздела.
+   Знак приложения и кнопка «Анимации» удалены: молния у названия читалась
+   как отдельное действие, и рядом с ней стоял настоящий переключатель с
+   тем же знаком. Переключатель остался в «Настройках». */
+.titlebar-btn.menu{width:38px;min-width:38px;height:38px;border-radius:10px}
+.titlebar-btn.menu svg{width:20px;height:20px}
 .window-group{display:inline-flex;align-items:center;gap:2px;margin-left:8px;padding-left:8px;border-left:1px solid var(--line-1)}
-.titlebar-btn.close:hover{background:rgba(229,121,121,.92);color:#150505;border-color:transparent}
+.titlebar-btn.close:hover{background:#d3453c;color:#fff;border-color:transparent}
 
 /* Чип железа не обрезаем многоточием: короткое имя, полное — в подсказке. */
-.titlebar-chip.trunc{max-width:220px}
+.titlebar-chip.trunc{max-width:240px}
 .titlebar-chip.trunc>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Рельса: полоса прокрутки не должна прошивать иконки. В свёрнутом виде
@@ -1611,10 +1800,13 @@ html[data-motion="off"] *::after{
    появляющийся при наведении. */
 .sidebar-nav{scrollbar-color:transparent transparent}
 .sidebar-nav:hover{scrollbar-color:rgba(255,255,255,.16) transparent}
-.sidebar.collapsed .sidebar-nav{overflow:hidden}
+/* В свёрнутом виде список не прокручивается вовсе (пунктов пять, они всегда
+   помещаются), поэтому и обрезать нечего: `overflow` возвращён в `visible`,
+   иначе панель срезала бы подсказку по своему правому краю. */
+.sidebar.collapsed .sidebar-nav{overflow-y:visible;overflow-x:visible}
 /* У неактивного пункта подвала заливки нет: иначе «Настройки» выглядит
    главнее рабочих разделов. */
-.sidebar-foot .nav-item:not(.active){background:transparent}
+.sidebar-foot .nav-item:not(.active):not(:hover){background:transparent}
 /* ===== Правки по разбору скриншотов ===== */
 
 /* Индикатор активного пункта: один на всё меню, лежит в сайдбаре.
@@ -1626,7 +1818,7 @@ html[data-motion="off"] *::after{
    полоска стала бы обычным элементом списка — всё меню съезжало вниз на
    её высоту. Поэтому подъём задан на `.nav-item`, а не на общем селекторе
    с индикатором. */
-.pb-nav-ind{position:absolute;left:0;top:0;width:3px;height:0;border-radius:0 3px 3px 0;background:var(--accent);opacity:0;visibility:hidden;pointer-events:none;z-index:2;transition:transform var(--t-3) var(--e-spring),height var(--t-3) var(--e-spring),opacity var(--t-2) var(--e-out),visibility 0s linear var(--t-2)}
+.pb-nav-ind{position:absolute;left:0;top:0;width:3px;height:0;border-radius:0 3px 3px 0;background:var(--accent);opacity:0;visibility:hidden;pointer-events:none;z-index:var(--z-nav);transition:transform var(--t-3) var(--e-spring),height var(--t-3) var(--e-spring),opacity var(--t-2) var(--e-out),visibility 0s linear var(--t-2)}
 .pb-nav-ind.is-on{opacity:1;visibility:visible;transition:transform var(--t-3) var(--e-spring),height var(--t-3) var(--e-spring),opacity var(--t-2) var(--e-out)}
 /* После смены раскладки полоска встаёт на место сразу, без пролёта. */
 .pb-nav-ind.is-instant{transition:none}
@@ -1643,31 +1835,42 @@ html[data-motion="off"] *::after{
 .mode-card:not(.selected):hover .mc-radio{border-color:var(--fg-mute);color:color-mix(in srgb,var(--ok) 45%,transparent)}
 .mode-card.selected .mc-radio .chk{animation:pb-draw var(--t-3) var(--e-out) both}
 
-/* Полоса прокрутки не должна наезжать на иконки пунктов. */
-.sidebar-nav{padding-right:4px}
-.sidebar.collapsed .sidebar-nav{padding-right:0}
+/* Отступы панели задаёт только правило `.sidebar-nav` выше. Обнулять
+   `padding-right` здесь нельзя: правый отступ у `.sidebar-nav` был 10 px, и
+   без него блок пунктов становился шире слева, чем справа, — кнопки
+   центрировались по блоку, а не по рельсе (в рельсе 64 px они садились с
+   отступом 17 px слева и 7 px справа). Скроллбар в меню не появляется:
+   пунктов пять, и в свёрнутом виде список не прокручивается вовсе. */
 /* ===== Рельса: геометрия по замерам в пикселях =====
-   Иконка была смещена влево на 11 px: пункт центрировался, но подпись в
-   свёрнутом виде ещё занимала место и отжимала иконку. Теперь подпись убрана
-   полностью, квадрат строго 38×38 и центрирован, иконки единого размера.
-   Переход ширины задан один раз — в правиле `.sidebar` выше. */
-.sidebar.collapsed{padding:10px 8px}
-.sidebar.collapsed .nav-item{width:38px;height:38px;margin:0 auto;padding:0;display:grid;place-items:center;gap:0;border-radius:10px}
-/* Подпись в свёрнутом виде убирается, а не сжимается: сжатая подпись
-   оставалась в потоке и сдвигала иконку влево. Скругление и ширина панели
-   анимируются, поэтому кадр не дёргается. */
-.sidebar.collapsed .nav-label,.sidebar.collapsed .nav-glyph+.nav-label{display:none}
+   Рельса — ровно 64 px, и ВСЕ кнопки в ней строго одного размера: 40×40,
+   строго по центру. Размеры у активной и неактивных обязаны совпадать —
+   иначе белая плашка активного пункта вылезает за пределы рельсы или,
+   наоборот, неактивные пункты оказываются уже неё и ряд «прыгает».
+
+   64 − 2 (рамка) − 20 (отступы `.sidebar-nav`) = 42 px на кнопку, из них
+   40 занимает сама кнопка: по 1 px запаса с каждой стороны. `margin:0 auto`
+   центрирует её независимо от того, что происходит с подписью. */
+.sidebar.collapsed .nav-item{width:40px;height:40px;margin:0 auto;padding:0;gap:0;justify-content:center;border-radius:10px}
 /* Размер иконки задан на самом `svg`, а не на обёртке `.nav-glyph`:
    правило для `svg` перебивает правило для обёртки по специфичности, и
-   иконка в свёрнутом виде рендерилась 18 px вместо 16 — набор пунктов
-   «прыгал» при переключении. Отступ от квадрата 38 px до иконки 16 px
-   получается 11 px. */
-.nav-glyph svg{width:16px;height:16px}
-.sidebar.collapsed .nav-item.active{background:rgba(255,255,255,.06);border-color:var(--line-2);color:var(--fg)}
+   иконка в свёрнутом виде рендерилась 18 px вместо 20 — набор пунктов
+   «прыгал» при переключении. */
+.nav-glyph svg{width:20px;height:20px}
+/* Подсказка в свёрнутом виде: подпись схлопнута, и без неё пункт безымянен.
+   Рисуется на CSS, а не системным `title`, потому что системная появляется
+   с задержкой и живёт дольше наведения. Атрибут `title` в разметке при
+   свёрнутом виде снят, иначе подсказка показывалась бы дважды.
 
-/* Индикатор отодвинут от края окна на 4 px: у самого края его срезало
-   пополам, и он читался как случайный штрих на границе. */
-.pb-nav-ind{left:4px}
+   `position:absolute` (не `fixed`) и отступ 14 px от правого края кнопки:
+   подсказка выходит за панель вправо и не участвует в раскладке, поэтому
+   ширина рельсы от неё не зависит. Для этого `.sidebar` и `.nav-item` не
+   обрезают содержимое (`overflow: visible`) — см. комментарии у них. */
+.sidebar.collapsed .nav-item::after{content:attr(data-tip);position:absolute;left:calc(100% + 14px);top:50%;transform:translateY(-50%) scale(.97);transform-origin:left center;background:var(--bg-3);border:1px solid var(--line-2);color:var(--fg);font-size:var(--fs-meta);font-weight:500;padding:6px 10px;border-radius:8px;white-space:nowrap;opacity:0;pointer-events:none;z-index:40;box-shadow:var(--shadow-float);transition:opacity var(--dur-fast) var(--ease) 60ms,transform var(--dur-fast) var(--ease) 60ms}
+.sidebar.collapsed .nav-item:hover::after,.sidebar.collapsed .nav-item:focus-visible::after{opacity:1;transform:translateY(-50%) scale(1)}
+
+/* Индикатор активного пункта: полоса 3 px у левого края панели, вне заливки
+   активного пункта — иначе она пропала бы под его фоном. */
+.pb-nav-ind{left:3px;border-radius:0 3px 3px 0}
 /* ===== Аккордеон «Параметры теста» и состояние режима =====
    Заголовок плашки находится вне сворачиваемого контейнера, а у самой
    плашки минимальная высота: при смене ширины меню содержимое переставало
@@ -1713,18 +1916,13 @@ html[data-motion="off"] *::after{
   --card-pad: calc(var(--k) * clamp(12px, .6vw  + 7.5px, 16px));
   --log-time: clamp(52px, 5.2vw, 68px);
 }
-@media (max-width: 1279px){
-  [data-prio="2"]{display:none}
-}
 @media (max-width: 1079px){
-  .body{--rail-w:56px}
   [data-prio="1"]{display:none}
   .log-row{grid-template-columns:var(--log-time) minmax(0,1fr)}
   .l-badge{grid-column:2;justify-self:start}
   .support-bar{width:100%;justify-content:space-between;flex-wrap:wrap}
 }
 @media (max-width: 899px){
-  .body{--rail-w:52px}
   .ph-grid,.kpi-strip,.set-status,.launch-grid,.mode-grid{grid-template-columns:1fr}
   /* Степпер уходит на свою строку: заголовок, этапы и кнопки в одну строку на
      такой ширине уже не помещались. */
@@ -1745,12 +1943,7 @@ html[data-motion="off"] *::after{
    Переменные порогов задаются на `.body` — общем предке рельсы и рабочей
    области: ширина рельсы нужна обеим (`.sidebar` — свой `flex-basis`, `.main` —
    компенсация под центровку в окне). */
-@container app (max-width: 1279px){
-/* Кнопка «Анимации» — самая узкая из необязательных. */
-[data-prio="2"]{display:none}
-}
 @container app (max-width: 1079px){
-.body{--rail-w:56px}
 /* Железо — самый длинный чип (148 px). */
 [data-prio="1"]{display:none}
 /* Строка лога в две колонки: бейдж уходит под текст, иначе три колонки
@@ -1761,7 +1954,6 @@ html[data-motion="off"] *::after{
 .support-bar{width:100%;justify-content:space-between;flex-wrap:wrap}
 }
 @container app (max-width: 899px){
-.body{--rail-w:52px}
 /* Сетки, которые по ТЗ III.3 идут в одну колонку. */
 .ph-grid,.kpi-strip,.set-status,.launch-grid,.mode-grid{grid-template-columns:1fr}
 /* Степпер уходит на свою строку: заголовок, этапы и кнопки в одну строку на

@@ -217,11 +217,23 @@ export function LogLinesIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/** Кристалл процессора — чип железа в шапке. Крылья выводятся отдельными
+ *  штрихами: одним контуром кристалл читался бы как ромб. */
+export function CpuIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Base fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" {...props}>
+      <rect x="7" y="7" width="10" height="10" rx="2" />
+      <rect x="10.5" y="10.5" width="3" height="3" />
+      <path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" />
+    </Base>
+  );
+}
+
 /** Меню (свернуть/развернуть боковую панель). */
 export function MenuIcon(props: SVGProps<SVGSVGElement>) {
   return (
-    <Base fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" {...props}>
-      <path d="M4 6h16M4 12h10M4 18h16" />
+    <Base fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" {...props}>
+      <path d="M4 7h16M4 12h16M4 17h16" />
     </Base>
   );
 }

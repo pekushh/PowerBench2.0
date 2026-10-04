@@ -157,22 +157,21 @@ pub fn recover_interrupted_session(driver: &dyn SchemeDriver) -> RecoveryOutcome
         }
     };
 
-    let active = schemes.iter().find(|s| s.active).map(|s| s.guid.clone());
-    if active.as_deref() == Some(original.as_str()) {
-        // Уже активна исходная: помечаем восстановленной и сохраняем.
-        return with_freeze_note(
-            RecoveryOutcome::after_restore(&mut checkpoint, None),
-            freeze_note,
-        );
-    }
-
-    // Исходная схема должна существовать в списке (защита от битой CT).
+    // Никакого «уже активна — значит всё в порядке» по флажку `*` из
+    // `/list`: это тот же список, на котором раньше строился вывод
+    // «восстановлено». Источник истины один — подтверждение от ОС через
+    // `active_scheme()` внутри `restore_verified`.
     let name = schemes
         .iter()
         .find(|s| s.guid.eq_ignore_ascii_case(&original))
         .map(|s| s.name.clone());
 
-    if let Err(cause) = driver.set_active(&original) {
+    // Возврат с подтверждением от ОС. Раньше стоял «голый» `set_active`:
+    // `powercfg /setactive` возвращает код 0 и при этом может ничего не
+    // переключить (конфликт доменной политики, OEM-агент). Точка при этом
+    // помечалась восстановленной навсегда, и ни этот, ни следующий запуск
+    // уже не пытались вернуть пользователю его схему.
+    if let Err(cause) = crate::session::restore_verified(driver, &original) {
         let label = name
             .as_deref()
             .map(|n| format!(" «{n}»"))
@@ -184,7 +183,7 @@ pub fn recover_interrupted_session(driver: &dyn SchemeDriver) -> RecoveryOutcome
                 restored: false,
                 already_ok: false,
                 error: Some(format!(
-                    "не удалось восстановить исходную схему{label}: {cause:?}"
+                    "не удалось восстановить исходную схему{label}: {cause}"
                 )),
             },
             freeze_note,
@@ -226,6 +225,9 @@ mod tests {
         schemes: Vec<String>,
         active: std::cell::RefCell<String>,
         fail_restore: std::cell::RefCell<Option<String>>,
+        /// `set_active` возвращает `Ok`, но схему НЕ переключает — поведение
+        /// `powercfg /setactive` под доменной политикой.
+        lie_on_set: std::cell::RefCell<bool>,
     }
 
     impl FakeDriver {
@@ -234,6 +236,7 @@ mod tests {
                 schemes: schemes.iter().map(|s| s.to_string()).collect(),
                 active: std::cell::RefCell::new(active.to_string()),
                 fail_restore: std::cell::RefCell::new(None),
+                lie_on_set: std::cell::RefCell::new(false),
             }
         }
 
@@ -260,7 +263,9 @@ mod tests {
             if self.fail_restore.borrow().as_deref() == Some(guid) {
                 return Err("fail_restore".to_string());
             }
-            *self.active.borrow_mut() = guid.to_string();
+            if !*self.lie_on_set.borrow() {
+                *self.active.borrow_mut() = guid.to_string();
+            }
             Ok(())
         }
         fn active_scheme(&self) -> Result<String, String> {
@@ -283,6 +288,7 @@ mod tests {
             cooling_seconds: 0,
             repetitions: 1,
             background_threshold_percent: 5.0,
+            accept_dirty_background: false,
             worker_count: None,
             scheme_ids: vec!["test-a".to_string()],
             plan_guid: "recovery-plan".to_string(),
@@ -380,6 +386,39 @@ mod tests {
             assert!(outcome.interrupted_checkpoint);
             assert!(outcome.restored);
             assert!(outcome.already_ok);
+        });
+    }
+
+    /// Регресс C8: «голый» `set_active` здесь возвращал код 0, и этого
+    /// хватало, чтобы пометить точку восстановленной навсегда — при схеме,
+    /// которая так и не вернулась пользователю. Теперь возврат идёт через
+    /// подтверждение от ОС, и молчаливый отказ остаётся отказом.
+    #[test]
+    fn silent_set_active_success_does_not_mark_the_checkpoint_restored() {
+        with_clean_checkpoint(|| {
+            save_checkpoint(&checkpoint_with(Some("orig"), false)).unwrap();
+            let driver = recovery_driver("test-a");
+            *driver.lie_on_set.borrow_mut() = true;
+            let outcome = recover_interrupted_session(&driver);
+            assert!(outcome.interrupted_checkpoint);
+            assert!(outcome.needed_restore);
+            assert!(!outcome.restored, "молчаливый отказ принят за успех");
+            assert!(!outcome.already_ok);
+            let cause = outcome.error.expect("причина отказа обязана быть названа");
+            assert!(cause.contains("orig"), "в ошибке нет исходной схемы: {cause}");
+            // Точка остаётся невосстановленной: следующий запуск повторит.
+            let cp = load_checkpoint()
+                .expect("читается")
+                .expect("есть контрольная точка");
+            assert!(
+                !cp.original_restored,
+                "точка помечена восстановленной без подтверждения от ОС"
+            );
+            assert_eq!(
+                driver.active(),
+                "test-a",
+                "тестовая схема осталась активной — и это должно быть видно"
+            );
         });
     }
 }

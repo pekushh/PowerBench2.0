@@ -62,6 +62,8 @@ impl JobDescriptor {
 struct PoolInner {
     /// Номер батча; инкрементируется при каждой публикации задач.
     epoch: u64,
+    /// Размер пула: столько отчётов собирает батч, если никто не ушёл.
+    worker_count: usize,
     descriptors: [JobDescriptor; MAXIMUM_JOBS],
     job_slots: [u64; MAXIMUM_JOBS],
     active_jobs: usize,
@@ -85,6 +87,14 @@ struct PoolInner {
     /// отвечает на вопрос «никто не пишет в буферы», а не счётчик отчётов:
     /// после `reset_to_idle` счётчик обнуляется, но батч мог быть незавершённым.
     busy: bool,
+    /// Поток воркера, который ушёл навсегда (упал вне `catch_unwind`).
+    ///
+    /// Требовать отчёт от потока, которого больше нет, — значит ждать батч до
+    /// потолка и не снимать `busy` никогда. Такое случалось при панике вне
+    /// участка, накрытого `catch_unwind`: воркер выходил, счётчик живых падал,
+    /// а условие завершения батча оставалось прежним, и пул залипал навсегда —
+    /// `wait_batch` всегда отдавал `TimedOut`, а `reset` не мог снять `busy`.
+    lost_workers: usize,
 }
 
 /// Мьютекс пула: отравление игнорируем — потеря блокировки в одном воркере
@@ -131,11 +141,78 @@ pub struct Pool {
 }
 
 /// Снимает счётчик живых воркеров при любом выходе из цикла, включая панику.
-struct LiveWorkerGuard(Arc<AtomicUsize>);
+struct LiveWorkerGuard {
+    counter: Arc<AtomicUsize>,
+    shared: Arc<PoolShared>,
+    /// Отчёт о завершении батча перед выходом. Воркер может уйти и с паникой
+    /// вне `catch_unwind`; без этого отчёта пул ждал бы его вечно.
+    epoch: Option<u64>,
+}
 
 impl Drop for LiveWorkerGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        decrement_live(&self.counter);
+        let Some(epoch) = self.epoch else {
+            // Воркер ни разу не брал батч: зачитывать нечего, и пул он не блокирует.
+            return;
+        };
+        let mut guard = lock_pool(&self.shared);
+        // Воркер ушёл навсегда: требовать от него отчёт больше нельзя.
+        guard.lost_workers = guard.lost_workers.saturating_add(1);
+        if guard.epoch == epoch {
+            report_done(&mut guard, epoch);
+        }
+    }
+}
+
+/// Засчитать отчёт воркера: счётчик, эпоха и снятие `busy` при полном сборе.
+///
+/// Общая точка для обычного пути в `worker_loop` и для аварийного выхода, иначе
+/// два места разошлись бы при любой правке.
+fn report_done(guard: &mut PoolInner, epoch: u64) {
+    guard.workers_done = guard.workers_done.saturating_add(1);
+    guard.completed_epoch = epoch;
+    if guard.workers_done >= expected_reports(guard) {
+        guard.busy = false;
+    }
+}
+
+/// Сколько отчётов ДОЛЖЕН собрать батч: все воркеры, кроме ушедших навсегда.
+///
+/// Живой воркер отчитается всегда. Ушедший — никогда, и требование от него
+/// отчёта оставляло `busy` поднятым навсегда: `reset` не мог опустить флаг,
+/// `wait_batch` упирался в потолок, а движок отказывался мерить.
+fn expected_reports(inner: &PoolInner) -> usize {
+    inner
+        .worker_count
+        .saturating_sub(inner.lost_workers)
+        .max(1)
+}
+
+/// Уменьшить счётчик живых воркеров, не уходя ниже нуля.
+///
+/// Регресс H12: раньше стоял голый `fetch_sub`. Счётчик наращивался ПОСЛЕ
+/// `spawn`, поэтому воркер, успевший выйти (а он выходит сразу, если флаг
+/// остановки уже поднят), вычитал из нуля и получал `usize::MAX`. Дальше
+/// `shutdown` ждал бы этого «живого» воркера все `QUIESCE_TIMEOUT`, а
+/// `JoinHandle` отпускались бы отсоединёнными — то есть потоки, которые
+/// на самом деле мертвы, считались живыми.
+///
+/// Вычитание через `compare_exchange` вместо `saturating_sub`: у
+/// `AtomicUsize` нет такой операции, а `fetch_update` с замыканием здесь
+/// проще и выражает ту же гарантию — «вычесть, только если есть что вычесть».
+fn decrement_live(counter: &AtomicUsize) {
+    let mut current = counter.load(Ordering::Acquire);
+    while current != 0 {
+        match counter.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
     }
 }
 
@@ -257,7 +334,11 @@ fn worker_loop(
     entities: Arc<RawShared<EntityBuffers>>,
     affinity: Option<AffinityBind>,
 ) {
-    let _live = LiveWorkerGuard(live_workers);
+    let mut live = LiveWorkerGuard {
+        counter: live_workers,
+        shared: shared.clone(),
+        epoch: None,
+    };
     // Привязка — первым делом в потоке и именно здесь, а не до `spawn`:
     // маска принадлежит потоку, и поставленная до создания наследуется ВСЕМИ
     // новыми потоками — то есть дала бы всем воркерам одно и то же ядро.
@@ -294,6 +375,10 @@ fn worker_loop(
                 guard = waited.0;
             }
         }
+        // С этого момента воркер обязан отчитаться при любом выходе, включая
+        // панику вне `catch_unwind`: иначе батч остался бы незавершённым, а
+        // требование отчёта от ушедшего воркера заклинило бы пул навсегда.
+        live.epoch = Some(epoch);
 
         // 2) Обработка своей части батча (падение воркера = ошибка запуска).
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -317,12 +402,9 @@ fn worker_loop(
         // батче, и `wait_batch` вернул бы `Ok` до реального завершения работы —
         // сломанные контрольные суммы на живых данных.
         if guard.epoch == epoch {
-            guard.workers_done = guard.workers_done.saturating_add(1);
-            guard.completed_epoch = epoch;
-            if guard.workers_done >= worker_count {
-                guard.busy = false;
-            }
+            report_done(&mut guard, epoch);
         }
+        live.epoch = None;
         // Сигнал — ПОСЛЕ отпускания мьютекса. Notify под блокировкой будит
         // ожидающих, которые тут же упрутся в тот же мьютекс: лишнее
         // пробуждение и лишнее переключение контекста в самом горячем цикле.
@@ -360,6 +442,7 @@ impl Pool {
         let shared = Arc::new(PoolShared {
             lock: Mutex::new(PoolInner {
                 epoch: 0,
+                worker_count,
                 descriptors: [JobDescriptor::dummy(); MAXIMUM_JOBS],
                 job_slots: [0u64; MAXIMUM_JOBS],
                 active_jobs: 0,
@@ -368,6 +451,7 @@ impl Pool {
                 faulted: false,
                 completed_epoch: 0,
                 busy: false,
+                lost_workers: 0,
             }),
             work_ready: Condvar::new(),
             work_done: Condvar::new(),
@@ -403,6 +487,11 @@ impl Pool {
                 (Some(t), Some(tx)) => Some((Arc::clone(t), tx.clone())),
                 _ => None,
             };
+            // Счётчик наращивается ДО `spawn`, а не после. Иначе воркер, который
+            // сразу увидит поднятый флаг остановки и выйдет, вычтет из нуля
+            // (регресс H12). Теперь каждый запущенный воркер заранее «держит»
+            // единицу, и `LiveWorkerGuard` гарантированно вычитает свою.
+            live_workers.fetch_add(1, Ordering::AcqRel);
             let spawned = std::thread::Builder::new()
                 .name(format!("powerbench-worker-{w}"))
                 .spawn(move || {
@@ -420,9 +509,11 @@ impl Pool {
             match spawned {
                 Ok(handle) => {
                     handles.push(handle);
-                    live_workers.fetch_add(1, Ordering::AcqRel);
                 }
                 Err(e) => {
+                    // Поток не создан — единицу счётчика возвращаем, иначе пул
+                    // ждал бы воркера, которого не существует.
+                    decrement_live(&live_workers);
                     // Частичный пул недопустим: будим и ждём уже созданные,
                     // иначе они остались бы жить вечно (дескрипторы `JoinHandle`
                     // в этом ветке не сохраняются и потоки отсоединяются).
@@ -510,23 +601,40 @@ impl Pool {
         self.cancel.store(false, Ordering::Release);
     }
 
-    /// quiesce выполняется первым, и его результат возвращается наружу: раньше
-    /// Пул в idle перед фазой: батча нет, счётчик завершившихся воркеров нулевой.
-    /// он отбрасывался, и о незакрытом пуле узнавали только по следующим
-    ///
-    /// симптомам — расхождением контрольных сумм между прогонами.
-    /// Сначала дожидается «тишины» пула: если грейс отмены истёк, воркеры могут
-    /// ещё писать в буферы сущностей. Сбрасывать буферы в этот момент — гонка
-    /// памяти и рассинхрон контрольных сумм, поэтому сначала quiesce.
-    pub fn reset_to_idle(&self) -> bool {
-        let quiet = self.quiesce();
-        let mut guard = lock_pool(&self.shared);
-        guard.active_jobs = 0;
-        guard.active_workers = 1;
+/// Пул в idle перед фазой: батча нет, счётчик завершившихся воркеров нулевой.
+///
+/// Сначала дожидается «тишины» пула: если грейс отмены истёк, воркеры могут
+/// ещё писать в буферы сущностей. Сбрасывать буферы в этот момент — гонка
+/// памяти и рассинхрон контрольных сумм, поэтому сначала quiesce.
+///
+/// Регресс C2: при незатихшем пуле обнулялся `workers_done`, а `busy` и
+/// `epoch` оставались прежними. Дальше счётчик уже не мог достичь
+/// `worker_count` — все отчёты-то пришли, — поэтому `busy` не снимался
+/// никогда: `is_quiesced()` врал, каждая следующая `quiesce()` выжигала полные
+/// `QUIESCE_TIMEOUT`, `Engine::reset()` возвращал `false`, и пул оказывался
+/// заблокирован навсегда.
+///
+/// Поэтому состояние сбрасывается **только при подтверждённой тишине** и
+/// согласованно: `epoch` сдвигается (опоздавший отчёт будет отброшен, но при
+/// тихом пуле его и быть не может), `completed_epoch` догоняет `epoch`,
+/// `workers_done` обнуляется, `busy` снимается. Если пул НЕ затих, ни `busy`,
+/// ни `workers_done`, ни `epoch` не трогаем: оставшийся воркер обязан суметь
+/// дочитать свой батч и снять `busy` своим отчётом, а сброс счётчика сделал
+/// бы это невозможным и вернул вечную блокировку.
+pub fn reset_to_idle(&self) -> bool {
+    let quiet = self.quiesce();
+    let mut guard = lock_pool(&self.shared);
+    guard.active_jobs = 0;
+    guard.active_workers = 1;
+    guard.faulted = false;
+    if quiet {
+        guard.epoch = guard.epoch.wrapping_add(1);
+        guard.completed_epoch = guard.epoch;
         guard.workers_done = 0;
-        guard.faulted = false;
-        quiet
+        guard.busy = false;
     }
+    quiet
+}
 
     /// Дождаться, пока все воркеры завершат текущий батч.
     ///
@@ -606,10 +714,15 @@ impl Pool {
             }
 
             let mut guard = lock_pool(&self.shared);
-            if guard.faulted && guard.workers_done >= self.worker_count {
+            // Ждём отчётов ЖИВЫХ воркеров. Ушедший не придёт никогда, и
+            // требование отчёта от него означало бы, что батч не завершится
+            // никогда: `wait_batch` всегда отдавал бы `TimedOut`, а `busy`
+            // оставалось бы поднятым, заклинивая пул (регресс H13/H14).
+            let expected = expected_reports(&guard);
+            if guard.faulted && guard.workers_done >= expected {
                 return Err(BatchError::WorkerFailed);
             }
-            if guard.workers_done == self.worker_count {
+            if guard.workers_done >= expected {
                 return if grace_start.is_some() {
                     Err(BatchError::Cancelled)
                 } else {
@@ -629,6 +742,49 @@ impl Pool {
                 .unwrap_or_else(|e| e.into_inner());
             guard = waited.0;
         }
+    }
+
+    /// Пометить пул занятым батчем, который воркеры НЕ возьмут.
+    ///
+    /// Заставить поток воркера зависнуть в тесте нечем, а состояние «батч не
+    /// завершён, один воркер ещё не отчитался» — это ровно то, из-за чего пул
+    /// залипал (регресс C2). Состояние выставляется напрямую.
+    ///
+    /// Эпоха — `u64::MAX`, то есть значение, которое воркер уже видел как
+    /// «свою последнюю»: батч он не возьмёт, и тест не соревнуется с живыми
+    /// потоками. Отчёт о завершении добавляется вручную вызовом
+    /// `report_done` с той же эпохой.
+    #[cfg(test)]
+    pub(crate) fn force_busy_for_test(&self, workers_done: usize) {
+        let mut guard = lock_pool(&self.shared);
+        guard.epoch = u64::MAX;
+        guard.workers_done = workers_done;
+        guard.busy = true;
+    }
+
+    /// Снимок внутреннего состояния для проверок инварианта.
+    #[cfg(test)]
+    pub(crate) fn inner_for_test(&self) -> (usize, usize, bool) {
+        let guard = lock_pool(&self.shared);
+        (
+            guard.workers_done,
+            expected_reports(&guard),
+            guard.busy,
+        )
+    }
+
+    /// Пометить воркера ушедшим навсегда (тестовая замена панике вне
+    /// `catch_unwind`).
+    #[cfg(test)]
+    pub(crate) fn mark_worker_lost_for_test(&self, count: usize) {
+        lock_pool(&self.shared).lost_workers = count;
+    }
+
+    /// Добавить отчёт воркера от имени ушедшего (см. `force_busy_for_test`).
+    #[cfg(test)]
+    pub(crate) fn report_done_for_test(&self) {
+        let mut guard = lock_pool(&self.shared);
+        report_done(&mut guard, u64::MAX);
     }
 
     /// Кооперативная, ограниченная по времени остановка пула.
@@ -684,6 +840,7 @@ mod tests {
     /// раньше `wait_batch` ждал вечно и приложение висело намертво.
     #[test]
     fn wait_batch_times_out_instead_of_hanging_forever() {
+        let _g = crate::tests::lock();
         let p = pool(2);
         let started = Instant::now();
         // База данных пула после создания: `workers_done == 0`, батча не было.
@@ -700,6 +857,7 @@ mod tests {
     /// Обычный батч завершается успешно и укладывается в отведённое время.
     #[test]
     fn wait_batch_reports_completion() {
+        let _g = crate::tests::lock();
         let p = pool(2);
         p.clear_cancel();
         let descriptors = [JobDescriptor::dummy(); 4];
@@ -714,6 +872,7 @@ mod tests {
     /// Остановка пула освобождает все потоки: счётчик живых доходит до нуля.
     #[test]
     fn shutdown_releases_all_workers() {
+        let _g = crate::tests::lock();
         let mut p = pool(3);
         assert_eq!(p.live_workers(), 3);
         p.shutdown();
@@ -728,6 +887,7 @@ mod tests {
     /// выполненные, из-за чего ожидание могло вернуть успех без работы.
     #[test]
     fn no_batch_means_no_completion() {
+        let _g = crate::tests::lock();
         let p = pool(3);
         assert!(p.is_quiesced(), "свежий пул ничего не делает");
         std::thread::sleep(Duration::from_millis(50));
@@ -739,6 +899,185 @@ mod tests {
             p.wait_batch(Duration::from_millis(20)),
             Err(BatchError::TimedOut),
             "неразданный батч не может считаться выполненным"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Регрессы C2 / H12 / H13 / H14
+    // ------------------------------------------------------------------
+
+    /// Счётчик живых воркеров не уходит под ноль (регресс H12).
+    ///
+    /// Раньше стоял голый `fetch_sub`, а счётчик наращивался уже после `spawn`.
+    /// Воркер, успевавший выйти до `fetch_add`, вычитал из нуля и получал
+    /// `usize::MAX` — после чего `shutdown` ждал бы этого «живого» воркера
+    /// все `QUIESCE_TIMEOUT`, а потоки отпускались отсоединёнными.
+    #[test]
+    fn live_worker_counter_never_goes_below_zero() {
+        let _g = crate::tests::lock();
+        let counter = AtomicUsize::new(0);
+        // Именно тот порядок, который и вызывал переполнение: сначала вычет.
+        decrement_live(&counter);
+        assert_eq!(counter.load(Ordering::Acquire), 0, "счётчик ушёл в минус");
+        // Счётчик в ноль — тоже не повод вычитать.
+        for _ in 0..5 {
+            decrement_live(&counter);
+        }
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+        // Штатная работа счётчика.
+        counter.fetch_add(3, Ordering::AcqRel);
+        decrement_live(&counter);
+        decrement_live(&counter);
+        assert_eq!(counter.load(Ordering::Acquire), 1);
+    }
+
+    /// Многократные циклы «раздать батч → дождаться → сбросить» обязаны
+    /// оставлять пул пригодным: `busy` обязана сниматься, а счётчик отчётов —
+    /// обнуляться. Раньше незавершённый сброс обнулял `workers_done`, не
+    /// трогая `busy`, и пул залипал (регресс C2).
+    #[test]
+    fn repeated_dispatch_and_reset_leaves_the_pool_usable() {
+        let _g = crate::tests::lock();
+        let p = pool(3);
+        let descriptors = [JobDescriptor::dummy(); 6];
+        for round in 0..25 {
+            assert!(p.reset_to_idle(), "раунд {round}: пул должен затихнуть");
+            assert!(p.is_quiesced(), "раунд {round}: пул не затих после reset");
+            p.dispatch(6, 3, &descriptors);
+            assert_eq!(
+                p.wait_batch(Duration::from_secs(10)),
+                Ok(()),
+                "раунд {round}: батч не собран"
+            );
+            assert!(
+                p.is_quiesced(),
+                "раунд {round}: батч собран, а пул всё ещё считается занятым"
+            );
+        }
+        // И пул по-прежнему в состоянии, пригодном для замера.
+        p.dispatch(6, 3, &descriptors);
+        assert_eq!(p.wait_batch(Duration::from_secs(10)), Ok(()));
+    }
+
+    /// Регресс C2: сброс НЕЗАТИХШЕГО пула обязан оставить возможность
+    /// восстановления.
+    ///
+    /// Прежний код обнулял `workers_done`, но не трогал `busy`. Все отчёты за
+    /// этот батч уже пришли, поэтому `workers_done` уже никогда не достиг бы
+    /// `worker_count`, `busy` не снимался никогда, каждая `quiesce()` выжигала
+    /// полный таймаут, а `Engine::reset()` возвращал `false` — пул заблокирован
+    /// навсегда.
+    ///
+    /// Проверяем именно возможность восстановления: счётчик не обнулён и
+    /// поздний отчёт воркера всё ещё может снять `busy`.
+    #[test]
+    fn reset_of_a_busy_pool_keeps_the_late_report_able_to_finish_the_batch() {
+        let _g = crate::tests::lock();
+        let p = pool(2);
+        // Один воркер из двух ещё не отчитался.
+        p.force_busy_for_test(1);
+        assert!(!p.is_quiesced());
+        let (done_before, expected, busy_before) = p.inner_for_test();
+        assert_eq!((done_before, expected, busy_before), (1, 2, true));
+
+        // `quiesce` не дождётся (воркера, который должен был отчитаться, нет):
+        // пул остаётся занят — и это честно, а не «всё в порядке».
+        assert!(!p.reset_to_idle(), "пул не может считаться тихим");
+        let (done_after, _, busy_after) = p.inner_for_test();
+        assert_eq!(
+            done_after, done_before,
+            "счётчик отчётов обнулён: поздний отчёт уже не закроет батч"
+        );
+        assert!(
+            busy_after,
+            "busy снят, хотя воркер ещё может писать в буферы сущностей"
+        );
+
+        // Поздний отчёт воркера обязан снять `busy` — иначе блокировка вечна.
+        p.report_done_for_test();
+        assert!(
+            p.is_quiesced(),
+            "поздний отчёт не закрыл батч: пул заблокирован навсегда"
+        );
+    }
+
+    /// Регресс C2: сброс ТИХОГО пула обязан привести состояние в порядок —
+    /// иначе следующий батч увидит старые счётчики.
+    #[test]
+    fn reset_of_a_quiet_pool_clears_the_completion_counters() {
+        let _g = crate::tests::lock();
+        let p = pool(2);
+        let descriptors = [JobDescriptor::dummy(); 4];
+        p.dispatch(4, 2, &descriptors);
+        assert_eq!(p.wait_batch(Duration::from_secs(10)), Ok(()));
+        assert_eq!(p.inner_for_test().0, 2, "батч собран не всеми воркерами");
+
+        assert!(p.reset_to_idle(), "пул обязан затихнуть к моменту сброса");
+        let (done, _, busy) = p.inner_for_test();
+        assert_eq!(done, 0, "счётчик отчётов не обнулён после тихого сброса");
+        assert!(!busy, "busy не снят после тихого сброса");
+
+        // Пул обязан быть пригоден: следующий батч собирается заново, и его
+        // завершение засчитывается с нуля.
+        p.dispatch(4, 2, &descriptors);
+        assert_eq!(
+            p.wait_batch(Duration::from_secs(10)),
+            Ok(()),
+            "после сброса пул не собирает батчи"
+        );
+        assert!(p.is_quiesced(), "после сброса батч не закрылся");
+    }
+
+    /// Сколько отчётов ждёт батч: все воркеры, кроме ушедших навсегда.
+    ///
+    /// Требование отчёта от потока, которого больше нет, означало, что батч не
+    /// завершится никогда: `wait_batch` всегда отдавал `TimedOut`, а `busy`
+    /// оставалось поднятым — пул залипал (регресс H13/H14).
+    #[test]
+    fn expected_reports_shrink_with_lost_workers() {
+        let _g = crate::tests::lock();
+        let p = pool(3);
+        assert_eq!(p.inner_for_test().1, 3, "целый пул ждёт все отчёты");
+        p.mark_worker_lost_for_test(1);
+        assert_eq!(p.inner_for_test().1, 2);
+        p.mark_worker_lost_for_test(3);
+        assert_eq!(
+            p.inner_for_test().1,
+            1,
+            "даже когда не осталось ни одного воркера, батч обязан закрыться"
+        );
+    }
+
+    /// Регресс H13/H14: `wait_batch` не должен требовать отчётов от ушедших
+    /// воркеров — иначе он всегда упирался бы в потолок.
+    #[test]
+    fn wait_batch_does_not_demand_reports_from_lost_workers() {
+        let _g = crate::tests::lock();
+        let p = pool(3);
+        // Двое из трёх ушли навсегда: батч вправе закрыться по отчёту третьего.
+        p.mark_worker_lost_for_test(2);
+        let descriptors = [JobDescriptor::dummy(); 4];
+        p.dispatch(4, 3, &descriptors);
+        assert_eq!(
+            p.wait_batch(Duration::from_secs(10)),
+            Ok(()),
+            "батч не закрылся, хотя все живые воркеры отчитались"
+        );
+        assert!(p.is_quiesced(), "busy остался поднятым после сборки отчётов");
+    }
+
+    /// Уход воркера посреди батча не должен оставить батч незавершённым: его
+    /// отчёт зачитывается при выходе, поэтому `busy` снимается.
+    #[test]
+    fn the_last_report_always_closes_the_batch() {
+        let _g = crate::tests::lock();
+        let p = pool(2);
+        p.mark_worker_lost_for_test(2);
+        p.force_busy_for_test(0);
+        p.report_done_for_test();
+        assert!(
+            p.is_quiesced(),
+            "после единственного отчёта пул обязан быть тихим"
         );
     }
 }

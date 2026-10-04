@@ -63,7 +63,7 @@ async function main() {
 <style>html,body{margin:0;height:100%}</style>
 <body>
 <div class="shell">
-  <div class="titlebar"><div class="titlebar-chips"><span class="titlebar-chip on">Тихий режим</span><span class="titlebar-chip trunc" data-prio="1">Ryzen 9 7950X · 32 ГБ</span></div><div class="titlebar-controls"><button class="titlebar-toggle" data-prio="2">Анимации</button></div></div>
+  <div class="titlebar"><div class="titlebar-chips"><span class="titlebar-chip on">Тихий режим</span><span class="titlebar-chip trunc" data-prio="1">Ryzen 9 7950X · 32 ГБ</span></div><div class="titlebar-controls"><span class="window-group"><button class="titlebar-btn"></button></span></div></div>
   <div class="body">
     <aside class="sidebar collapsed" id="rail"><nav class="sidebar-nav"><button class="nav-item active"><span class="nav-glyph"><svg viewBox="0 0 24 24"></svg></span><span class="nav-label">Бенчмарк</span></button></nav></aside>
     <main class="main"><div class="page">
@@ -92,7 +92,6 @@ window.measure = () => {
     schemes: cols("#schemes"),
     logCols: getComputedStyle(document.querySelector(".log-row")).gridTemplateColumns.split(" ").filter(Boolean).length,
     prio1: shown('[data-prio="1"]'),
-    prio2: shown('[data-prio="2"]'),
     overflowX: main.scrollWidth - main.clientWidth,
   };
 };
@@ -147,7 +146,7 @@ window.measure = () => {
   await new Promise((r) => setTimeout(r, 2000));
 
   let bad = 0;
-  console.log("\n  ширина  h1     pad-x   рельса  схемы  лог  чип1  чип2  статус");
+  console.log("\n  ширина  h1     pad-x   рельса  схемы  лог  чип1  статус");
   for (const w of WIDTHS) {
     await send("Emulation.setDeviceMetricsOverride", { width: w, height: 900, deviceScaleFactor: 1, mobile: false });
     await new Promise((r) => setTimeout(r, 300));
@@ -155,14 +154,13 @@ window.measure = () => {
     const p = [];
     if (m.overflowX > 2) p.push(`переполнение ${m.overflowX}`);
     if (px(m.h1) < 18.5 || px(m.h1) > 25) p.push(`h1 ${m.h1}`);
-    if (m.prio2 !== (w >= 1280)) p.push(`чип2 ${m.prio2 ? "виден" : "скрыт"}`);
     if (m.prio1 !== (w >= 1080)) p.push(`чип1 ${m.prio1 ? "виден" : "скрыт"}`);
-    const rail = w >= 1080 ? 64 : w >= 900 ? 56 : 52;
+    const rail = 64;
     // Полпикселя: ширина рельсы — дробная (flex-basis + дробные отступы),
     // и без допуска ровное 64 приходило как 63.98.
     if (Math.abs(px(m.rail) - rail) > 0.5) p.push(`рельса ${px(m.rail)} != ${rail}`);
     if (p.length) bad++;
-    console.log(`  ${String(w).padStart(6)}  ${String(px(m.h1)).padEnd(6)}  ${String(px(m.pad)).padEnd(6)}  ${String(px(m.rail)).padStart(6)}  ${String(m.schemes).padStart(5)}  ${String(m.logCols).padStart(3)}  ${(m.prio1 ? "да" : "нет").padStart(4)}  ${(m.prio2 ? "да" : "нет").padStart(4)}  ${p.length ? "✗ " + p.join("; ") : "ok"}`);
+    console.log(`  ${String(w).padStart(6)}  ${String(px(m.h1)).padEnd(6)}  ${String(px(m.pad)).padEnd(6)}  ${String(px(m.rail)).padStart(6)}  ${String(m.schemes).padStart(5)}  ${String(m.logCols).padStart(3)}  ${(m.prio1 ? "да" : "нет").padStart(4)}  ${p.length ? "✗ " + p.join("; ") : "ok"}`);
   }
   console.log(bad === 0 ? "\nфолбэк: работает" : `\nфолбэк: расхождений ${bad}`);
   cleanup();

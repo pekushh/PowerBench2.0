@@ -69,6 +69,116 @@ mod imp {
         pub threads: Vec<Placement>,
     }
 
+    /// Прочитать поле структуры по смещению, не требуя выравнивания буфера.
+    ///
+    /// Буфер разведки — `Vec<u8>`, то есть `align_of == 1`, а поля
+    /// `PROCESSOR_RELATIONSHIP` и `GROUP_AFFINITY` требуют выравнивания 2 и 8.
+    /// Создание ссылки на такое поле (`&*ptr` с приведением к типу структуры)
+    /// — мгновенный UB: компилятор вправе считать поле выровненным и полагаться
+    /// на это в оптимизациях, а процессор получит доступ по невыровненному
+    /// адресу. Поэтому читаем копию через `read_unaligned`.
+    ///
+    /// # Безопасность
+    ///
+    /// Вызывающий обязан обеспечить `base + offset + size_of::<T>()` в границах
+    /// буфера. Все смещения и границы проверяет [`parse_cores`].
+    fn read_field<T: Copy>(base: *const u8, offset: usize) -> T {
+        unsafe { ptr::read_unaligned(base.add(offset) as *const T) }
+    }
+
+    /// Смещение `GroupMask` внутри `PROCESSOR_RELATIONSHIP`.
+    const MASKS_OFFSET: usize = offset_of!(PROCESSOR_RELATIONSHIP, GroupMask);
+
+    /// Разобрать буфер `GetLogicalProcessorInformationEx` в список ядер.
+    ///
+    /// Вынесено отдельно от вызова API, потому что именно здесь принимаются
+    /// решения о доверии к содержимому буфера — и именно они должны
+    /// проверяться тестом, а не глазами на живой машине.
+    ///
+    /// # Безопасность
+    ///
+    /// `buf` — буфер, заполненный ОС; `total` — сколько байт ОС признала
+    /// действительными. Записи за пределами `total` не читаются.
+    pub(crate) fn parse_cores(buf: &[u8], total: usize) -> Vec<CoreInfo> {
+        let mut out = Vec::with_capacity(256);
+        let total = total.min(buf.len());
+        // Запись начинается с заголовка { Relationship: i32, Size: u32 }.
+        let header = size_of::<i32>() + size_of::<u32>();
+        let union_off = offset_of!(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Anonymous);
+        let mask_size = size_of::<GROUP_AFFINITY>();
+        let mut offset = 0usize;
+        while offset + header <= total {
+            let rec = unsafe { buf.as_ptr().add(offset) };
+            let relationship = read_field::<i32>(rec, 0);
+            let size = read_field::<u32>(rec, size_of::<i32>()) as usize;
+            // Запись должна целиком помещаться в буфер и содержать объединение.
+            if size < union_off || size > total - offset {
+                break;
+            }
+            if relationship == RelationProcessorCore {
+                // Объединение лежит ПОСЛЕ заголовка. Приведение к
+                // PROCESSOR_RELATIONSHIP без этого смещения читает поля из
+                // Relationship/Size и Reserved — GroupCount тогда всегда ноль,
+                // то есть ни одного ядра не находится НИКОГДА. Ровно такая
+                // ошибка выглядит снаружи невинно: разведка сообщает «0 ядер».
+                let rel = unsafe { rec.add(union_off) };
+                let group_count =
+                    read_field::<u16>(rel, offset_of!(PROCESSOR_RELATIONSHIP, GroupCount))
+                        as usize;
+                let flags = read_field::<u8>(rel, offset_of!(PROCESSOR_RELATIONSHIP, Flags));
+                let efficiency_class = read_field::<u8>(
+                    rel,
+                    offset_of!(PROCESSOR_RELATIONSHIP, EfficiencyClass),
+                );
+
+                // ГРАНИЦА ДОВЕРИЯ (регресс C7).
+                //
+                // `GroupCount` — это тоже данные извне: раньше он брался без
+                // проверки, и цикл ниже шёл по `group_count` масок, читая их
+                // адресом `mask_base.add(gi)`. Если ОС (или подмена буфера)
+                // сообщала `GroupCount = 0xFFFF` при `Size` в несколько десятков
+                // байт, цикл уходил далеко за конец буфера и читал кучу. Проверка
+                // `size` на верхнюю границу от этого не спасала: она ограничивала
+                // запись, а не количество масок внутри неё.
+                //
+                // Требуемое условие: в записи обязано помещаться
+                // `masks_offset + group_count * size_of::<GROUP_AFFINITY>()`.
+                // Умножение насыщающее — при огромном `GroupCount` оно даёт
+                // usize::MAX, и сравнение с `size` отбрасывает запись.
+                let needed = union_off
+                    .checked_add(MASKS_OFFSET)
+                    .and_then(|v| {
+                        v.checked_add(group_count.saturating_mul(mask_size))
+                    })
+                    .unwrap_or(usize::MAX);
+                if needed > size {
+                    break;
+                }
+
+                let mut threads = Vec::with_capacity(group_count);
+                for gi in 0..group_count {
+                    let ga = unsafe { rel.add(MASKS_OFFSET + gi * mask_size) };
+                    let mask = read_field::<usize>(ga, offset_of!(GROUP_AFFINITY, Mask)) as u64;
+                    let group = read_field::<u16>(ga, offset_of!(GROUP_AFFINITY, Group));
+                    for bit in 0..64u32 {
+                        if mask & (1u64 << bit) != 0 {
+                            threads.push(Placement { group, bit: bit as u8 });
+                        }
+                    }
+                }
+                if !threads.is_empty() {
+                    out.push(CoreInfo {
+                        efficiency_class,
+                        smt: flags & LTP_PC_SMT != 0,
+                        threads,
+                    });
+                }
+            }
+            offset += size;
+        }
+        out
+    }
+
     pub(crate) fn query_cores() -> Result<Vec<CoreInfo>, String> {
         // Двухпроходный вызов: сначала узнаём нужный размер, потом читаем.
         let mut needed: u32 = 0;
@@ -102,58 +212,7 @@ mod imp {
             ));
         }
 
-        let mut out = Vec::with_capacity(256);
-        let total = (len as usize).min(buf.len());
-        // Запись начинается с заголовка { Relationship: i32, Size: u32 }.
-        let header = size_of::<usize>() * 2;
-        let union_off = offset_of!(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Anonymous);
-        let mut offset = 0usize;
-        while offset + header <= total {
-            let rec = unsafe { buf.as_ptr().add(offset) };
-            let relationship = unsafe { ptr::read_unaligned(rec as *const i32) };
-            let size =
-                unsafe { ptr::read_unaligned(rec.add(size_of::<i32>()) as *const u32) } as usize;
-            if size < union_off || offset + size > total {
-                break;
-            }
-            if relationship == RelationProcessorCore {
-                // Объединение лежит ПОСЛЕ заголовка. Приведение к
-                // PROCESSOR_RELATIONSHIP без этого смещения читает поля из
-                // Relationship/Size и Reserved — GroupCount тогда всегда ноль,
-                // то есть ни одного ядра не находится НИКОГДА. Ровно такая
-                // ошибка выглядит снаружи невинно: разведка сообщает «0 ядер».
-                let rel_ptr = unsafe { rec.add(union_off) } as *const PROCESSOR_RELATIONSHIP;
-                let rel = unsafe { &*rel_ptr };
-                let group_count = rel.GroupCount as usize;
-                // GroupMask идёт сразу за телом PROCESSOR_RELATIONSHIP, то
-                // есть тоже со смещением объединения — иначе маска читалась бы
-                // из Reserved и выглядела бы как «старшие биты номера ядра».
-                let mask_base =
-                    unsafe { rec.add(union_off + offset_of!(PROCESSOR_RELATIONSHIP, GroupMask)) }
-                        as *const GROUP_AFFINITY;
-                let mut threads = Vec::with_capacity(group_count);
-                for gi in 0..group_count {
-                    let ga = unsafe { &*mask_base.add(gi) };
-                    let mask = ga.Mask as u64;
-                    for bit in 0..64u32 {
-                        if mask & (1u64 << bit) != 0 {
-                            threads.push(Placement {
-                                group: ga.Group,
-                                bit: bit as u8,
-                            });
-                        }
-                    }
-                }
-                if !threads.is_empty() {
-                    out.push(CoreInfo {
-                        efficiency_class: rel.EfficiencyClass,
-                        smt: rel.Flags & LTP_PC_SMT != 0,
-                        threads,
-                    });
-                }
-            }
-            offset += size;
-        }
+        let out = parse_cores(&buf, len as usize);
         if out.is_empty() {
             return Err("ОС не сообщила ни одного физического ядра".to_string());
         }
@@ -502,6 +561,7 @@ mod tests {
 
     #[test]
     fn mode_parsing_is_forgiving() {
+        let _g = crate::tests::lock();
         assert_eq!(AffinityMode::parse("p"), Some(AffinityMode::POnly));
         assert_eq!(AffinityMode::parse("P-Only"), Some(AffinityMode::POnly));
         assert_eq!(AffinityMode::parse(" PONLY "), Some(AffinityMode::POnly));
@@ -517,6 +577,7 @@ mod tests {
 
     #[test]
     fn default_mode_is_p_only() {
+        let _g = crate::tests::lock();
         assert_eq!(AffinityMode::default(), AffinityMode::POnly);
         assert_eq!(AffinityMode::default().as_str(), "p-only");
     }
@@ -525,6 +586,7 @@ mod tests {
     /// делает все старые результаты несопоставимыми с новыми.
     #[test]
     fn mode_names_are_stable() {
+        let _g = crate::tests::lock();
         assert_eq!(AffinityMode::POnly.as_str(), "p-only");
         assert_eq!(AffinityMode::AllLogical.as_str(), "all-logical");
         assert_eq!(AffinityMode::AffinityOff.as_str(), "off");
@@ -534,6 +596,7 @@ mod tests {
     /// неудаче разведки — пустые списки и записанная причина.
     #[test]
     fn detection_never_panics() {
+        let _g = crate::tests::lock();
         for mode in [
             AffinityMode::POnly,
             AffinityMode::AllLogical,
@@ -555,6 +618,7 @@ mod tests {
     /// дубликаты означали бы, что два воркера получили одно ядро.
     #[test]
     fn placements_are_sorted_and_unique() {
+        let _g = crate::tests::lock();
         for mode in [AffinityMode::POnly, AffinityMode::AllLogical] {
             let topo = CpuTopology::detect(mode);
             let mut slots = topo.slots_list().to_vec();
@@ -574,6 +638,7 @@ mod tests {
     /// для разных режимов: иначе агрегация склеила бы несопоставимые прогоны.
     #[test]
     fn signature_is_stable_per_mode() {
+        let _g = crate::tests::lock();
         let a = CpuTopology::detect(AffinityMode::POnly);
         let b = CpuTopology::detect(AffinityMode::POnly);
         assert_eq!(a.signature(), b.signature(), "подпись неустойчива");
@@ -590,6 +655,7 @@ mod tests {
     /// Слот с индексом за пределами списка — «нет места», а не паника.
     #[test]
     fn out_of_range_slot_is_none() {
+        let _g = crate::tests::lock();
         let topo = CpuTopology::detect(AffinityMode::POnly);
         assert!(topo.slot(topo.slots()).is_none());
         assert!(topo.slot(usize::MAX).is_none());
@@ -608,6 +674,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn binding_takes_effect_and_reads_back() {
+        let _g = crate::tests::lock();
         use windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY;
         use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadGroupAffinity};
 
@@ -644,6 +711,7 @@ mod tests {
     /// часть воркеров останется без привязки и вернёт разброс планировщика.
     #[test]
     fn p_only_offers_at_most_one_slot_per_physical_core() {
+        let _g = crate::tests::lock();
         let topo = CpuTopology::detect(AffinityMode::POnly);
         if topo.error().is_some() {
             return;
@@ -654,5 +722,189 @@ mod tests {
             topo.slots() >= 1,
             "на любой машине есть хотя бы одно P-ядро"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Регресс C7: границы доверия к буферу FFI
+    // ------------------------------------------------------------------
+
+    /// Собрать синтетическую запись `RelationProcessorCore` ровно на
+    /// `masks.len()` масок и длиной `extra` байт сверх необходимого.
+    #[cfg(windows)]
+    fn core_record(masks: &[(u16, u64)], extra: usize, group_count_override: Option<u16>) -> Vec<u8> {
+        use std::mem::offset_of;
+        use windows_sys::Win32::System::SystemInformation::{
+            GROUP_AFFINITY, PROCESSOR_RELATIONSHIP, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
+        };
+        let relation_core = windows_sys::Win32::System::SystemInformation::RelationProcessorCore;
+        let union_off = offset_of!(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Anonymous);
+        let masks_off = offset_of!(PROCESSOR_RELATIONSHIP, GroupMask);
+        let mask_size = size_of::<GROUP_AFFINITY>();
+        let needed = union_off + masks_off + masks.len() * mask_size + extra;
+        let mut buf = vec![0u8; needed];
+        // Relationship
+        buf[0..4].copy_from_slice(&relation_core.to_le_bytes());
+        // Size
+        buf[4..8].copy_from_slice(&(needed as u32).to_le_bytes());
+        let rel = union_off;
+        // Flags = LTP_PC_SMT, EfficiencyClass = 0
+        buf[rel + offset_of!(PROCESSOR_RELATIONSHIP, Flags)] = 0x01;
+        buf[rel + offset_of!(PROCESSOR_RELATIONSHIP, EfficiencyClass)] = 0;
+        buf[rel + offset_of!(PROCESSOR_RELATIONSHIP, GroupCount)..rel + offset_of!(PROCESSOR_RELATIONSHIP, GroupCount) + 2]
+            .copy_from_slice(
+                &group_count_override.unwrap_or(masks.len() as u16).to_le_bytes(),
+            );
+        for (i, &(group, mask)) in masks.iter().enumerate() {
+            let at = rel + masks_off + i * mask_size;
+            buf[at..at + size_of::<usize>()].copy_from_slice(&mask.to_le_bytes());
+            buf[at + offset_of!(GROUP_AFFINITY, Group)..at + offset_of!(GROUP_AFFINITY, Group) + 2]
+                .copy_from_slice(&group.to_le_bytes());
+        }
+        buf
+    }
+
+    /// Реальная запись разбирается: маски, группы и признаки на месте.
+    #[cfg(windows)]
+    #[test]
+    fn a_well_formed_core_record_is_parsed() {
+        let _g = crate::tests::lock();
+        let buf = core_record(&[(0, 0b1011), (1, 1 << 3)], 0, None);
+        let cores = imp::parse_cores(&buf, buf.len());
+        assert_eq!(cores.len(), 1, "запись не разобрана: {cores:?}");
+        assert!(cores[0].smt, "признак SMT не прочитан");
+        assert_eq!(cores[0].efficiency_class, 0);
+        assert_eq!(
+            cores[0].threads,
+            vec![
+                Placement { group: 0, bit: 0 },
+                Placement { group: 0, bit: 1 },
+                Placement { group: 0, bit: 3 },
+                Placement { group: 1, bit: 3 },
+            ],
+            "маски разобраны неверно: {:?}",
+            cores[0].threads
+        );
+    }
+
+    /// Регресс C7: `GroupCount` больше, чем маски реально помещаются в запись.
+    ///
+    /// Раньше цикл шёл по `group_count` масок и читал их за концом буфера —
+    /// то есть по куче. Теперь такая запись отбрасывается целиком.
+    #[cfg(windows)]
+    #[test]
+    fn an_oversized_group_count_is_rejected_instead_of_read_past_the_buffer() {
+        let _g = crate::tests::lock();
+        // Одна настоящая маска, но GroupCount враньёт про 0xFFFF.
+        let buf = core_record(&[(0, 0b1)], 0, Some(0xFFFF));
+        let cores = imp::parse_cores(&buf, buf.len());
+        assert!(
+            cores.is_empty(),
+            "запись с врущующим GroupCount принята: {cores:?}"
+        );
+        // Ровно на одну маску больше, чем есть, — тоже отказ.
+        let buf = core_record(&[(0, 0b1)], 0, Some(2));
+        assert!(imp::parse_cores(&buf, buf.len()).is_empty());
+        // А на единицу меньше — parses (маска читается, лишняя просто не нужна).
+        let buf = core_record(&[(0, 0b1), (1, 0b10)], 0, Some(1));
+        let cores = imp::parse_cores(&buf, buf.len());
+        assert_eq!(cores.len(), 1, "корректная запись отвергнута: {cores:?}");
+    }
+
+    /// Регресс C7: `GroupCount = 0xFFFF` при `Size`, умещающем в буфер, —
+    /// именно тот случай, который проходил проверку `size` и вёл в кучу.
+    #[cfg(windows)]
+    #[test]
+    fn a_record_whose_size_fits_but_masks_do_not_is_rejected() {
+        let _g = crate::tests::lock();
+        // Запись объявлена короче, чем нужно для 0xFFFF масок, но длиннее
+        // минимума, — проверка `size` её пропускает.
+        let mut buf = core_record(&[(0, 0b1)], 0, Some(0xFFFF));
+        let shrink = buf.len() - 8;
+        buf.truncate(shrink);
+        buf[4..8].copy_from_slice(&(shrink as u32).to_le_bytes());
+        assert!(imp::parse_cores(&buf, buf.len()).is_empty());
+    }
+
+    /// Регресс C7: буфер выровнен по единице, и это обязано быть безопасно.
+    ///
+    /// `Vec<u8>` имеет `align_of == 1`, а поля структур требуют 2 и 8. Создание
+    /// ссылок `&PROCESSOR_RELATIONSHIP` / `&GROUP_AFFINITY` на такой буфер —
+    /// UB; вместо них используется `read_unaligned`.
+    ///
+    /// Буфер подложки выровнен по 8 намеренно (`Vec<u64>`), поэтому сдвиг
+    /// задаёт выравнивание детерминированно, а не в зависимости от того, что
+    /// вернул аллокатор. Тест обязан работать и в debug, где включены проверки
+    /// выравнивания.
+    #[cfg(windows)]
+    #[test]
+    fn parsing_works_on_an_unaligned_buffer() {
+        let _g = crate::tests::lock();
+        let record = core_record(&[(0, 0b1101), (2, 0b1 << 40)], 16, None);
+        let words = record.len().div_ceil(8) + 2;
+        let mut aligned: Vec<u64> = vec![0; words];
+        let base_bytes = aligned.as_mut_ptr().cast::<u8>();
+        // Размёщаем запись со сдвигом 1: адрес `base + 1` гарантированно не
+        // кратен 2 и не кратен 8 — то есть ровно тот случай, где `&*ptr` был UB.
+        let shifted = 1usize;
+        for (i, b) in record.iter().enumerate() {
+            unsafe { base_bytes.add(shifted + i).write(*b) };
+        }
+        let start = unsafe { base_bytes.add(shifted) };
+        assert_eq!(start as usize % align_of::<u64>(), shifted % align_of::<u64>());
+        assert_ne!(start as usize % align_of::<u16>(), 0);
+        assert_ne!(start as usize % align_of::<u64>(), 0);
+
+        let window = unsafe { std::slice::from_raw_parts(start, record.len()) };
+        let cores = imp::parse_cores(window, record.len());
+        assert_eq!(cores.len(), 1, "запись не разобрана на невыровненном буфере");
+        assert_eq!(
+            cores[0].threads,
+            vec![
+                Placement { group: 0, bit: 0 },
+                Placement { group: 0, bit: 2 },
+                Placement { group: 0, bit: 3 },
+                Placement { group: 2, bit: 40 },
+            ],
+            "маски разобраны неверно: {:?}",
+            cores[0].threads
+        );
+    }
+
+    /// Мусор в буфере не приводит к панике и к чтению за его пределами.
+    #[cfg(windows)]
+    #[test]
+    fn malformed_buffers_are_survivable() {
+        let _g = crate::tests::lock();
+        // Запись `Size` уходит за буфер.
+        let mut bad = core_record(&[(0, 0b1)], 0, None);
+        bad[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(imp::parse_cores(&bad, bad.len()).is_empty());
+
+        // `Size = 0` — бесконечный цикл невозможен, но запись не читается.
+        let mut zero = core_record(&[(0, 0b1)], 0, None);
+        zero[4..8].copy_from_slice(&0u32.to_le_bytes());
+        assert!(imp::parse_cores(&zero, zero.len()).is_empty());
+
+        // `total` меньше реального буфаера — хвост не читается.
+        let good = core_record(&[(0, 0b1)], 0, None);
+        assert!(imp::parse_cores(&good, 4).is_empty());
+        assert!(imp::parse_cores(&good, 0).is_empty());
+        assert!(imp::parse_cores(&[], 0).is_empty());
+
+        // Случайный шум.
+        let noise: Vec<u8> = (0..512u32).map(|i| (i * 7) as u8).collect();
+        let _ = imp::parse_cores(&noise, noise.len());
+    }
+
+    /// На живой машине разведка обязана работать: регрессионная проверка, что
+    /// разбор вынесен в отдельную функцию без потери результата.
+    #[cfg(windows)]
+    #[test]
+    fn live_detection_still_finds_cores() {
+        let _g = crate::tests::lock();
+        let topo = CpuTopology::detect(AffinityMode::AllLogical);
+        assert!(topo.error().is_none(), "разведка сломана: {:?}", topo.error());
+        assert!(topo.physical_cores() > 0);
+        assert!(topo.slots() > 0);
     }
 }

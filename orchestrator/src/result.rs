@@ -131,6 +131,22 @@ impl IdentityJson {
     /// машины для человека: например, при поиске истории той же конфигурации.
     /// Поля ОС и памяти здесь пустые намеренно — их дополняет вызывающая сторона.
     pub fn from_signature(sig: &powerbench_metrics::CompatibilitySignature) -> Self {
+        Self::from_signature_with_machine(sig, "", "", 0.0)
+    }
+
+    /// То же, но с описанием машины (ОС, память, модель CPU).
+    ///
+    /// `from_signature` годится только там, где машина не важна. Для любого
+    /// сопоставления с историей нужен этот вариант: `same_identity` теперь
+    /// смотрит и на сборку ОС, и на модель CPU, поэтому база, построенная
+    /// через `from_signature`, не совпала бы сама с собой — запись и её база
+    /// считались бы разными машинами.
+    pub fn from_signature_with_machine(
+        sig: &powerbench_metrics::CompatibilitySignature,
+        os_build: &str,
+        cpu_brand: &str,
+        memory_gib: f64,
+    ) -> Self {
         Self {
             workload_version: sig.workload_version.clone(),
             config_hash: sig.config_hash.clone(),
@@ -140,9 +156,9 @@ impl IdentityJson {
             timer_hz: sig.timer_hz,
             cpu_identifier: sig.cpu_identifier.clone(),
             diagnostics_version: sig.diagnostics_version.clone(),
-            os_build: String::new(),
-            memory_gib: 0.0,
-            cpu_brand: String::new(),
+            os_build: os_build.to_string(),
+            memory_gib,
+            cpu_brand: cpu_brand.to_string(),
             affinity_mode: sig.affinity_mode.clone(),
             affinity_signature: sig.affinity_signature.clone(),
         }
@@ -378,6 +394,25 @@ fn phase_summaries(per_run: &[StoredRun], session_base_mhz: f64) -> Vec<PhaseSum
                 (v[n / 2 - 1] + v[n / 2]) / 2.0
             }
         };
+        // Медиана целочисленных счётчиков по той же схеме, что и `med`, но
+        // без фильтра «> 0»: число сэмплов фазы может быть и нулевым (фаза
+        // не дала данных), и такой ноль в таблице означает именно это,
+        // а не обязан молча исчезнуть.
+        let med_usize = |f: fn(&PhaseStats) -> usize| -> usize {
+            let mut v: Vec<usize> = group.iter().map(|p| f(p)).collect();
+            if v.is_empty() {
+                return 0;
+            }
+            v.sort_unstable();
+            let n = v.len();
+            if n % 2 == 1 {
+                v[n / 2]
+            } else {
+                // Счётчик сэмплов округляем вниз: половина сэмпла не бывает,
+                // а округление вверх завышало бы число обработанных тиков.
+                (v[n / 2 - 1] + v[n / 2]) / 2
+            }
+        };
         out.push(PhaseSummaryJson {
             name: phase_label_for(idx).to_string(),
             median_throughput: med(|p| p.stats.average_throughput),
@@ -395,13 +430,22 @@ fn phase_summaries(per_run: &[StoredRun], session_base_mhz: f64) -> Vec<PhaseSum
                 0.0
             },
             frequency_mhz: median_current_mhz(&group),
+            // Длительность и счётчики сэмплов — из первого прогона: это
+            // номинал плана сессии, одинаковый для всех прогонов фазы. Сами
+            // счётчики берём МЕДИАНОЙ, потому что прогон может частично
+            // потерять сэмплы (пропуск тиков под нагрузкой), и медиана по
+            // прогонам покажет типичный объём, а не худший.
+            seconds: group.first().map_or(0, |p| p.seconds),
+            samples_used: med_usize(|p| p.stats.samples),
+            samples_raw: med_usize(|p| p.stats.samples_raw),
+            excluded_fraction: med(|p| p.stats.excluded_fraction),
         });
     }
     out
 }
 
 /// Сводка по одной измеряемой фазе: медианы по прогонам.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhaseSummaryJson {
     /// Название фазы («Лёгкая», «Тяжёлая», «Отклик», «Частичная»).
     pub name: String,
@@ -423,6 +467,41 @@ pub struct PhaseSummaryJson {
     /// Медианная частота CPU в этой фазе, МГц; 0, если не сообщалась.
     #[serde(default)]
     pub frequency_mhz: f64,
+    /// Номинальная длительность фазы, с.
+    ///
+    /// Без неё p1 и p0.001 несравнимы между фазами разной длины и между
+    /// разными сессиями: 3 000 тиков за 10 с и 3 000 тиков за 60 с — это
+    /// разная точность измерения, а в таблице выглядели одинаково.
+    #[serde(default)]
+    pub seconds: u64,
+    /// Сэмплов после отбрасывания выбросов.
+    #[serde(default)]
+    pub samples_used: usize,
+    /// Сэмплов до отбрасывания выбросов.
+    #[serde(default)]
+    pub samples_raw: usize,
+    /// Доля отброшенных выбросов; 0 — ничего не отброшено.
+    #[serde(default)]
+    pub excluded_fraction: f64,
+}
+
+impl Default for PhaseSummaryJson {
+    /// Заглушка для тестов и DTO-сборки; в боевом пути поля заполняет
+    /// `phase_summaries` из сохранённых прогонов.
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            median_throughput: 0.0,
+            p1_throughput: 0.0,
+            consistency_percent: 0.0,
+            frequency_drop_percent: 0.0,
+            frequency_mhz: 0.0,
+            seconds: 0,
+            samples_used: 0,
+            samples_raw: 0,
+            excluded_fraction: 0.0,
+        }
+    }
 }
 
 impl PhaseSummaryJson {
@@ -430,6 +509,62 @@ impl PhaseSummaryJson {
     pub fn frequency_dropped(&self) -> bool {
         self.frequency_drop_percent >= FREQUENCY_DROP_ALERT_PERCENT
     }
+}
+
+/// Замечания о питании, собранные по всем прогонам и всем их фазам.
+///
+/// Раньше `PowerSnapshot::note()` попадал только в HTML-отчёт, а в JSON
+/// оставался лишь снимок питания последнего прогона. Для машинного чтения
+/// это плохо: троттлинг, случившийся на второй фазе второго прогона, в JSON
+/// не сохранялся вообще, хотя в HTML был виден.
+///
+/// Повторы схлопываются по паре «схема + текст»: десять прогонов одной схемы
+/// под троттлингом дают одну строку, а десять разных схем под троттлингом —
+/// десять строк, и по ним видно, проблема локальная или общая.
+fn power_warnings(checkpoint: &Checkpoint) -> Vec<String> {
+    power_warnings_slice(&checkpoint.runs)
+}
+
+fn power_warnings_slice(runs: &[StoredRun]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for run in runs {
+        let scheme_key = run.scheme_id.to_ascii_lowercase();
+        let snapshots = run.phases.iter().filter_map(|p| p.power).chain(run.power);
+        for snap in snapshots {
+            let Some(text) = snap.note() else { continue };
+            let key = format!("{scheme_key}|{text}");
+            if !seen.contains(&key) {
+                seen.push(key);
+                out.push(text);
+            }
+        }
+    }
+    out
+}
+
+/// Сводка фаз из сохранённых прогонов; тонкая обёртка над приватной
+/// `phase_summaries`, существующая ради тестов из соседнего модуля.
+pub fn phase_summaries_for_test(
+    per_run: &[StoredRun],
+    session_base_mhz: f64,
+) -> Vec<PhaseSummaryJson> {
+    phase_summaries(per_run, session_base_mhz)
+}
+
+/// Замечания о питании из сохранённых прогонов; обёртка для тестов.
+pub fn power_warnings_for_test(runs: &[StoredRun]) -> Vec<String> {
+    power_warnings_slice(runs)
+}
+
+/// Слить замечания, не давая одинаковым строкам повторяться.
+fn merged_warnings(mut base: Vec<String>, extra: Vec<String>) -> Vec<String> {
+    for w in extra {
+        if !base.contains(&w) {
+            base.push(w);
+        }
+    }
+    base
 }
 
 /// `NaN`/`inf` → `0.0`; конечные значения проходят без изменений.
@@ -791,6 +926,33 @@ pub fn build_session_json(
     if !dropped.is_empty() {
         warnings.push(format!("замечено снижение частоты: {}", dropped.join(", ")));
     }
+    // Сессия без единого прогона. Раньше такой результат выглядел как
+    // поломка: пустые схемы, `level: null`, ни одного предупреждения — и
+    // пользователь не понимал, что делать. Здесь говорится прямо: измерять
+    // было нечего, потому что каждый прогон был отменён, и приводится сама
+    // причина из `rejections` (её записывает сессия).
+    if checkpoint.runs.is_empty() && !checkpoint.rejections.is_empty() {
+        let mut causes: Vec<&str> = checkpoint.rejections.values().map(String::as_str).collect();
+        causes.sort();
+        causes.dedup();
+        warnings.push(format!(
+            "ни один прогон не выполнен: {} (машина была занята посторонними \
+             процессами — закройте тяжёлые программы, подождите либо поднимите \
+             порог фона в «Настройках»)",
+            causes.join("; ")
+        ));
+    }
+    // Сессия, начатая по кнопке «продолжить с риском». Гейт по фону был
+    // выключен осознанно, поэтому результат не должен выглядеть обычным:
+    // без этой строки отчёт ничем не отличается от замера на тихой машине.
+    if checkpoint.plan.accept_dirty_background && !checkpoint.runs.is_empty() {
+        warnings.push(
+            "замер проведён с риском: фон выше критического порога, гейт отложенных \
+             прогонов был отключён по вашему выбору — ориентируйтесь на сравнение \
+             схем, а не на абсолютные числа"
+                .to_string(),
+        );
+    }
     if !dropped.is_empty() && matches!(level, EvidenceLevel::Confirmed | EvidenceLevel::Probable) {
         // Снижение частоты — причина занизить оценку: часть фазы измерялась
         // на пониженной частоте, и это не заслуга схемы питания.
@@ -832,7 +994,7 @@ pub fn build_session_json(
                 .map(tie_criterion_id)
                 .map(String::from),
         },
-        warnings,
+        warnings: merged_warnings(warnings, power_warnings(checkpoint)),
         rounds_planned,
         rounds_completed,
         early_stop_reason,
@@ -845,6 +1007,244 @@ pub fn build_session_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SessionConfig;
+
+    /// Пустой агрегат: замеров нет, все метрики нулевые.
+    ///
+    /// `AggregateResult` не имеет `Default` — у него есть `runs`, и «пусто»
+    /// здесь означает ровно ноль прогонов, а не «один идеальный замер».
+    fn empty_agg() -> AggregateResult {
+        AggregateResult {
+            runs: 0,
+            mean_average_throughput: f64::NAN,
+            sample_std: 0.0,
+            t_value: 0.0,
+            margin: 0.0,
+            ci_95: [f64::NAN, f64::NAN],
+            run_variation_percent: 0.0,
+            cv_warning: false,
+            median_throughput: 0.0,
+            median_p1_throughput: 0.0,
+            median_p01_throughput: 0.0,
+            median_p95_execution_time_ms: 0.0,
+            median_p99_execution_time_ms: 0.0,
+            median_consistency_percent: 0.0,
+            median_burst_retention_percent: 0.0,
+            median_jitter_p99_ms: 0.0,
+            median_worst_window_throughput: 0.0,
+            median_background_purity: None,
+            run_duration_ms: 0,
+            started_at_min_ns: 0,
+        }
+    }
+
+    /// Сессия, в которой не выполнен ни один прогон, обязана объяснять почему.
+    ///
+    /// Именно этот случай приводил к жалобе: все прогоны отменялись по фону,
+    /// а отчёт отдавал пустые схемы с `rejected: false` и пустым `warnings` —
+    /// выглядело как поломка приложения, хотя машина просто была занята.
+    /// Проверяем ровно то, что видит пользователь: текст в `warnings`.
+    #[test]
+    fn session_without_a_single_run_explains_itself() {
+        let mut cp = Checkpoint::new(SessionConfig {
+            duration_seconds: 30,
+            warmup_seconds: 3,
+            cooling_seconds: 3,
+            repetitions: 1,
+            background_threshold_percent: 5.0,
+            accept_dirty_background: false,
+            worker_count: None,
+            scheme_ids: vec!["aaa".to_string(), "bbb".to_string()],
+            reference_scheme_id: None,
+            plan_guid: "p1".to_string(),
+        });
+        assert!(cp.runs.is_empty());
+        cp.rejections.insert(
+            "aaa".to_string(),
+            "фон 144.4 % CPU при критическом пороге 90 % — прогон не начался после 3 попыток"
+                .to_string(),
+        );
+        cp.rejections.insert(
+            "bbb".to_string(),
+            "фон 137.8 % CPU при критическом пороге 90 % — прогон не начался после 3 попыток"
+                .to_string(),
+        );
+
+        let sig = powerbench_metrics::CompatibilitySignature {
+            workload_version: "GamingCpuV1".to_string(),
+            config_hash: "H".to_string(),
+            seed: 1,
+            worker_count: 4,
+            logical_cpus: 6,
+            timer_hz: 10_000_000,
+            cpu_identifier: "cpu".to_string(),
+            diagnostics_version: "0.2.0".to_string(),
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:abc".to_string(),
+        };
+        let agg = empty_agg();
+        let schemes: Vec<RecommendationScheme> = vec![
+            (
+                "aaa".to_string(),
+                true,
+                cp.rejections.get("aaa").cloned(),
+                agg.clone(),
+                Vec::new(),
+            ),
+            (
+                "bbb".to_string(),
+                true,
+                cp.rejections.get("bbb").cloned(),
+                agg,
+                Vec::new(),
+            ),
+        ];
+        let rec = powerbench_recommend::Recommendation {
+            level: powerbench_recommend::EvidenceLevel::None,
+            recommended_scheme: None,
+            runner_up_scheme: None,
+            reason: "нет данных".to_string(),
+            three_probabilities: None,
+            expected_margin_percent: None,
+            bootstrap_mode: None,
+            tie_criterion: None,
+        };
+
+        let json = build_session_json(
+            &cp,
+            IdentityJson::from_signature(&sig),
+            Vec::new(),
+            &schemes,
+            &rec,
+            Vec::new(),
+            false,
+            [0.5, 0.3, 0.2],
+            None,
+        );
+
+        let joined = json.warnings.join(" | ");
+        assert!(
+            json.warnings
+                .iter()
+                .any(|w| w.contains("ни один прогон не выполнен")),
+            "пустая сессия не объяснила себя: {:?}",
+            json.warnings
+        );
+        assert!(
+            joined.contains("144.4") || joined.contains("137.8"),
+            "в предупреждении нет измеренного фона: {joined}"
+        );
+        // Причина остаётся и на каждой схеме — по одному только тексту сводки
+        // непонятно, что делать конкретно с «Логи».
+        assert!(json.schemes.iter().all(|s| s.rejected));
+        assert!(
+            json.schemes.iter().all(|s| s
+                .rejection_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("фон")),
+            "у схемы нет причины пропуска: {:?}",
+            json.schemes
+                .iter()
+                .map(|s| &s.rejection_reason)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Отчёт сессии, начатой по кнопке «продолжить с риском», обязан об этом
+    /// сказать. Иначе гейт выключен, а на бумаге замер выглядит обычным —
+    /// пользователь сравнивает абсолютные числа и принимает их за истину.
+    #[test]
+    fn risk_accepted_session_is_labelled_in_the_report() {
+        let mut cp = Checkpoint::new(SessionConfig {
+            duration_seconds: 30,
+            warmup_seconds: 3,
+            cooling_seconds: 3,
+            repetitions: 1,
+            background_threshold_percent: 5.0,
+            accept_dirty_background: true,
+            worker_count: None,
+            scheme_ids: vec!["aaa".to_string()],
+            reference_scheme_id: None,
+            plan_guid: "p1".to_string(),
+        });
+        // Прогон состоялся — иначе предупреждение было бы не о риске, а о
+        // пустой сессии, и проверка прошла бы не по тому поводу.
+        cp.runs.push(StoredRun {
+            key: "0:p1".to_string(),
+            round: 0,
+            scheme_id: "aaa".to_string(),
+            scheme_name: None,
+            started_at_ns: 0,
+            duration_ms: 1000,
+            ticks: 100,
+            supercycles: 0,
+            first_tick_checksums: [1; crate::config::PHASES_PER_RUN as usize],
+            run_checksums: [1; crate::config::PHASES_PER_RUN as usize],
+            phases: vec![PhaseStats {
+                phase_index: 0,
+                stats: run_stats_of(&[]),
+                power: None,
+                seconds: 4,
+            }],
+            combined: run_stats_of(&[]),
+            cross_phase_consistency: 0.0,
+            burst_retention_percent: 0.0,
+            background: Vec::new(),
+            spike_windows: 0,
+            power: None,
+            scheme_dump: None,
+            background_cpu_p50: 0.0,
+            background_cpu_p95: 0.0,
+            background_sample_seconds: 0,
+            worker_count: 4,
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:test".to_string(),
+            config_hash: "cfg-test".to_string(),
+        });
+
+        let sig = powerbench_metrics::CompatibilitySignature {
+            workload_version: "GamingCpuV1".to_string(),
+            config_hash: "H".to_string(),
+            seed: 1,
+            worker_count: 4,
+            logical_cpus: 6,
+            timer_hz: 10_000_000,
+            cpu_identifier: "cpu".to_string(),
+            diagnostics_version: "0.2.0".to_string(),
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:abc".to_string(),
+        };
+        let agg = empty_agg();
+        let schemes = vec![("aaa".to_string(), true, None, agg.clone(), Vec::new())];
+        let rec = powerbench_recommend::Recommendation {
+            level: powerbench_recommend::EvidenceLevel::None,
+            recommended_scheme: None,
+            runner_up_scheme: None,
+            reason: "нет данных".to_string(),
+            three_probabilities: None,
+            expected_margin_percent: None,
+            bootstrap_mode: None,
+            tie_criterion: None,
+        };
+
+        let json = build_session_json(
+            &cp,
+            IdentityJson::from_signature(&sig),
+            Vec::new(),
+            &schemes,
+            &rec,
+            Vec::new(),
+            false,
+            [0.5, 0.3, 0.2],
+            None,
+        );
+        assert!(
+            json.warnings.iter().any(|w| w.contains("с риском")),
+            "сессия с риском не помечена: {:?}",
+            json.warnings
+        );
+    }
 
     /// Записи истории, сделанные до появления новых полей, должны читаться.
     ///
@@ -933,6 +1333,7 @@ mod tests {
                     ..run_stats_of(&[])
                 },
                 power: None,
+                seconds: 4,
             }],
             combined: run_stats_of(&[]),
             cross_phase_consistency: 0.0,
@@ -940,9 +1341,14 @@ mod tests {
             background: Vec::new(),
             spike_windows: 0,
             power: None,
+            scheme_dump: None,
             background_cpu_p50: 0.0,
             background_cpu_p95: 0.0,
             background_sample_seconds: 0,
+            worker_count: 4,
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:test".to_string(),
+            config_hash: "cfg-test".to_string(),
         };
         let summaries = phase_summaries(&[mk(900.0), mk(1100.0)], 0.0);
         assert_eq!(summaries.len(), 1);
@@ -981,9 +1387,11 @@ mod tests {
                         throttled: false,
                         thermal_throttle: false,
                         policy_reason: 0,
+                        max_idle_minutes: 0,
                         on_ac: true,
                         unavailable: false,
                     }),
+                    seconds: 4,
                 }],
                 combined: run_stats_of(&[]),
                 cross_phase_consistency: 0.0,
@@ -991,9 +1399,14 @@ mod tests {
                 background: Vec::new(),
                 spike_windows: 0,
                 power: None,
+                scheme_dump: None,
                 background_cpu_p50: 0.0,
                 background_cpu_p95: 0.0,
                 background_sample_seconds: 0,
+                worker_count: 4,
+                affinity_mode: "p-only".to_string(),
+                affinity_signature: "p-only:test".to_string(),
+                config_hash: "cfg-test".to_string(),
             }
         }
         let slow = run_with_mhz(4400);
@@ -1034,6 +1447,10 @@ mod tests {
             consistency_percent: 90.0,
             frequency_drop_percent: 4.9,
             frequency_mhz: 5000.0,
+            seconds: 10,
+            samples_used: 3000,
+            samples_raw: 3157,
+            excluded_fraction: 0.05,
         };
         assert!(!p.frequency_dropped(), "4.9 % — ниже порога");
         p.frequency_drop_percent = 5.0;

@@ -176,14 +176,23 @@ pub fn early_stop_decision(
 /// Собираются только схемы, признанные годными: у забракованных прогонов
 /// средние считать нельзя, а невыполненные раунды не должны влиять на
 /// статистику лидера.
+///
+/// Регресс H49: браковка искалась двумя точными `contains_key` — по нижнему
+/// регистру и по исходной строке. Если ключ в `rejections` отличался от
+/// `scheme_id` регистром (а `powercfg` отдаёт GUID то в верхнем, то в нижнем),
+/// забракованная схема попадала в статистику лидера, и ранняя остановка
+/// принималась по ней. Теперь ключи приводятся к нижнему регистру один раз.
 pub fn leader_inputs(
     runs: &[crate::checkpoint::StoredRun],
     rejected: &BTreeMap<String, String>,
 ) -> BTreeMap<String, Vec<f64>> {
+    let rejected_lower: std::collections::BTreeSet<String> = rejected
+        .keys()
+        .map(|k| k.to_ascii_lowercase())
+        .collect();
     let mut out: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for r in runs {
-        let id = r.scheme_id.to_ascii_lowercase();
-        if rejected.contains_key(&id) || rejected.contains_key(&r.scheme_id) {
+        if rejected_lower.contains(&r.scheme_id.to_ascii_lowercase()) {
             continue;
         }
         let value = r.combined.average_throughput;
@@ -346,5 +355,135 @@ mod tests {
             d6.required_percent,
             d3.required_percent
         );
+    }
+
+    /// Регресс H49: бракованные схемы отфильтровываются регистронезависимо.
+    ///
+    /// Идентификаторы приходят из `powercfg` в верхнем регистре, а ключи
+    /// брака формировались в нижнем. При точном сравнении забракованная схема
+    /// попадала в статистику лидера, и ранняя остановка принималась по ней —
+    /// то есть сессия останавливалась на основании схемы, которую уже отвергли.
+    #[test]
+    fn rejected_schemes_are_filtered_regardless_of_case() {
+        let rejected = BTreeMap::from([(
+            "381b4222-f694-41f0-9685-ff5bb260df2e".to_string(),
+            "провал в фазе".to_string(),
+        )]);
+        // Тот же идентификатор, но в верхнем регистре, — как его отдаёт
+        // `powercfg`.
+        let runs = vec![
+            stored_run("381B4222-F694-41F0-9685-FF5BB260DF2E", 900.0),
+            stored_run("aaaaaaaa-0000-0000-0000-000000000000", 950.0),
+        ];
+        let inputs = leader_inputs(&runs, &rejected);
+        assert!(
+            !inputs.contains_key("381B4222-F694-41F0-9685-FF5BB260DF2E"),
+            "забракованная схема попала в статистику лидера: {:?}",
+            inputs.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(inputs.len(), 1, "в статистику попало лишнее: {inputs:?}");
+        assert_eq!(
+            inputs["aaaaaaaa-0000-0000-0000-000000000000"],
+            vec![950.0]
+        );
+
+        // И наоборот: брак в верхнем регистре не должен пропускать схему,
+        // записанную в нижнем.
+        let rejected_upper = BTreeMap::from([(
+            "381B4222-F694-41F0-9685-FF5BB260DF2E".to_string(),
+            "провал в фазе".to_string(),
+        )]);
+        let runs_lower = vec![stored_run("381b4222-f694-41f0-9685-ff5bb260df2e", 900.0)];
+        let inputs = leader_inputs(&runs_lower, &rejected_upper);
+        assert!(
+            inputs.is_empty(),
+            "брак в верхнем регистре не отфильтровал схему в нижнем: {inputs:?}"
+        );
+    }
+
+    /// Забракованная схема, попав в лидера, меняет решение — значит, тест выше
+    /// проверяет не пустую функцию.
+    #[test]
+    fn a_rejected_leader_would_change_the_decision() {
+        // «Быстрая» схема заведомо лучше второй, и при честных повторах
+        // перевес доказывается — то есть остановка случилась бы, если бы эта
+        // схема не была отфильтрована.
+        let bad: Vec<_> = (0..6)
+            .map(|i| stored_run("381B4222-F694-41F0-9685-FF5BB260DF2E", 1200.0 + i as f64 % 3.0))
+            .collect();
+        let good: Vec<_> = (0..6)
+            .map(|i| stored_run("aaaaaaaa-0000-0000-0000-000000000000", 980.0 + i as f64 % 3.0))
+            .collect();
+        let all: Vec<_> = bad.iter().chain(good.iter()).cloned().collect();
+        let with_bad = leader_inputs(&all, &BTreeMap::new());
+        assert!(
+            early_stop_decision(&with_bad, 1, 5).stop,
+            "подготовка: перевес должен быть доказан, иначе тест ничего не проверяет"
+        );
+        // Как только её бракуют (в любом регистре) — перевес исчезает.
+        for rejected_key in [
+            "381b4222-f694-41f0-9685-ff5bb260df2e",
+            "381B4222-F694-41F0-9685-FF5BB260DF2E",
+        ] {
+            let rejected = BTreeMap::from([(rejected_key.to_string(), "брак".to_string())]);
+            let without_bad = leader_inputs(&all, &rejected);
+            assert_eq!(
+                without_bad.len(),
+                1,
+                "брак в регистре {rejected_key} не отфильтровал схему: {:?}",
+                without_bad.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                !early_stop_decision(&without_bad, 1, 5).stop,
+                "решение принято по забракованной схеме (регистр {rejected_key})"
+            );
+        }
+    }
+
+    /// Минимальная запись прогона для проверки фильтрации лидера.
+    fn stored_run(scheme_id: &str, average_throughput: f64) -> crate::checkpoint::StoredRun {
+        crate::checkpoint::StoredRun {
+            key: format!("{scheme_id}-1"),
+            round: 1,
+            scheme_id: scheme_id.to_string(),
+            scheme_name: None,
+            started_at_ns: 0,
+            duration_ms: 0,
+            ticks: 0,
+            supercycles: 0,
+            first_tick_checksums: [0; crate::config::PHASES_PER_RUN as usize],
+            run_checksums: [0; crate::config::PHASES_PER_RUN as usize],
+            phases: Vec::new(),
+            combined: powerbench_metrics::RunStats {
+                samples: 1,
+                samples_raw: 1,
+                excluded_fraction: 0.0,
+                work_units: 0,
+                active_time_ms_total: 0.0,
+                average_throughput,
+                average_execution_time_ms: 0.0,
+                median_throughput: 0.0,
+                p1_throughput: 0.0,
+                p01_throughput: 0.0,
+                p95_execution_time_ms: 0.0,
+                p99_execution_time_ms: 0.0,
+                consistency_percent: 0.0,
+                jitter_p99_ms: 0.0,
+                worst_second_throughput: 0.0,
+            },
+            cross_phase_consistency: 0.0,
+            burst_retention_percent: 0.0,
+            background: Vec::new(),
+            spike_windows: 0,
+            power: None,
+            scheme_dump: None,
+            background_cpu_p50: 0.0,
+            background_cpu_p95: 0.0,
+            background_sample_seconds: 0,
+            worker_count: 0,
+            affinity_mode: String::new(),
+            affinity_signature: String::new(),
+            config_hash: String::new(),
+        }
     }
 }

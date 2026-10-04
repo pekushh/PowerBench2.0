@@ -91,8 +91,12 @@ pub struct PowerSnapshot {
     pub throttled: bool,
     /// Причина ограничения — температура (пассивное охлаждение).
     pub thermal_throttle: bool,
-    /// Код ACPI-ограничения системы; 0 — ограничений нет.
+    /// Флаги источника ограничения; 0 — ограничений нет (см.
+    /// `powerbench_windows::power::throttle_cause`).
     pub policy_reason: u32,
+    /// Сколько система выдержит без сна, минут (0 — неизвестно/без предела).
+    #[serde(default)]
+    pub max_idle_minutes: u32,
     /// Питание от сети.
     pub on_ac: bool,
     /// Снимок получить не удалось (нет данных, а не «ограничений нет»).
@@ -109,6 +113,7 @@ impl PowerSnapshot {
             throttled: p.throttled,
             thermal_throttle: p.thermal_throttle,
             policy_reason: p.policy_reason,
+            max_idle_minutes: p.max_idle_minutes,
             on_ac: p.on_ac,
             unavailable: p.unavailable,
         }
@@ -119,7 +124,7 @@ impl PowerSnapshot {
     /// том, какой частота была в начале сессии, а сама частота и так видна в
     /// пофазной таблице вместе со стрелкой падения. Если печатать её здесь,
     /// в условиях замера появлялась строка на каждый прогон, и настоящие
-    /// замечания — тепловая защита и ACPI-ограничение — в них терялись.
+    /// замечания — тепловая защита и троттлинг — в них терялись.
     pub fn note(&self) -> Option<String> {
         if self.unavailable {
             return None;
@@ -128,8 +133,20 @@ impl PowerSnapshot {
         if self.thermal_throttle {
             parts.push("тепловая защита".to_string());
         }
-        if self.policy_reason != 0 {
-            parts.push(format!("ACPI-ограничение {}", self.policy_reason));
+        // Регресс H22: здесь печаталось «ACPI-ограничение N», где N на самом
+        // деле было `MaxIdlenessAllowed` — временем простоя до сна в единицах
+        // по 64 с. Отчёт утверждал конкретную причину ограничения, которой
+        // система не сообщала. Теперь перечисляются настоящие флаги
+        // троттлинга.
+        let causes = powerbench_windows::power::throttle_cause::describe(self.policy_reason);
+        if !causes.is_empty() {
+            parts.push(format!("троттлинг: {causes}"));
+        }
+        if self.max_idle_minutes > 0 && self.max_idle_minutes < 30 {
+            parts.push(format!(
+                "система уйдёт в сон после {} мин простоя",
+                self.max_idle_minutes
+            ));
         }
         if parts.is_empty() {
             None
@@ -150,6 +167,13 @@ pub struct PhaseStats {
     /// внутри прогона, и по одному срезу в конце прогона это не поймать.
     #[serde(default)]
     pub power: Option<PowerSnapshot>,
+    /// Номинальная длительность фазы, секунды.
+    ///
+    /// Без неё в отчёте нельзя отличить p0.001, посчитанный по трёмстам
+    /// сэмплам, от p0.001 по пятидесяти тысячам: величина зависит от длины
+    /// фазы, а длина в отчёте не была.
+    #[serde(default)]
+    pub seconds: u64,
 }
 
 /// Завершённый прогон одной схемы (компактная сводка для checkpoint).
@@ -181,6 +205,24 @@ pub struct StoredRun {
     /// Снимок питания в конце прогона.
     #[serde(default)]
     pub power: Option<PowerSnapshot>,
+    /// Снимок настроек схемы (`powercfg /query <guid>`) на момент прогона.
+    ///
+    /// Без него через год остаётся только GUID, а по нему не сказать, что
+    /// было задано: Windows молча правит планы при обновлениях, OEM-агенты —
+    /// постоянно. Дамп снимается один раз на прогон и делает результат
+    /// воспроизводимым.
+    ///
+    /// Регресс M35: дамп писался в КАЖДЫЙ прогон, а чекпоинт переписывается
+    /// целиком после каждого прогона. На типовой сессии (десятки схем ×
+    /// повторы) это десятки копий одного и того же текста об одних и тех же
+    /// настройках — мегабайты, которые переписывались после каждого прогона и
+    /// уходили в итоговый JSON истории. Теперь дамп хранится ОДИН РАЗ на
+    /// схему: у первого её прогона. Настройки схемы между повторами не меняются
+    /// (их меняют между сессиями), так что копии были буквально одинаковыми, а
+    /// воспроизводимость результата не пострадала: dump по GUID и раньше брался
+    /// один, просто хранился в каждом прогоне.
+    #[serde(default)]
+    pub scheme_dump: Option<String>,
     /// Медианная фоновая нагрузка за прогон, % одного ядра.
     /// Раньше фон оценивался только пробой 700 мс *перед* прогоном, и весь
     /// прогон считался «чистым» или «грязным» по одному моменту.
@@ -192,6 +234,112 @@ pub struct StoredRun {
     /// Сколько секунд фона набралось (раз в секунду).
     #[serde(default)]
     pub background_sample_seconds: u32,
+    // --- Условия запуска прогона ---
+    //
+    // Без них `resume` с другими параметрами перештамповывает старые прогоны
+    // подписью ТЕКУЩЕГО движка, и в одном отчёте оказываются числа, измеренные
+    // при разном числе воркеров, разной привязке и разной нагрузке. Такая
+    // смесь ранжируется как один замер, а воспроизвести его нельзя.
+    //
+    // Все поля с `default`: контрольные точки, записанные прошлыми версиями,
+    // читаются как «условия неизвестны» и отбраковываются на проверке.
+    /// Число воркеров, под которыми шёл прогон (0 — неизвестно).
+    #[serde(default)]
+    pub worker_count: usize,
+    /// Режим привязки потоков на момент прогона (пусто — неизвестно).
+    #[serde(default)]
+    pub affinity_mode: String,
+    /// Подпись привязки: какие ядра достались воркерам.
+    #[serde(default)]
+    pub affinity_signature: String,
+    /// Хэш конфигурации движка (профиль нагрузки, объёмы, версия).
+    #[serde(default)]
+    pub config_hash: String,
+}
+
+impl StoredRun {
+    /// Условия запуска прогона в виде, пригодном для сравнения и показа.
+    pub fn launch_conditions(&self) -> LaunchConditions {
+        LaunchConditions {
+            worker_count: self.worker_count,
+            affinity_mode: self.affinity_mode.clone(),
+            affinity_signature: self.affinity_signature.clone(),
+            config_hash: self.config_hash.clone(),
+        }
+    }
+
+    /// Известны ли условия запуска (у точки, записанной прошлой версией — нет).
+    pub fn has_launch_conditions(&self) -> bool {
+        self.worker_count > 0 || !self.config_hash.is_empty()
+    }
+}
+
+/// Условия запуска прогона: чем именно он измерялся.
+///
+/// Отдельный тип нужен, чтобы сравнение подписей было одной операцией с
+/// внятным сообщением, а не набором разрозненных проверок в цикле сессии.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LaunchConditions {
+    pub worker_count: usize,
+    pub affinity_mode: String,
+    pub affinity_signature: String,
+    pub config_hash: String,
+}
+
+impl LaunchConditions {
+    /// Первое поле, по которому условия разошлись, и как именно.
+    ///
+    /// Пустая строка — расхождений нет. Сравнение идёт по полям в порядке
+    /// влияния на величину: число воркеров меняет саму работу, привязка —
+    /// то, на каких ядрах она шла, конфигурация — что именно считалось.
+    pub fn first_difference(&self, other: &LaunchConditions) -> Option<String> {
+        // `worker_count == 0` означает «неизвестно» (точка прошлой версии), и
+        // сравнивать его с настоящим значением нельзя: иначе любое чтение старой
+        // точки превращалось бы в отказ продолжать сессию.
+        if self.worker_count > 0 && other.worker_count > 0 && self.worker_count != other.worker_count
+        {
+            return Some(format!(
+                "число воркеров {} против {}",
+                self.worker_count, other.worker_count
+            ));
+        }
+        if !self.affinity_mode.is_empty()
+            && !other.affinity_mode.is_empty()
+            && self.affinity_mode != other.affinity_mode
+        {
+            return Some(format!(
+                "режим привязки «{}» против «{}»",
+                self.affinity_mode, other.affinity_mode
+            ));
+        }
+        if !self.affinity_signature.is_empty()
+            && !other.affinity_signature.is_empty()
+            && self.affinity_signature != other.affinity_signature
+        {
+            return Some(format!(
+                "подпись привязки «{}» против «{}»",
+                self.affinity_signature, other.affinity_signature
+            ));
+        }
+        if !self.config_hash.is_empty()
+            && !other.config_hash.is_empty()
+            && self.config_hash != other.config_hash
+        {
+            return Some(format!(
+                "конфигурация нагрузки {} против {}",
+                self.config_hash, other.config_hash
+            ));
+        }
+        None
+    }
+
+    /// Человекочитаемое описание для журнала сессии.
+    pub fn describe(&self) -> String {
+        format!(
+            "{} воркер(ов), привязка «{}»/{}",
+            self.worker_count, self.affinity_mode, self.affinity_signature
+        )
+    }
 }
 
 /// Каталог данных приложения: `%LOCALAPPDATA%\PowerBench\`.
@@ -304,6 +452,7 @@ mod tests {
             cooling_seconds: 1,
             repetitions: 1,
             background_threshold_percent: 5.0,
+            accept_dirty_background: false,
             worker_count: None,
             scheme_ids: vec!["s1".to_string()],
             plan_guid: "g1".to_string(),
@@ -335,16 +484,19 @@ mod tests {
                     phase_index: 0,
                     stats: stats(10, 1.0),
                     power: None,
+                    seconds: 4,
                 },
                 PhaseStats {
                     phase_index: 1,
                     stats: stats(10, 1.0),
                     power: None,
+                    seconds: 4,
                 },
                 PhaseStats {
                     phase_index: 2,
                     stats: stats(10, 1.0),
                     power: None,
+                    seconds: 4,
                 },
             ],
             combined: stats(30, 1.0),
@@ -353,9 +505,14 @@ mod tests {
             background: Vec::new(),
             spike_windows: 0,
             power: None,
+            scheme_dump: None,
             background_cpu_p50: 0.0,
             background_cpu_p95: 0.0,
             background_sample_seconds: 0,
+            worker_count: 4,
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:test".to_string(),
+            config_hash: "cfg-test".to_string(),
         }
     }
 

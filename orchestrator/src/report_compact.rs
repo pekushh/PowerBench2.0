@@ -42,6 +42,35 @@ fn esc(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
+/// Экранировать строку JSON для встраивания внутрь `<script>`.
+///
+/// `serde_json::to_string` экранирует только кавычки и обратный слэш, но НЕ
+/// `<`, `>` и `&`. HTML-парсер, впрочем, заканчивает `<script>` на первом
+/// же `</script` — независимо от того, находится ли он внутри строки JSON или
+/// нет. Имя схемы питания приходит из `powercfg /list`, то есть это данные
+/// извне: значение `</script><img src=x onerror=...>` вырывалось бы из строки и
+/// превращалось в исполняемый HTML (регресс H46).
+///
+/// Заменяем на `\uXXXX`-последовательности: это валидный JSON, поэтому
+/// `JSON.parse` продолжает работать без изменений на стороне интерфейса.
+/// `\u2028`/`\u2029` — разделители строк JavaScript, которые ломают парсер
+/// скрипта даже внутри строки.
+fn json_escape(text: &str) -> String {
+    serde_json::to_string(text)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+/// То же для готового JSON-массива: экранируются только его строковые
+/// литералы, поэтому структура сохраняется.
+fn json_escape_all<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "[]".to_string())
+}
+
 fn f1(v: f64) -> String {
     if v.is_finite() {
         format!("{v:.1}")
@@ -122,13 +151,25 @@ fn now_secs() -> u64 {
 // MSRV 1.85: схлопывание через let-цепочки требует Rust 1.88+.
 #[allow(clippy::collapsible_if)]
 fn reference_scheme<'a>(s: &'a SessionJson, active: Option<&'a str>) -> Option<&'a SchemeJson> {
+    // Сравнение GUID — всегда регистронезависимое (регресс H48/H49): `powercfg`
+    // отдаёт идентификаторы в верхнем регистре, а чекпоинт и настройки могут
+    // хранить их в нижнем. Обычное `==` теряло опорную схему, и карточка
+    // дрейфа молча показывала «опорная схема не задана».
     if let Some(r) = s.reference.as_ref() {
-        if let Some(sch) = s.schemes.iter().find(|x| x.scheme_id == r.scheme_id) {
+        if let Some(sch) = s
+            .schemes
+            .iter()
+            .find(|x| x.scheme_id.eq_ignore_ascii_case(&r.scheme_id))
+        {
             return Some(sch);
         }
     }
     if let Some(a) = active {
-        if let Some(sch) = s.schemes.iter().find(|x| x.scheme_id == a) {
+        if let Some(sch) = s
+            .schemes
+            .iter()
+            .find(|x| x.scheme_id.eq_ignore_ascii_case(a))
+        {
             return Some(sch);
         }
     }
@@ -444,7 +485,7 @@ fn hero_html(
 
     let rank_of = |sch: &SchemeJson| -> usize {
         rows.iter()
-            .find(|r| r.sch.scheme_id == sch.scheme_id)
+            .find(|r| r.sch.scheme_id.eq_ignore_ascii_case(&sch.scheme_id))
             .map(|r| r.rank)
             .unwrap_or(0)
     };
@@ -481,7 +522,7 @@ fn hero_html(
     };
 
     let role_current = if ref_sch
-        .map(|c| Some(c.scheme_id.as_str()) == active)
+        .map(|c| active.is_some_and(|a| c.scheme_id.eq_ignore_ascii_case(a)))
         .unwrap_or(false)
     {
         "Текущая · Опорная"
@@ -508,7 +549,7 @@ fn hero_html(
             let wname = s
                 .schemes
                 .iter()
-                .find(|x| x.scheme_id == w)
+                .find(|x| x.scheme_id.eq_ignore_ascii_case(w))
                 .map(name_of)
                 .unwrap_or_else(|| w.to_string());
             format!("Рекомендуем: «{}»", wname)
@@ -677,10 +718,10 @@ fn table_html(
         let mut tags = String::new();
         if row.is_key {
             let mut parts: Vec<&str> = Vec::new();
-            if sch.scheme_id == base_id {
+            if sch.scheme_id.eq_ignore_ascii_case(base_id) {
                 parts.push("ОПОРНАЯ");
             }
-            if Some(sch.scheme_id.as_str()) == rec_id {
+            if rec_id.is_some_and(|r| sch.scheme_id.eq_ignore_ascii_case(r)) {
                 parts.push("РЕКОМЕНДУЕТСЯ");
             }
             if !parts.is_empty() {
@@ -780,12 +821,18 @@ fn drift_card(s: &SessionJson) -> String {
             )
         })
         .collect();
-    let rounds = r.per_round.len().max(1);
+    // Регресс H43: тренд — это изменение НА ИНТЕРВАЛ, поэтому за сессию его надо
+    // умножать на число интервалов, а не на число замеров. `n` замеров дают
+    // `n − 1` интервалов, и ровно на `n − 1` умножается то же значение в
+    // `ReferenceJson::total_change_percent` и в решении о стабильности
+    // дрейфа. Прежнее умножение на `n` завышало накопленное изменение на целый
+    // процент тренда — и карточка показывала не то, по чему выносился вердикт.
+    let intervals = r.per_round.len().saturating_sub(1);
     let text = format!(
         "Размах <b>{}</b> за сессию (тренд {:+.1}%/раунд, накопленное {:+.1}%). {}",
         pct1(r.span_percent),
         r.trend_percent_per_round,
-        r.trend_percent_per_round * rounds as f64,
+        r.trend_percent_per_round * intervals as f64,
         if r.unstable {
             "Разброс выше порога — машина плавает сильнее, чем различаются схемы, ранжирование ориентировочно."
         } else {
@@ -998,9 +1045,9 @@ fn script_html(s: &SessionJson, ref_sch: Option<&SchemeJson>, uniq: usize) -> St
         };
         meta.push(format!(
             "{}:{{\"r\":{},\"t\":{}}}",
-            serde_json::to_string(&sch.scheme_id).unwrap_or_default(),
-            serde_json::to_string(&reason).unwrap_or_default(),
-            serde_json::to_string(&note).unwrap_or_default()
+            json_escape(&sch.scheme_id),
+            json_escape(&reason),
+            json_escape(&note)
         ));
     }
 
@@ -1389,7 +1436,7 @@ fn script_html(s: &SessionJson, ref_sch: Option<&SchemeJson>, uniq: usize) -> St
         key = F_KEY,
         prob = F_PROB,
         rej = F_REJ,
-        labels = serde_json::to_string(&PHASE_LABELS_LONG).unwrap_or_default(),
+        labels = json_escape_all(&PHASE_LABELS_LONG),
     )
 }
 
@@ -1441,6 +1488,10 @@ mod tests {
                 consistency_percent: 95.0,
                 frequency_drop_percent: if i == 2 { drop } else { 0.0 },
                 frequency_mhz: if i == 2 && drop > 0.0 { 4400.0 } else { 5201.0 },
+                seconds: 10,
+                samples_used: 3000,
+                samples_raw: 3157,
+                excluded_fraction: 0.05,
             })
             .collect()
     }
@@ -1635,6 +1686,160 @@ mod tests {
             "название схемы попало в разметку как есть"
         );
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    /// Регресс H46: JSON внутри `<script>` не должен вырываться из строки.
+    ///
+    /// HTML-парсер заканчивает `<script>` на первом же `</script` — независимо
+    /// от того, находится ли он внутри строки JSON или нет. `serde_json`
+    /// экранирует только кавычки и обратный слэш, поэтому `</script>` в имени
+    /// схемы (а имя приходит из `powercfg /list`) вырывался наружу и превращался
+    /// в исполняемый HTML.
+    #[test]
+    fn a_script_closing_tag_cannot_escape_the_embedded_json() {
+        let injection = "</script><img src=x onerror=alert(1)>";
+        let mut s = session(vec![scheme("aaa", injection, 1000.0, 200.0)]);
+        // Идентификатор и причина брака попадают во встраиваемый JSON как ключ и
+        // значение — именно они там и проверяются.
+        s.schemes[0].rejected = true;
+        s.schemes[0].rejection_reason = Some(injection.to_string());
+        let html = build(&s);
+        // Всё, что лежит внутри единственного блока скрипта, обязано быть
+        // экранировано: «сырой» `</script>` внутри него означал бы, что JSON
+        // вырвался и разметка развалилась.
+        let script_start = html
+            .find("<script>")
+            .expect("в отчёте нет блока скрипта");
+        let script_end = html[script_start..]
+            .find("</script>")
+            .expect("блок скрипта не закрыт");
+        let body = &html[script_start + "<script>".len()..script_start + script_end];
+        assert!(
+            !body.contains("</script"),
+            "внутри скрипта снова появился закрывающий тег: JSON вырвался наружу"
+        );
+        assert!(
+            body.contains("\\u003c/script"),
+            "значение обязано быть экранировано через \\u003c: {}",
+            body.chars().take(400).collect::<String>()
+        );
+        assert!(
+            !html.contains("<img src=x onerror=alert(1)>"),
+            "инъекция попала в разметку как HTML"
+        );
+    }
+
+    /// Разделители строк JavaScript ломают парсер скрипта даже внутри строки.
+    #[test]
+    fn json_escape_also_neutralizes_javascript_line_separators() {
+        let escaped = json_escape("a\u{2028}b\u{2029}c");
+        assert!(!escaped.contains('\u{2028}'), "{escaped}");
+        assert!(!escaped.contains('\u{2029}'), "{escaped}");
+        assert!(escaped.contains("\\u2028"), "{escaped}");
+        assert!(escaped.contains("\\u2029"), "{escaped}");
+        // И результат остаётся валидным JSON с тем же значением.
+        let back: String = serde_json::from_str(&escaped).expect("экранированный JSON не читается");
+        assert_eq!(back, "a\u{2028}b\u{2029}c");
+    }
+
+    /// Экранирование не должно ломать обычные строки: значение обязано
+    /// переживать ту же остановку JSON, что и раньше.
+    #[test]
+    fn json_escape_keeps_ordinary_values_readable() {
+        for value in ["", "План Обычный", "План \"с кавычками\"", "a\\b", "≈5 %"] {
+            let escaped = json_escape(value);
+            let back: String =
+                serde_json::from_str(&escaped).expect("экранированный JSON не читается");
+            assert_eq!(back, value, "значение исказилось при экранировании");
+        }
+    }
+
+    /// Регресс H43: накопленное изменение дрейфа считается по интервалам.
+    ///
+    /// `n` замеров дают `n − 1` интервалов, и ровно на `n − 1` умножается тренд
+    /// в `ReferenceJson::total_change_percent` — то есть в решении о стабильности
+    /// дрейфа. Прежнее умножение на `n` показывало в карточке число, отличающееся
+    /// от принятого решения на целый процент тренда.
+    #[test]
+    fn drift_card_accumulates_over_intervals_not_samples() {
+        let mut s = session(vec![scheme("aaa", "План Опорный", 1000.0, 900.0)]);
+        let reference = |trend: f64| crate::result::ReferenceSummary {
+            scheme_id: "aaa".into(),
+            scheme_name: Some("План Опорный".into()),
+            per_round: vec![1000.0, 1001.0, 1002.0],
+            trend_percent_per_round: trend,
+            span_percent: 0.2,
+            span_limit_percent: 3.0,
+            unstable: false,
+        };
+        // Пока опорной схемы в сессии нет — карточка объясняет это.
+        let html = drift_card(&s);
+        assert!(html.contains("не задана"), "{html}");
+        // 3 замера → 2 интервала → 2.0 %, а не 3.0 %.
+        s.reference = Some(reference(1.0));
+        let card = drift_card(&s);
+        assert!(
+            card.contains("+2.0%"),
+            "накопленное изменение считается не по интервалам: {card}"
+        );
+        assert!(!card.contains("+3.0%"), "вернулось старое умножение на n: {card}");
+        // Карточка обязана совпадать с решением по стабильности дрейфа.
+        let r = reference(2.0);
+        let expected = r.trend_percent_per_round * (r.per_round.len() - 1) as f64;
+        s.reference = Some(r);
+        assert!(
+            drift_card(&s).contains(&format!("+{expected:.1}%")),
+            "карточка разошлась с решением по дрейфу"
+        );
+    }
+
+    /// Регресс H48: опорная схема ищется регистронезависимо.
+    ///
+    /// `powercfg` отдаёт GUID в верхнем регистре, а `reference.scheme_id` мог
+    /// прийти из чекпоинта в нижнем. При точном `==` карточка дрейфа молча
+    /// сообщала «опорная схема не задана».
+    #[test]
+    fn reference_scheme_is_found_regardless_of_case() {
+        let upper = session(vec![scheme(
+            "381B4222-F694-41F0-9685-FF5BB260DF2E",
+            "План Опорный",
+            1000.0,
+            900.0,
+        )]);
+        let found = reference_scheme(&upper, Some("381B4222-F694-41F0-9685-FF5BB260DF2E"))
+            .expect("опорная схема не найдена в своём же регистре");
+        assert!(
+            found
+                .scheme_id
+                .eq_ignore_ascii_case("381b4222-f694-41f0-9685-ff5bb260df2e")
+        );
+
+        // Идентификатор опорной схемы в другом регистре тоже находится.
+        let mut s = upper.clone();
+        s.reference = Some(crate::result::ReferenceSummary {
+            scheme_id: "381b4222-f694-41f0-9685-ff5bb260df2e".into(),
+            scheme_name: Some("План Опорный".into()),
+            per_round: vec![1000.0, 1001.0],
+            trend_percent_per_round: 0.1,
+            span_percent: 0.1,
+            span_limit_percent: 3.0,
+            unstable: false,
+        });
+        assert!(
+            reference_scheme(&s, None).is_some(),
+            "опорная схема потеряна из-за регистра GUID"
+        );
+        // И через активную схему в другом регистре.
+        let lower = session(vec![scheme(
+            "381b4222-f694-41f0-9685-ff5bb260df2e",
+            "План Опорный",
+            1000.0,
+            900.0,
+        )]);
+        assert!(
+            reference_scheme(&lower, Some("381B4222-F694-41F0-9685-FF5BB260DF2E")).is_some(),
+            "активная схема не найдена из-за регистра GUID"
+        );
     }
 
     /// Фазы в строке: три метрики на каждую из четырёх фаз.

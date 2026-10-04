@@ -492,3 +492,97 @@ fn affinity_off_pool_still_runs() {
     assert!(engine.affinity_failures().is_empty());
     assert!(engine.affinity_signature().starts_with("off:"));
 }
+
+/// Регресс C2: `reset()` не должен трогать буферы сущностей и снимать отмену,
+/// пока пул не затих.
+///
+/// Раньше обе операции выполнялись безусловно, даже когда `reset_to_idle()`
+/// возвращал `false`. Это гонка памяти с живым воркером (он пишет в те же
+/// буферы), а снятие отмены вдобавок разрешает досчитать прерванный батч
+/// поверх только что записанных значений — то есть ровно то
+/// недетерминированное состояние, ради которого сброс и делается.
+///
+/// Проверяется по исходнику: заставить воркера зависнуть так, чтобы поймать
+/// гонку в тесте, нельзя, а регресс молчаливый — код компилируется и работает,
+/// пока не встретит именно этот случай. Порядок в тексте функции единственный
+/// способ это удержать.
+#[test]
+fn engine_reset_guards_buffers_and_cancel_with_the_quiescence_check() {
+    let src = include_str!("engine.rs");
+    let start = src
+        .find("pub fn reset(&mut self) -> bool {")
+        .expect("не найден Engine::reset");
+    let body = &src[start..];
+    let end = body
+        .find("\n    /// Запустить фазу")
+        .expect("не найден конец Engine::reset");
+    let body = &body[..end];
+
+    let guard_at = body
+        .find("if !self.pool.reset_to_idle() {")
+        .expect("Engine::reset не проверяет тишину пула");
+    let early_return_at = body
+        .find("return false;")
+        .expect("Engine::reset не отказывается при незатихшем пуле");
+    let cancel_at = body
+        .find("self.pool.clear_cancel()")
+        .expect("отмена не снимается вовсе — проверка неполная");
+    let buffers_at = body
+        .find("self.entities.get()")
+        .expect("буферы сущностей не сбрасываются — проверка неполная");
+
+    assert!(
+        guard_at < early_return_at,
+        "сброс буферов идёт до проверки тишины пула"
+    );
+    assert!(
+        early_return_at < cancel_at && early_return_at < buffers_at,
+        "сброс буферов или снятие отмены выполняется ДО отказа: гонка с воркером"
+    );
+}
+
+/// Регресс C2 (поведенческий): успешный сброс обязан приводить движок в
+/// рабочее состояние — иначе после отменённой фазы мерить больше нечем.
+///
+/// Серия отмен гоняет окно между отменой и поздним отчётом воркера; каждый
+/// следующий `reset` обязан либо честно сообщить «пул не затих», либо привести
+/// пул в порядок так, чтобы фаза снова пошла детерминированно.
+#[test]
+fn engine_reset_leaves_the_engine_usable_after_cancellations() {
+    let _g = lock();
+    let mut engine = Engine::new(Some(4));
+    let mut refused = 0;
+    for _ in 0..6 {
+        let canceller = engine.canceller();
+        let _ = std::thread::scope(|s| {
+            let handled = s.spawn(|| {
+                engine.prepare_sample_buffer(Phase::Heavy, 30);
+                engine.run_phase(Phase::Heavy, RunTarget::Duration(Duration::from_secs(30)))
+            });
+            std::thread::sleep(Duration::from_millis(20));
+            canceller.store(true, Ordering::Release);
+            handled.join().unwrap()
+        });
+        if !engine.reset() {
+            refused += 1;
+        }
+    }
+    // Отказ здесь честный (пул не затих) — но тогда мерить нельзя вовсе,
+    // и движок обязан это показывать, а не измерять поверх живого воркера.
+    if refused > 0 {
+        return;
+    }
+    assert!(engine.pool_quiesced());
+    engine.reset();
+    let a = engine
+        .run_phase(Phase::Heavy, RunTarget::Ticks(64))
+        .unwrap();
+    engine.reset();
+    let b = engine
+        .run_phase(Phase::Heavy, RunTarget::Ticks(64))
+        .unwrap();
+    assert_eq!(
+        a.run_checksum, b.run_checksum,
+        "после отмен reset перестал восстанавливать детерминизм"
+    );
+}

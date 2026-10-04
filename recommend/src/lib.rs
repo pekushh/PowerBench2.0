@@ -22,6 +22,12 @@ pub const P1_TIE_LEAD_PERCENT: f64 = 0.005;
 pub const P1_TIE_MIN_SAMPLES: usize = 100;
 /// Перевес по стабильности ≥ 1 процентный пункт (абсолютно).
 pub const STABILITY_TIE_LEAD_PP: f64 = 1.0;
+/// ...при минимуме 3 прогонах у каждого.
+///
+/// Стабильность — производная от повторов: по одному прогону медиана
+/// стабильности не имеет смысла, и схема с единственным измерением
+/// объявлялась бы более стабильной просто за счёт шума.
+pub const STABILITY_TIE_MIN_RUNS: usize = 3;
 /// Перевес по CV ≥ 0.5 п.п. (абсолютно, меньше — лучше).
 pub const CV_TIE_LEAD_PP: f64 = 0.5;
 /// ...при минимуме 3 прогонах у каждого.
@@ -274,12 +280,31 @@ pub fn recommend(items: &[SchemeAggregate], expected_runs: usize) -> Recommendat
     }
 
     // --- Практическая ничья ---
+    //
+    // Опорная величина — среднее throughput ЛИДЕРА основного порядка, а сам
+    // порядок построен по медиане (см. `primary_cmp` / `RankKey`). Совпадения
+    // этих двух величин не гарантировано: схема с лучшей медианой вполне может
+    // иметь худшее среднее.
+    //
+    // Раньше разность считалась как `leader_mean - sorted[i].mean` и
+    // сравнивалась с `leader_mean * 1 %`. При отрицательной разности (у
+    // кандидата среднее ВЫШЕ лидерского) условие выполнялось всегда, и в
+    // «ничью» попадала любая схема с более высоким средним — как бы далеко она
+    // ни была. Дальше такая схема выигрывала по стабильности или CV, то есть
+    // заметно более медленная схема объявлялась победителем.
+    //
+    // Поэтому два условия, а не одно:
+    //   1. кандидат не быстрее лидера по среднему — иначе это не ничья, а
+    //      выигрыш по скорости, и решать его надо по скорости;
+    //   2. его среднее не ниже лидера более чем на 1 %.
     let leader_mean = sorted[0].aggregate.mean_average_throughput;
     let tie_indices: Vec<usize> = (0..sorted.len())
         .filter(|&i| {
-            i == 0
-                || (leader_mean - sorted[i].aggregate.mean_average_throughput)
-                    <= leader_mean * PRACTICAL_TIE_PERCENT
+            if i == 0 {
+                return true;
+            }
+            let mean = sorted[i].aggregate.mean_average_throughput;
+            mean <= leader_mean && (leader_mean - mean) <= leader_mean * PRACTICAL_TIE_PERCENT
         })
         .collect();
 
@@ -500,7 +525,16 @@ fn separate_by(
             }
             (val(top) - v2) / v2
         }
-        TieCriterion::Stability => val(top) - val(second),
+        TieCriterion::Stability => {
+            // Гейта не было вовсе: стабильность по одному прогону — это шум,
+            // и схема с единственным измерением выигрывала «ничью» тем, что
+            // её единственный замер случайно вышел ровным.
+            if !(runs_ok(top, 1, STABILITY_TIE_MIN_RUNS) && runs_ok(second, 1, STABILITY_TIE_MIN_RUNS))
+            {
+                return None;
+            }
+            val(top) - val(second)
+        }
         TieCriterion::Cv => {
             if !(runs_ok(top, 1, CV_TIE_MIN_RUNS) && runs_ok(second, 1, CV_TIE_MIN_RUNS)) {
                 return None;
@@ -808,6 +842,120 @@ mod tests {
         let r = recommend(&[a, b2], 3);
         assert_eq!(r.level, EvidenceLevel::StabilityTieBreak);
         assert_eq!(r.tie_criterion, Some(TieCriterion::Stability));
+        assert_eq!(r.recommended_scheme.as_deref(), Some("B"));
+    }
+
+    /// Регресс C3: критерий `Stability` обязан иметь гейт по числу прогонов.
+    ///
+    /// Раньше он был единственным без гейта: стабильность по одному прогону —
+    /// это шум, и схема с единственным измерением выигрывала «ничью» тем, что
+    /// её единственный замер случайно вышел ровным. Теперь нужен минимум
+    /// [`STABILITY_TIE_MIN_RUNS`] прогонов у каждого.
+    #[test]
+    fn stability_tie_needs_enough_runs() {
+        // По одному прогону у каждой, при этом «стабильность» взята с потолка.
+        let a = scheme(
+            "A",
+            1000.0,
+            1000.0,
+            800.0,
+            700.0,
+            90.0,
+            2.0,
+            &[(1000.0, 200)],
+            false,
+            false,
+        );
+        let mut b = scheme(
+            "B",
+            995.0,
+            995.0,
+            800.0,
+            700.0,
+            99.0,
+            2.0,
+            &[(995.0, 200)],
+            false,
+            false,
+        );
+        // Средние в пределах 1 % — практическая ничья есть.
+        b.aggregate.median_consistency_percent = 99.0;
+        let r = recommend(&[a, b], 3);
+        assert_ne!(
+            r.tie_criterion,
+            Some(TieCriterion::Stability),
+            "стабильность по одному прогону развела ничью: это шум, а не признак"
+        );
+        assert_eq!(r.tie_criterion, Some(TieCriterion::None));
+        assert_eq!(r.level, EvidenceLevel::Equivalent);
+    }
+
+    /// Регресс C3: схема с ВЫСШИМ средним, чем у лидера основного порядка, не
+    /// обязана попадать в «ничью».
+    ///
+    /// Порядок строится по медиане, поэтому лидером может оказаться схема с
+    /// худшим средним. Разность `leader_mean − mean` тогда отрицательна, а
+    /// отрицательное число всегда `<= leader_mean · 1 %`, то есть в ничью
+    /// попадала ЛЮБАЯ схема с более высоким средним — как бы далеко она ни была.
+    /// Дальше она выигрывала по стабильности, и заметно более медленная схема
+    /// объявлялась победителем.
+    #[test]
+    fn a_scheme_faster_than_the_leader_is_not_a_practical_tie() {
+        // A — лидер по медиане (1000 против 990), но её среднее 1000.
+        let a = scheme(
+            "A",
+            1000.0,
+            1000.0,
+            800.0,
+            700.0,
+            90.0,
+            2.0,
+            &[(1000.0, 200); 3],
+            false,
+            false,
+        );
+        // B — типичный «жертвенный» кандидат: среднее заметно выше (1100),
+        // медиана ниже, зато стабильность выше на 10 п.п.
+        let b = scheme(
+            "B",
+            1100.0,
+            990.0,
+            800.0,
+            700.0,
+            100.0,
+            2.0,
+            &[(1100.0, 200); 3],
+            false,
+            false,
+        );
+        let r = recommend(&[a, b], 3);
+        assert_ne!(
+            r.tie_criterion,
+            Some(TieCriterion::Stability),
+            "схема на 10 % быстрее объявлена практически равной лидеру"
+        );
+        // Раз она не равна, она не может выиграть «ничью» по стабильности:
+        // либо выигрывает лидер порядка, либо схемы признаны эквивалентными по
+        // какому-то признаку, но не по стабильности.
+        if r.recommended_scheme.as_deref() == Some("B") {
+            assert_ne!(r.tie_criterion, Some(TieCriterion::Stability));
+        }
+    }
+
+    /// Обратная сторона правки: ничья по средему в пределах 1 % обязана
+    /// по-прежнему разрешаться — иначе мы бы просто выключили механизм.
+    #[test]
+    fn a_scheme_within_one_percent_is_still_a_practical_tie() {
+        let (mut a, b) = tie_pair();
+        a.aggregate.median_consistency_percent = 90.0;
+        let mut b2 = b;
+        b2.aggregate.median_consistency_percent = 95.0;
+        let r = recommend(&[a, b2], 3);
+        assert_eq!(
+            r.tie_criterion,
+            Some(TieCriterion::Stability),
+            "ничья по средню в пределах 1 % перестала разрешаться"
+        );
         assert_eq!(r.recommended_scheme.as_deref(), Some("B"));
     }
 

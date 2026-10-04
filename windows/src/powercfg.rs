@@ -5,6 +5,7 @@
 //! локали: GUID (36 символов формата uuid) + имя в скобках + необязательная
 //! `*` активности в конце строки.
 
+use std::io;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -123,6 +124,43 @@ fn powercfg_path() -> std::path::PathBuf {
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Поток, читающий один канал `powercfg` целиком.
+type PipeReader = std::thread::JoinHandle<io::Result<Vec<u8>>>;
+
+/// Запустить поток чтения канала: ошибка пайпа возвращается вызывающему.
+///
+/// Раньше поток возвращал «сколько успел прочитать», а `Err` от
+/// `read_to_end` выбрасывался в `_`. Частичный вывод из-за оборванного пайпа
+/// разбирался как валидный: для `/list` это `original_scheme_guid = None`,
+/// то есть потерянная исходная схема питания, которую потом нечем вернуть.
+fn spawn_pipe_reader<R>(mut pipe: Option<R>) -> PipeReader
+where
+    R: io::Read + Send + 'static,
+{
+    std::thread::spawn(move || -> io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        if let Some(p) = pipe.as_mut() {
+            io::Read::read_to_end(p, &mut buf)?;
+        }
+        Ok(buf)
+    })
+}
+
+/// Итог потока-читателя: и ошибка пайпа, и паника — одинаково фатальны.
+///
+/// Прежний `unwrap_or_else(|_| Vec::new())` превращал и панику, и сбой в
+/// «powercfg ничего не сказал» — то есть в пустой, но валидный вывод.
+/// Отличать «пусто» от «не прочитано» обязан сам вызывающий: цена ошибки —
+/// потерянная исходная схема питания пользователя.
+fn collect_pipe_reader(handle: PipeReader, what: &str) -> io::Result<Vec<u8>> {
+    match handle.join() {
+        Ok(result) => result.map_err(|e| io::Error::other(format!("канал {what}: {e}"))),
+        Err(_) => Err(io::Error::other(format!(
+            "поток чтения канала {what} завершился паникой"
+        ))),
+    }
+}
+
 /// Выполнить powercfg с аргументами; вернуть перекодированный вывод.
 ///
 /// Вызов ограничен по времени: зависший `powercfg.exe` иначе держал бы поток
@@ -146,31 +184,19 @@ fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError>
     })?;
 
     // Читатели забирают содержимое каналов, пока процесс жив, иначе он встанет
-    // на переполненном буфере.
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
-    let stdout_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = stdout_pipe.as_mut() {
-            let _ = std::io::Read::read_to_end(p, &mut buf);
-        }
-        buf
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = stderr_pipe.as_mut() {
-            let _ = std::io::Read::read_to_end(p, &mut buf);
-        }
-        buf
-    });
+    // на переполненном буфере. Ошибка чтения пробрасывается наверх (см.
+    // [`spawn_pipe_reader`]), а не превращается в пустой вывод.
+    let stdout_reader = spawn_pipe_reader(child.stdout.take());
+    let stderr_reader = spawn_pipe_reader(child.stderr.take());
 
     // Читатели заканчиваются, как только закрывается конец канала, а он
     // закрывается вместе с процессом. Поэтому join после `kill`+`wait`
     // не может висеть и делает уборку потоков детерминированной.
-    let join_readers = || {
-        let out = stdout_reader.join().unwrap_or_else(|_| Vec::new());
-        let err = stderr_reader.join().unwrap_or_else(|_| Vec::new());
-        (out, err)
+    let join_readers = || -> io::Result<(Vec<u8>, Vec<u8>)> {
+        Ok((
+            collect_pipe_reader(stdout_reader, "stdout")?,
+            collect_pipe_reader(stderr_reader, "stderr")?,
+        ))
     };
 
     // Ждём с потолком; по истечении — снимаем процесс и возвращаем ошибку.
@@ -185,6 +211,8 @@ fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError>
                     // Раньше потоки оставались болтаться после возврата
                     // ошибки: приложение жило месяцами, и каждый зависший
                     // `powercfg` оставлял после себя пару висящих потоков.
+                    // Ошибку чтения при этом уже не разбираем: потолок
+                    // ожидания — сам по себе исчерпывающая причина отказа.
                     let _ = join_readers();
                     return Err(PowerCfgError::new(
                         operation,
@@ -204,7 +232,8 @@ fn run_powercfg(operation: &str, args: &[&str]) -> Result<String, PowerCfgError>
             }
         }
     };
-    let (stdout, stderr) = join_readers();
+    let (stdout, stderr) = join_readers()
+        .map_err(|e| PowerCfgError::new(operation, format!("вывод powercfg не прочитан: {e}")))?;
     let stdout = decode_oem(&stdout);
     if !status.success() {
         let stderr = decode_oem(&stderr);
@@ -259,6 +288,37 @@ fn parse_active_scheme(stdout: &str) -> Result<String, PowerCfgError> {
         ));
     }
     Ok(guid)
+}
+
+/// Полный дамп настроек схемы питания (`powercfg /query`).
+///
+/// Зачем он сохраняется в отчёт: GUID говорит только «какая это схема», а не
+/// «что в ней задано». Windows молча правит планы (обновления), OEM-агенты
+/// — постоянно. Через год в истории остаётся `381b4222-…`, и по нему
+/// нельзя понять, был ли при замере поднят минимальный/максимальный
+/// processor state, какая политика охлаждения и агрессивность буста. Для
+/// инструмента, который сравнивает планы питания, это делает результат
+/// невоспроизводимым.
+///
+/// Вывод локализован, поэтому сохраняется как есть, вместе с датой съёма.
+pub fn query(guid: &str) -> Result<String, PowerCfgError> {
+    let g = guid.trim();
+    if g.is_empty() {
+        return Err(PowerCfgError::new("query", "не указан GUID схемы"));
+    }
+    run_powercfg("query", &["/query", g])
+}
+
+/// Снять дампы настроек для набора схем: `guid -> текст /query`.
+///
+/// Схемы, для которых дамп снять не удалось, молча пропускаются: отсутствие
+/// дампа в отчёте не должно ронять сессию из-за одного отказа. Вызывающий
+/// узнает о пропуске по тому, что схемы нет в карте.
+pub fn query_many(guids: &[String]) -> Vec<(String, String)> {
+    guids
+        .iter()
+        .filter_map(|g| query(g).ok().map(|text| (g.clone(), text)))
+        .collect()
 }
 
 /// Продублировать схему; возвращает GUID новой схемы.
@@ -346,6 +406,81 @@ pub fn restore_defaults() -> Result<(), PowerCfgError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Регрессия C4: оборванный канал не должен выглядеть как пустой вывод.
+    ///
+    /// Прежний поток-читатель возвращал `Vec<u8>` и ронял `Err` от
+    /// `read_to_end` в `_`. Частичный вывод `powercfg /list` после обрыва
+    /// пайпа разбирался как валидный и давал `original_scheme_guid = None` —
+    /// исходная схема питания терялась безвозвратно.
+    #[test]
+    fn broken_pipe_is_not_reported_as_empty_output() {
+        /// Читатель: отдаёт начало вывода, потом рвёт канал.
+        struct Truncated {
+            served: bool,
+        }
+        impl io::Read for Truncated {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.served {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "обрыв канала",
+                    ));
+                }
+                self.served = true;
+                let head = b"381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)\r\n";
+                let n = head.len().min(buf.len());
+                buf[..n].copy_from_slice(&head[..n]);
+                Ok(n)
+            }
+        }
+
+        let handle = spawn_pipe_reader(Some(Truncated { served: false }));
+        let err = collect_pipe_reader(handle, "stdout").expect_err("обрыв пайпа — фатальная ошибка");
+        let text = err.to_string();
+        assert!(
+            text.contains("обрыв канала"),
+            "причина сбоя чтения потеряна: {text}"
+        );
+        assert!(text.contains("stdout"), "не сказано, какой канал: {text}");
+    }
+
+    /// Паника в потоке-читателе — тоже отказ, а не «powercfg молчал».
+    #[test]
+    fn panicking_reader_thread_is_a_fatal_error() {
+        let handle = std::thread::spawn(|| -> io::Result<Vec<u8>> {
+            panic!("упало при чтении");
+        });
+        let err =
+            collect_pipe_reader(handle, "stderr").expect_err("паника читателя не должна прятаться");
+        assert!(
+            err.to_string().contains("паник"),
+            "паника не опознана: {err}"
+        );
+    }
+
+    /// Отсутствие канала (`Stdio::piped()` не сработало) — пустой вывод, а не
+    /// ошибка: канала просто нет, и это не обрыв.
+    #[test]
+    fn absent_pipe_reads_as_empty_output() {
+        let handle = spawn_pipe_reader(None::<std::io::Empty>);
+        assert_eq!(
+            collect_pipe_reader(handle, "stdout").expect("нет канала"),
+            Vec::<u8>::new()
+        );
+    }
+
+    /// Целый канал читается целиком — базовый контракт потока.
+    #[test]
+    fn whole_pipe_is_read_to_the_end() {
+        let payload: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 251) as u8).collect();
+        let expected = payload.clone();
+        let handle = spawn_pipe_reader(Some(std::io::Cursor::new(payload)));
+        assert_eq!(
+            collect_pipe_reader(handle, "stdout").expect("канал цел"),
+            expected
+        );
+    }
 
     /// Регрессия: `powercfg /list` на этой машине выдаёт ~9 КБ, а буфер
     /// анонимного канала — 4 КБ. Если вывод не читается параллельно с

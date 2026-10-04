@@ -16,7 +16,7 @@ use powerbench_orchestrator::checkpoint::StoredRun;
 use powerbench_orchestrator::config::{Preset, SessionConfig, validate_config};
 use powerbench_orchestrator::result::{IdentityJson, RecommendationScheme, build_session_json};
 use powerbench_orchestrator::session::{
-    DiskCheckpointStore, RealSchemeDriver, SessionEvent, run_session, session_signature,
+    DiskCheckpointStore, RealSchemeDriver, SessionError, SessionEvent, run_session, session_signature,
 };
 use powerbench_recommend::{EvidenceLevel, Recommendation};
 use powerbench_windows::power::{SleepGuard, is_admin};
@@ -66,6 +66,7 @@ struct BenchCli {
     cooling: Option<u64>,
     reps: Option<u32>,
     threshold: Option<f64>,
+    allow_dirty: bool,
     workers: Option<usize>,
     schemes: Option<Vec<String>>,
     plan: Option<String>,
@@ -82,6 +83,7 @@ impl BenchCli {
             cooling: None,
             reps: None,
             threshold: None,
+            allow_dirty: false,
             workers: None,
             schemes: None,
             plan: None,
@@ -114,6 +116,10 @@ impl BenchCli {
                 "--workers" => {
                     cli.workers = Some(parse_usize("--workers", &cursor.value("--workers")?)?)
                 }
+                // Аналог кнопки «продолжить с риском»: гейт по фону выключен,
+                // замер идёт на загруженной машине. Остальные проверки (админ,
+                // сеть, целостность схемы) флаг не отменяет.
+                "--allow-dirty-background" => cli.allow_dirty = true,
                 "--schemes" => {
                     let raw = cursor.value("--schemes")?;
                     let ids: Vec<String> = raw
@@ -205,6 +211,7 @@ fn build_plan(cli: &BenchCli, scheme_ids: &[String]) -> Result<SessionConfig, St
         background_threshold_percent: cli
             .threshold
             .unwrap_or(powerbench_orchestrator::config::DEFAULT_BACKGROUND_PERCENT),
+        accept_dirty_background: cli.allow_dirty,
         worker_count: cli.workers,
         scheme_ids: scheme_ids.to_vec(),
         plan_guid: cli.plan.clone().unwrap_or_else(crate::new_plan_guid),
@@ -298,6 +305,19 @@ fn empty_aggregate() -> AggregateResult {
     }
 }
 
+/// Снимать ли контрольную точку по итогам сессии.
+///
+/// Только завершённая: её результат уже записан, и точка обязана исчезнуть,
+/// иначе следующий `powerbench-cli bench` упрётся в `CheckpointPlanMismatch` —
+/// на диске лежит точка прошлого плана, и новый считается чужим. Раньше CLI
+/// не удалял её никогда, и повторный замер был невозможен.
+///
+/// Прерванная сессия, наоборот, сохраняется: её есть смысл продолжить
+/// (`resume`) или сбросить вручную.
+fn checkpoint_should_be_cleared(cancelled: bool) -> bool {
+    !cancelled
+}
+
 /// Единый финал сессии: протокол, сводная таблица, рекомендация, JSON.
 fn finish_session(
     mut engine: Engine,
@@ -316,7 +336,23 @@ fn finish_session(
         Ok(o) => o,
         Err(e) => {
             eprintln!("PowerBench CLI: ошибка сессии: {e}");
-            eprintln!("Сессию при необходимости можно продолжить: powerbench-cli resume");
+            // Точка от другого плана — самая частая причина отказа, и
+            // общий совет «продолжи сессию» тут бесполезен: продолжать нечего,
+            // чужой план уже отработан. Сказать, что делать конкретно.
+            if let SessionError::CheckpointPlanMismatch { found, .. } = &e {
+                eprintln!(
+                    "PowerBench CLI: на диске лежит контрольная точка плана {found}. \
+                     Если он не дополнен — продолжить: powerbench-cli resume. \
+                     Если он завершён (точка осталась с прошлого успешного прогона) — \
+                     удалите файл {} в каталоге данных PowerBench и запустите заново",
+                    powerbench_orchestrator::checkpoint::CHECKPOINT_FILE_NAME,
+                );
+            } else {
+                eprintln!(
+                    "PowerBench CLI: сессию при необходимости можно продолжить: \
+                     powerbench-cli resume"
+                );
+            }
             return ExitCode::FAILURE;
         }
     };
@@ -444,6 +480,11 @@ fn finish_session(
     );
     if let Err(e) = crate::write_json(&json, out) {
         eprintln!("PowerBench CLI: {e}");
+        eprintln!(
+            "PowerBench CLI: контрольная точка сохранена — прогон можно повторить \
+             командой powerbench-cli resume, либо удалить файл {} и начать заново",
+            powerbench_orchestrator::checkpoint::CHECKPOINT_FILE_NAME,
+        );
         return ExitCode::FAILURE;
     }
     // Итоговые условия замера печатаем из готового JSON: раньше CLI показывал
@@ -480,6 +521,34 @@ fn finish_session(
     match write_report_next_to(&json) {
         Ok(path) => println!("HTML-отчёт: {path}"),
         Err(e) => eprintln!("PowerBench CLI: предупреждение: не удалось сохранить HTML-отчёт: {e}"),
+    }
+    // Точка долела своё: сессия записана в историю, результат на диске.
+    //
+    // Раньше CLI её не удалял, и повторный `powerbench-cli bench` падал с
+    // `CheckpointPlanMismatch`: на диске лежала точка прошлого плана, и новый
+    // план считался «чужим». Приложение давно ведёт себя так же.
+    //
+    // Незавершённая (отменённая) сессия — наоборот: её точку сохраняем, и
+    // пользователю нужна подсказка, как её продолжить или сбросить.
+    if checkpoint_should_be_cleared(outcome.cancelled) {
+        match powerbench_orchestrator::checkpoint::clear_checkpoint() {
+            Ok(()) => {}
+            // Неудача удаления не отменяет успех основной записи, но сказать
+            // о ней обязаны: иначе следующий запуск упрётся ровно в ту же
+            // ошибку, ради которой точку снимали.
+            Err(e) => eprintln!(
+                "PowerBench CLI: предупреждение: не удалось очистить контрольную точку: {e}. \
+                 Следующий запуск может остановиться с «контрольная точка другого плана» — \
+                 удалите файл {} вручную",
+                powerbench_orchestrator::checkpoint::CHECKPOINT_FILE_NAME,
+            ),
+        }
+    } else {
+        println!(
+            "Контрольная точка сохранена. Продолжить: powerbench-cli resume. \
+             Начать заново: удалите файл {} в каталоге данных PowerBench.",
+            powerbench_orchestrator::checkpoint::CHECKPOINT_FILE_NAME,
+        );
     }
     ExitCode::SUCCESS
 }
@@ -539,6 +608,15 @@ pub fn cmd_list(_args: &[String]) -> ExitCode {
     }
 }
 
+/// Нужен ли интерактивный выбор схем питания.
+///
+/// Явный `--schemes` пустым быть не может (парсер отвергает), но пустой срез
+/// приходит из тестов и из `unwrap_or(&[])` в вызывающем коде — такой случай
+/// обязан доходить до выбора, а не до ошибки валидации.
+fn needs_interactive_selection(explicit: Option<&[String]>) -> bool {
+    explicit.is_none_or(<[String]>::is_empty)
+}
+
 /// `powerbench-cli bench [...опции]`.
 pub fn cmd_bench(args: &[String]) -> ExitCode {
     let cli = match BenchCli::parse(args, false) {
@@ -554,32 +632,34 @@ pub fn cmd_bench(args: &[String]) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let mut plan = match build_plan(&cli, cli.schemes.as_deref().unwrap_or(&[])) {
+    // Схемы выбираем ДО `build_plan`.
+    //
+    // `validate_config` отвергает план с пустым списком схем («выберите хотя бы
+    // одну схему питания»), а прежний порядок звал `build_plan` первым. В
+    // результате `bench` без `--schemes` всегда падал, и интерактивный выбор
+    // был недостижим вовсе — единственный способ указать схему был явный флаг.
+    //
+    // Побочная польза порядка: `build_plan` сам выбирает эталон дрейфа из
+    // переданного списка, поэтому при интерактивном выборе эталон тоже
+    // определяется сразу — раньше его приходилось досочинять вручную.
+    let scheme_ids: Vec<String> = if needs_interactive_selection(cli.schemes.as_deref()) {
+        match select_schemes_interactive() {
+            Ok(ids) => ids,
+            Err(e) => {
+                eprintln!("PowerBench CLI: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        cli.schemes.clone().unwrap_or_default()
+    };
+    let plan = match build_plan(&cli, &scheme_ids) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("PowerBench CLI: {e}");
             return ExitCode::FAILURE;
         }
     };
-    if plan.scheme_ids.is_empty() {
-        plan.scheme_ids = match select_schemes_interactive() {
-            Ok(ids) => ids,
-            Err(e) => {
-                eprintln!("PowerBench CLI: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        // Схемы выбрали уже после сборки плана, поэтому эталон дрейфа
-        // назначаем здесь — иначе он всегда оставался пустым.
-        if let Ok(active) = powerbench_windows::powercfg::active_scheme()
-            && plan
-                .scheme_ids
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(&active))
-        {
-            plan.reference_scheme_id = Some(active);
-        }
-    }
     crate::ctrlc::install();
     // Восстановление исходной схемы после прошлого прерывания (если было).
     {
@@ -960,5 +1040,131 @@ pub fn cmd_history_export(args: &[String]) -> ExitCode {
             eprintln!("PowerBench CLI: не удалось экспортировать: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{checkpoint_should_be_cleared, needs_interactive_selection};
+
+    /// Регресс H42: успешная сессия обязана снимать свою контрольную точку.
+    /// CLI её не удалял, и повторный `powerbench-cli bench` падал с
+    /// `CheckpointPlanMismatch` — на диске лежала точка прошлого плана, и новый
+    /// план считался чужим. Второй замер на этой машине был невозможен.
+    #[test]
+    fn a_finished_session_clears_its_checkpoint() {
+        assert!(
+            checkpoint_should_be_cleared(false),
+            "точка завершённой сессии остаётся на диске и блокирует следующий запуск"
+        );
+    }
+
+    /// Прерванная сессия — наоборот: её точку сохраняем, иначе `resume` будет
+    /// нечего продолжать.
+    #[test]
+    fn an_unfinished_session_keeps_its_checkpoint() {
+        assert!(
+            !checkpoint_should_be_cleared(true),
+            "точка отменённой сессии удалена: продолжить прогон нечем"
+        );
+    }
+
+    /// Правило обязано быть именно тем, о котором говорит H42, и подсказка
+    /// про `--resume` / ручной сброс — на месте.
+    ///
+    /// Проверяется по исходнику: `finish_session` требует живого движка и прав
+    /// администратора, а регресс здесь молчаливый — код компилируется и
+    /// работает, пока не встретит именно этот случай.
+    #[test]
+    fn finish_session_clears_the_checkpoint_and_explains_the_alternative() {
+        let src = include_str!("bench.rs");
+        let start = src
+            .find("fn finish_session(")
+            .expect("не найдена finish_session");
+        let body = &src[start..];
+        let end = body
+            .find("\n/// Записать HTML-отчёт сессии")
+            .expect("не найден конец finish_session");
+        let body = &body[..end];
+
+        assert!(
+            body.contains("checkpoint::clear_checkpoint()"),
+            "finish_session не снимает контрольную точку: повторный bench упадёт \
+             с CheckpointPlanMismatch"
+        );
+        assert!(
+            body.contains("checkpoint_should_be_cleared(outcome.cancelled)"),
+            "снятие точки не связано с признаком незавершённости сессии"
+        );
+        assert!(
+            body.contains("powerbench-cli resume"),
+            "для незавершённой сессии нужна подсказка, как её продолжить"
+        );
+        assert!(
+            body.contains("CHECKPOINT_FILE_NAME"),
+            "пользователю нужно сказать, какой файл удалить при ручном сбросе"
+        );
+        // Сначала результат, потом точка: неудача записи JSON возвращается
+        // раньше, и данные не должны пропасть вместе с точкой.
+        let json_at = body
+            .find("write_json(&json, out)")
+            .expect("запись JSON в finish_session");
+        let clear_at = body
+            .find("checkpoint::clear_checkpoint()")
+            .expect("снятие точки в finish_session");
+assert!(
+            json_at < clear_at,
+            "точка снимается раньше записи результата: неудача записи JSON \
+             приведёт к потере и данных, и точки"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Регресс C1: интерактивный выбор схем обязан быть достижим
+    // ------------------------------------------------------------------
+
+    /// `--schemes` без флага — интерактивный выбор; явный непустой список — нет.
+    #[test]
+    fn interactive_selection_is_chosen_only_without_an_explicit_list() {
+        let explicit = vec!["381b4222-f694-41f0-9685-ff5bb260df2e".to_string()];
+        assert!(!needs_interactive_selection(Some(&explicit)));
+        // Ни флага, ни пустой список — тоже выбор (именно так приходил
+        // `unwrap_or(&[])` из прежнего кода).
+        assert!(needs_interactive_selection(None));
+        assert!(needs_interactive_selection(Some(&[])));
+    }
+
+    /// Регресс C1: выбор схем обязан происходить ДО сборки плана.
+    ///
+    /// `validate_config` отвергает план с пустым списком схем, поэтому при
+    /// прежнем порядке `bench` без `--schemes` всегда падал с «выберите хотя бы
+    /// одну схему питания», и интерактивный выбор был недостижим вовсе.
+    ///
+    /// Проверяется по исходнику: `cmd_bench` требует прав администратора и
+    /// живого `powercfg`, а регресс молчаливый — код компилируется и работает,
+    /// пока не встретит именно этот случай.
+    #[test]
+    fn schemes_are_selected_before_the_plan_is_built() {
+        let src = include_str!("bench.rs");
+        let start = src
+            .find("pub fn cmd_bench(args: &[String]) -> ExitCode {")
+            .expect("не найдена cmd_bench");
+        let body = &src[start..];
+        let end = body
+            .find("\n/// `powerbench-cli resume")
+            .expect("не найден конец cmd_bench");
+        let body = &body[..end];
+
+        let select_at = body
+            .find("select_schemes_interactive()")
+            .expect("cmd_bench не предлагает интерактивный выбор схем");
+        let build_at = body
+            .find("build_plan(&cli, &scheme_ids)")
+            .expect("cmd_bench не собирает план");
+        assert!(
+            select_at < build_at,
+            "план собирается раньше выбора схем: validate_config отвергнет пустой \
+             список, и выбор станет недостижим"
+        );
     }
 }

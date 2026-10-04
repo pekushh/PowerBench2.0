@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use crate::checkpoint::PowerSnapshot;
 use crate::checkpoint::StoredRun;
 use crate::checkpoint::{atomic_write, data_dir};
 use crate::result::{IdentityJson, RecommendationJson, SchemeJson, SessionJson};
@@ -68,6 +69,21 @@ pub const CSV_HEADER: &[&str] = &[
     "burst_retention_percent",
     "spike_windows",
     "background_correlations",
+    // Счётчики сэмплов: без них CSV нельзя отфильтровать по качеству
+    // измерения. Именно `excluded_fraction` отделяет честный результат от
+    // результата, который посчитан по 30 % сэмплов.
+    "samples_used",
+    "samples_raw",
+    "excluded_fraction",
+    // Питание и ограничения. Один результат без них не воспроизвести: тот же
+    // прогон на батарее даёт иные числа, а троттлинг объясняет провал
+    // частоты, который иначе выглядит как дефект схемы.
+    "on_ac",
+    "thermal_throttle",
+    "throttled",
+    "max_mhz",
+    "current_mhz",
+    "policy_reason",
 ];
 
 /// Запись истории: имя файла и путь.
@@ -141,6 +157,29 @@ pub fn same_identity(a: &IdentityJson, b: &IdentityJson) -> bool {
         && a.affinity_mode == b.affinity_mode
         && a.affinity_signature == b.affinity_signature
         && !a.affinity_signature.is_empty()
+        // ОС и процессор — часть железа, а не оформление отчёта. Без них
+        // базой для сравнения могла стать запись, сделанная на другой
+        // прошивке после обновления Windows: и тот же самый CPU с другим
+        // планировщиком, и «тот же» процессор с другой микроархитектурной
+// ревизией дают
+        // разные микросекунды на тик, а страница истории показывала бы
+        // их как один ряд.
+        //
+        // Пустые значения допускаются только если пусты ОБА: у записей,
+        // сделанных до появления этих полей, их нет вовсе, и такие записи
+        // должны оставаться в истории, а не молча отфильтровываться. Если
+        // поле пусто лишь у одной стороны — это разные машины.
+        && both_blank_or_equal(&a.os_build, &b.os_build)
+        && both_blank_or_equal(&a.cpu_brand, &b.cpu_brand)
+}
+
+/// Два значения совпадают либо оба пустые.
+///
+/// Пустота у обеих сторон — записи, сделанные до появления поля: они не
+/// должны отсекаться от истории. Пустота только у одной стороны — разные
+/// машины, и совпадением это считать нельзя.
+fn both_blank_or_equal(a: &str, b: &str) -> bool {
+    a.is_empty() && b.is_empty() || a == b
 }
 
 /// Записи, совместимые с базовой идентичностью (входят в сравнение).
@@ -273,6 +312,35 @@ pub fn sanitize(name: &str) -> String {
         .collect()
 }
 
+/// Имя файла для экспорта: безопасное И не «молчащее».
+///
+/// [`sanitize`] убирает разделители пути и букву диска, но точка остаётся,
+/// поэтому вход `..` даёт `..`. Само по себе это безвредно (регрессия H37
+/// закрывается на `[`sanitize`]`), однако «точечное» имя в файле выглядит как
+/// ошибка разбора, а не как запись, — поэтому такой вход заменяется на
+/// осмысленное имя.
+pub fn sanitize_for_filename(name: &str) -> String {
+    let safe = sanitize(name);
+    if safe.trim_matches('.').is_empty() {
+        return "без-имени".to_string();
+    }
+    // Зарезервированные имена устройств Windows остаются зарезервированными и
+    // после добавления расширения: `CON.json` — это всё ещё `CON`. Запись в
+    // такой файл не создаётся, а экспорт молча падает (или, что хуже, уводит
+    // запись на устройство), поэтому имя префиксуется.
+    let stem = safe.split('.').next().unwrap_or_default();
+    let reserved = ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
+        "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",
+        "LPT9"];
+    if reserved
+        .iter()
+        .any(|r| stem.eq_ignore_ascii_case(r))
+    {
+        return format!("схема-{safe}");
+    }
+    safe
+}
+
 /// Сохранить завершённую сессию в историю (атомарно). Имя файла:
 /// `{UTC-старт}_{plan_guid}.json`; при коллизии добавляется `_2`, `_3`, …
 pub fn save_result(session: &SessionJson) -> io::Result<PathBuf> {
@@ -335,19 +403,52 @@ pub fn export_json(session: &SessionJson, path: &Path) -> io::Result<()> {
 }
 
 /// Экспорт результата в CSV — одна строка на прогон, все обязательные поля.
+///
+/// Файл начинается с BOM `U+FEFF` (регресс H36): без него Excel на русской
+/// локали открывает CSV в однобайтовой кодировке и превращает кириллицу в
+/// мусор из «Ð¡Ð±Ð°Ð»»�� Кавычки и запятые по-прежнему экранирует `csv`.
 pub fn export_csv(session: &SessionJson, out: &mut impl Write) -> Result<usize, String> {
+    // BOM — до создания писателя: он занимает первые три байта файла.
+    out.write_all(b"\xEF\xBB\xBF")
+        .map_err(|e| format!("не удалось записать BOM в CSV: {e}"))?;
     let mut wtr = csv::Writer::from_writer(out);
     wtr.write_record(CSV_HEADER).map_err(|e| e.to_string())?;
     let mut rows = 0usize;
     for scheme in &session.schemes {
         for run in &scheme.per_run {
-            let record = csv_row(session, scheme, run);
+            let record: Vec<String> = csv_row(session, scheme, run)
+                .iter()
+                .map(|f| csv_field(f))
+                .collect();
             wtr.write_record(record).map_err(|e| e.to_string())?;
             rows += 1;
         }
     }
     wtr.flush().map_err(|e| e.to_string())?;
     Ok(rows)
+}
+
+/// Защита CSV от инъекции формул (регресс H36).
+///
+/// Excel и LibreOffice считают ячейку ФОРМУЛОЙ, если она начинается с `=`,
+/// `+`, `-`, `@`, а также с табуляции или возврата каретки. Имя схемы питания
+/// приходит из `powercfg /list`, то есть это данные извне: значение
+/// `=cmd|'/c calc'!A1` в колонке «Схема» исполнилось бы при открытии файла.
+///
+/// Значение с такого первого символа предваряется апострофом — Excel показывает
+/// его как текст, но не исполняет.
+///
+/// Числа не трогаем: `-1.52` (перевес) — это данные, а не формула, и превращать
+/// их в текст нельзя, иначе CSV перестаёт быть пригодным для анализа.
+fn csv_field(value: &str) -> String {
+    let dangerous = matches!(
+        value.chars().next(),
+        Some('=') | Some('+') | Some('-') | Some('@') | Some('\t') | Some('\r')
+    );
+    if dangerous && !value.trim().parse::<f64>().is_ok() {
+        return format!("'{value}");
+    }
+    value.to_string()
 }
 
 /// Экспорт результата в файл CSV.
@@ -422,6 +523,31 @@ fn csv_row(session: &SessionJson, scheme: &SchemeJson, run: &StoredRun) -> Vec<S
         run.burst_retention_percent.to_string(),
         run.spike_windows.to_string(),
         run.background.len().to_string(),
+        combined.samples.to_string(),
+        combined.samples_raw.to_string(),
+        format!("{:.6}", combined.excluded_fraction),
+    ]
+    .into_iter()
+    // Питание снимка в конце прогона. Пустые поля означают «снимка нет»
+    // (запись старше появления полей или прогон прервался до среза), а не
+    // «питалось от батареи»: смешивать эти два случая нельзя.
+    .chain(power_fields(run.power))
+    .collect()
+}
+
+/// Питание прогона в виде плоских строк CSV, ровно под столбцы `on_ac`,
+/// `thermal_throttle`, `throttled`, `max_mhz`, `current_mhz`, `policy_reason`.
+fn power_fields(p: Option<PowerSnapshot>) -> Vec<String> {
+    let Some(p) = p else {
+        return vec![String::new(); 6];
+    };
+    vec![
+        p.on_ac.to_string(),
+        p.thermal_throttle.to_string(),
+        p.throttled.to_string(),
+        p.max_mhz.to_string(),
+        p.current_mhz.to_string(),
+        p.policy_reason.to_string(),
     ]
 }
 
@@ -594,6 +720,11 @@ mod tests {
             background_cpu_p50: 0.0,
             background_cpu_p95: 0.0,
             background_sample_seconds: 0,
+            scheme_dump: None,
+            worker_count: 4,
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:test".to_string(),
+            config_hash: "cfg-test".to_string(),
         }
     }
 
@@ -769,5 +900,151 @@ mod tests {
             "JSON-экспорт искажает запись"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Регресс H36: CSV начинается с BOM, иначе Excel ломает кириллицу.
+    ///
+    /// UTF-8 без BOM Excel (до 2016 года) читает в однобайтовой кодировке,
+    /// поэтому «План Один» превращался в мусор. Заголовок и данные лежат в
+    /// одном файле, поэтому BOM нужен ровно один и строго в начале.
+    #[test]
+    fn csv_export_starts_with_utf8_bom() {
+        let session = sample_session("12345678");
+        let mut buf = Vec::new();
+        export_csv(&session, &mut buf).unwrap();
+        assert_eq!(
+            &buf[..3],
+            &[0xEF, 0xBB, 0xBF],
+            "CSV не начинается с UTF-8 BOM: кириллица в Excel развалится"
+        );
+        // BOM должен быть ровно один — иначе первая колонка заголовка будет
+        // начинаться с невидимого символа.
+        assert_eq!(
+            buf.windows(3).filter(|w| *w == [0xEF, 0xBB, 0xBF]).count(),
+            1,
+            "BOM продублирован"
+        );
+        // И после BOM идёт ровно шапка, а не её остаток.
+        let text = String::from_utf8(buf).unwrap();
+        let head = text.trim_start_matches('\u{feff}');
+        assert_eq!(
+            head.lines().next().unwrap(),
+            CSV_HEADER.join(","),
+            "после BOM идёт не начало шапки"
+        );
+    }
+
+    /// Регресс H36: значение, начинающееся с `=`, не исполняется формулой.
+    #[test]
+    fn csv_field_defuses_formula_injection() {
+        for injection in [
+            "=cmd|'/c calc'!A1",
+            "+1+1",
+            "-1+cmd",
+            "@SUM(A1)",
+            "\t=1+1",
+            "\r=1+1",
+        ] {
+            assert_eq!(
+                csv_field(injection),
+                format!("'{injection}"),
+                "формула не нейтрализована: {injection:?}"
+            );
+        }
+        // Обычные значения не трогаем, иначе CSV станет нечитаемым.
+        for value in ["", "План Один", "GamingCpuV1", "s1", "0", "1e-3"] {
+            assert_eq!(csv_field(value), value, "обычное значение искажено: {value:?}");
+        }
+    }
+
+    /// Регресс H36: числа остаются числами, иначе CSV непригоден для анализа.
+    ///
+    /// `-1.52` (перевес) начинается с «опасного» `-`, но это данные, а не
+    /// формула. Превращать их в текст нельзя: столбец перестаёт считаться.
+    #[test]
+    fn csv_field_keeps_negative_numbers_numeric() {
+        for number in ["-1.52", "-0", "-1e9", "-3.25E-2", "-.5", "-42"] {
+            assert_eq!(
+                csv_field(number),
+                number,
+                "число превратилось в текст: {number:?}"
+            );
+            assert!(
+                !csv_field(number).starts_with('\''),
+                "число получило апостроф и перестало считаться: {number:?}"
+            );
+        }
+        // При этом настоящая формула с минусом впереди остаётся экранированной.
+        assert!(csv_field("-cmd|'/c calc'!A1").starts_with('\''));
+    }
+
+    /// Регресс H37: имя файла экспорта не может выйти за пределы каталога.
+    ///
+    /// `plan_guid` берётся из JSON-файла истории, который пользователь вправе
+    /// отредактировать или подложить. Значение вида
+    /// `..\..\..\Автозагрузка\startup` уводило запись за пределы выбранного
+    /// каталога экспорта.
+    #[test]
+    fn sanitize_for_filename_cannot_escape_the_export_directory() {
+        for attack in [
+            r"..\..\..\Автозагрузка\startup",
+            "../../../Windows/System32/evil",
+            r"..\..\file",
+            "..",
+            ".",
+            r"\..\..\x",
+            r"C:\Windows\System32\config",
+            r"\\?\C:\Windows\x",
+            "",
+        ] {
+            let stem = sanitize_for_filename(attack);
+            assert!(!stem.is_empty(), "пустое имя файла для {attack:?}");
+            // В имени не должно остаться ничего, что меняет путь.
+            for bad in ['\\', '/', ':', '*', '?', '"', '<', '>', '|'] {
+                assert!(
+                    !stem.contains(bad),
+                    "в имени файла остался {bad:?} (вход {attack:?}): {stem}"
+                );
+            }
+            // И склеенное имя не должно уехать из каталога.
+            let dir = Path::new("C:\\export");
+            let joined = dir.join(format!("{stem}.json"));
+            assert_eq!(
+                joined.parent(),
+                Some(dir),
+                "имя вышло за пределы каталога: {joined:?}"
+            );
+            assert_eq!(
+                joined.file_name().unwrap().to_string_lossy(),
+                format!("{stem}.json")
+            );
+        }
+    }
+
+    /// Имя из одних точек и зарезервированные имена Windows не молчат.
+    ///
+    /// `CON.json` — по-прежнему устройство `CON`: запись в него не создаётся,
+    /// даже с расширением. А имя из одних точек выглядит как ошибка разбора.
+    #[test]
+    fn sanitize_for_filename_replaces_unusable_and_reserved_names() {
+        for dots in ["..", "...", ".", "...."] {
+            let stem = sanitize_for_filename(dots);
+            assert_eq!(
+                stem, "без-имени",
+                "точечное имя не заменено: {dots:?} -> {stem:?}"
+            );
+            assert!(!stem.trim_matches('.').is_empty());
+        }
+        for reserved in ["CON", "con", "NUL", "aux", "COM1", "LPT9", "CON.json"] {
+            let stem = sanitize_for_filename(reserved);
+            assert!(
+                !stem.eq_ignore_ascii_case(reserved)
+                    && !stem.split('.').next().unwrap_or_default().eq_ignore_ascii_case(reserved),
+                "зарезервированное имя Windows не обезврежено: {reserved:?} -> {stem:?}"
+            );
+        }
+        // Обычный GUID остаётся без изменений — читаемость важна.
+        let guid = "381b4222-f694-41f0-9685-ff5bb260df2e";
+        assert_eq!(sanitize_for_filename(guid), guid);
     }
 }

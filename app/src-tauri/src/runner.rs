@@ -146,6 +146,11 @@ fn log_level(e: &SessionEvent) -> &'static str {
         SessionEvent::Warn(_)
         | SessionEvent::BackgroundNoisy { .. }
         | SessionEvent::SchemeRejected { .. } => "warn",
+        // Ранняя остановка — не сбой и не брак: это штатное завершение, когда
+        // перевес лидера уже перекрыт разбросом повторов. Уровень `info`, а не
+        // `warn`: жёлтый указывал бы на проблему там, где её нет, и
+        // пользователь искал бы неисправность, которой не было.
+        SessionEvent::EarlyStopped { .. } => "info",
         SessionEvent::RunCompleted { .. }
         | SessionEvent::PhaseFinished { .. }
         | SessionEvent::Restored { .. }
@@ -708,29 +713,56 @@ fn empty_finished() -> FinishedPayload {
     }
 }
 
+/// Занять раннер под сессию: проверка «уже выполняется» и установка дескриптора
+/// под ОДНОЙ блокировкой.
+///
+/// Регресс C6/H34: эти две операции раньше шли двумя отдельными взятиями
+/// блокировки. Между ними было окно, в которое вторая команда `start` успевала
+/// пройти ту же проверку и затереть дескриптор первой: сессий становилось две, а
+/// отменялась и дожидалась только вторая — первая продолжала мерить и
+/// переключать схему питания уже без возможности её остановить.
+///
+/// Отравление блокировки игнорируется (регресс H38): после паники в любом
+/// владельце интерфейс не должен блокироваться навсегда.
+fn claim(
+    runner: &Arc<Mutex<Option<RunnerHandle>>>,
+    handle: RunnerHandle,
+) -> Result<(), String> {
+    let mut guard = runner.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_some() {
+        return Err("сессия уже выполняется".to_string());
+    }
+    *guard = Some(handle);
+    Ok(())
+}
+
+/// Снять дескриптор сессии: раннер снова свободен.
+///
+/// Срабатывает ВСЕГДА, в том числе при отравленной блокировке. Прежний
+/// `if let Ok(..)` здесь означал, что после паники в другом потоке дескриптор
+/// остаётся в состоянии «идёт» навсегда: интерфейс больше не мог запустить
+/// замер, а пользователь не получал ни ошибки, ни объяснения.
+fn release(runner: &Arc<Mutex<Option<RunnerHandle>>>) {
+    let mut guard = runner.lock().unwrap_or_else(|e| e.into_inner());
+    guard.take();
+}
+
 /// Запустить сессию в фоновом потоке. Возвращает plan_guid или причину отказа.
 pub fn start(
     app: &AppHandle,
     runner: &Arc<Mutex<Option<RunnerHandle>>>,
     plan: SessionConfig,
 ) -> Result<String, String> {
-    {
-        let guard = runner.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.is_some() {
-            return Err("сессия уже выполняется".to_string());
-        }
-    }
     let cancel = Arc::new(AtomicBool::new(false));
     let status = Arc::new(Mutex::new(None));
-    let handle = RunnerHandle {
-        cancel: Arc::clone(&cancel),
-        join: None,
-        status: Arc::clone(&status),
-    };
-    {
-        let mut guard = runner.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(handle);
-    }
+    claim(
+        runner,
+        RunnerHandle {
+            cancel: Arc::clone(&cancel),
+            join: None,
+            status: Arc::clone(&status),
+        },
+    )?;
     let pid = plan.plan_guid.clone();
     let app2 = app.clone();
     let cancel2 = Arc::clone(&cancel);
@@ -752,10 +784,10 @@ pub fn start(
                 },
             );
         }
-        if let Ok(mut guard) = runner2.lock() {
-            guard.take();
-        }
+        release(&runner2);
     });
+    // `join` ставится уже существующему дескриптору: он заведомо на месте,
+    // иначе сессия была бы уже занята и `claim` вернул бы ошибку выше.
     if let Some(h) = runner.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         h.join = Some(join);
     }
@@ -836,8 +868,11 @@ fn short_hash(hash: &str) -> String {
 /// запишет контрольную точку, и её можно будет продолстить при следующем
 /// запуске (ровно для этого точка и существует).
 pub fn join(runner: &Arc<Mutex<Option<RunnerHandle>>>) {
+    // Отравление игнорируем (регресс H38): иначе после паники в другом потоке
+    // закрытие окно не отменило бы сессию и не дождалось её — фоновый поток
+    // продолжал бы мерить и переключать схему питания у закрытого приложения.
     let (cancel, handle) = {
-        let Ok(mut guard) = runner.lock() else { return };
+        let mut guard = runner.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_mut() {
             Some(h) => (Some(Arc::clone(&h.cancel)), h.join.take()),
             None => (None, None),
@@ -863,6 +898,152 @@ pub fn join(runner: &Arc<Mutex<Option<RunnerHandle>>>) {
         eprintln!(
             "сессия не завершилась за {} с — закрытие приложения продолжается",
             JOIN_TIMEOUT_MS
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// Пустой раннер для проверок занятости.
+    fn empty_runner() -> Arc<Mutex<Option<RunnerHandle>>> {
+        Arc::new(Mutex::new(None))
+    }
+
+    fn handle() -> RunnerHandle {
+        RunnerHandle {
+            cancel: Arc::new(AtomicBool::new(false)),
+            join: None,
+            status: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Регресс C6/H34: вторая попытка занять раннер обязана отказать, и первый
+    /// дескриптор должен уцелеть.
+    ///
+    /// При прежней схеме (проверка и установка двумя взятиями блокировки) окно
+    /// между ними позволяло двум `start` пройти проверку, и второй затирал
+    /// дескриптор первого: сессий становилось две, а отменялась только вторая.
+    #[test]
+    fn a_second_claim_is_refused_and_the_first_survives() {
+        let runner = empty_runner();
+        let first = handle();
+        claim(&runner, first).expect("первая сессия должна занять раннер");
+
+        let err = claim(&runner, handle()).expect_err("вторая сессия не должна занять раннер");
+        assert!(
+            err.contains("уже выполняется"),
+            "пользователю нужна внятная причина отказа: {err}"
+        );
+
+        // Дескриптор первой сессии на месте и отменяем.
+        let guard = runner.lock().unwrap_or_else(|e| e.into_inner());
+        let live = guard.as_ref().expect("дескриптор первой сессии затёрт");
+        assert!(!live.cancel.load(Ordering::Relaxed));
+    }
+
+    /// Флаг занятости снимается, и раннер снова пригоден.
+    #[test]
+    fn release_frees_the_runner() {
+        let runner = empty_runner();
+        claim(&runner, handle()).expect("занято");
+        assert!(running(&runner), "после claim раннер должен считаться занятым");
+        release(&runner);
+        assert!(!running(&runner), "после release раннер должен быть свободен");
+        // И занять его можно снова.
+        claim(&runner, handle()).expect("раннер не освободился");
+    }
+
+    /// Регресс H38: отравленная блокировка не должна блокировать интерфейс
+    /// навсегда и оставлять сессию в состоянии «идёт».
+    ///
+    /// Прежний `if let Ok(mut guard) = runner.lock() { guard.take() }` в потоке
+    /// сессии просто пропускал снятие флага: после паники в другом потоке
+    /// интерфейс вечно показывал «идёт» и не давал запустить новый замер.
+    #[test]
+    fn a_poisoned_lock_still_lets_the_ui_recover() {
+        let runner = empty_runner();
+        // Отравляем блокировку паникой в её владельце.
+        let poisoned = Arc::clone(&runner);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().expect("первая блокировка обязана удаться");
+            panic!("отравляем блокировку");
+        })
+        .join();
+        assert!(
+            runner.lock().is_err(),
+            "блокировка не отравлена — тест не проверяет то, ради чего написан"
+        );
+
+        // Занятость читается, снимается и выдаётся заново.
+        assert!(!running(&runner));
+        release(&runner);
+        claim(&runner, handle()).expect("отравленная блокировка блокирует интерфейс");
+        release(&runner);
+        // И `stop` тоже работает.
+        claim(&runner, handle()).expect("занято");
+        assert!(
+            stop(&runner),
+            "stop должен видеть сессию на отравленной блокировке"
+        );
+        release(&runner);
+        assert!(
+            !stop(&runner),
+            "после освобождения stop должен сообщать, что сессии нет"
+        );
+    }
+
+    /// `join` на отравленной блокировке обязан отменить сессию, а не выйти
+    /// молча: иначе закрытие окна оставит фоновый замер со схемой питания.
+    #[test]
+    fn join_cancels_the_session_even_when_the_lock_is_poisoned() {
+        let runner = empty_runner();
+        claim(&runner, handle()).expect("занято");
+        let poisoned = Arc::clone(&runner);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().expect("первая блокировка обязана удаться");
+            panic!("отравляем блокировку");
+        })
+        .join();
+
+        join(&runner);
+        // Сессия получила команду отмены (дескриптор `join` был пустым, поэтому
+        // поток ждать не пришлось).
+        let guard = runner.lock().unwrap_or_else(|e| e.into_inner());
+        let live = guard.as_ref().expect("join снял дескриптор");
+        assert!(
+            live.cancel.load(Ordering::Relaxed),
+            "join не отменил сессию: фоновый поток продолжит мерить"
+        );
+    }
+
+    /// Регресс H34: `identity_info` не должен гонять самопроверку ядра.
+    ///
+    /// Самопроверка — это сотни тиков в четырёх фазах на всех ядрах. Команда
+    /// `async`, то есть выполняется на пуле tokio, и звалась при каждом
+    /// открытии страницы «Схемы»: интерфейс намертво занимал процессор. Для
+    /// идентичности она ничего не даёт — нужны только метаданные движка.
+    #[test]
+    fn identity_info_does_not_run_the_core_self_check() {
+        let src = include_str!("bridge.rs");
+        let start = src
+            .find("pub fn identity_info()")
+            .expect("не найдена identity_info");
+        let body = &src[start..];
+        let end = body
+            .find("\n#[tauri::command")
+            .unwrap_or(body.len());
+        let body = &body[..end];
+        assert!(
+            !body.contains("self_check()"),
+            "identity_info снова гоняет самопроверку ядра — она съедает все ядра \
+             на пуле tokio"
+        );
+        assert!(
+            body.contains("Engine::new(None)"),
+            "идентичность строится из метаданных движка"
         );
     }
 }

@@ -190,8 +190,6 @@ export default function App() {
       });
   }, [collapsed]);
 
-  const onAppearance = useCallback((s: SettingsDto) => setAppearance(s), []);
-
   // В шапке — состояние, а не название раздела: название уже написано
   // крупно на странице. Уточнение публикует активная страница через стор,
   // чтобы шапка не делала собственный запрос и не показывала другое число.
@@ -225,30 +223,16 @@ export default function App() {
     };
   }, []);
 
-  // Выключатель моторики в топбаре. Значение пишется в те же настройки, что и
-  // тумблер в «Настройках», поэтому оба переключателя всегда согласованы и
-  // выбор переживает перезапуск.
-  const toggleMotion = useCallback(() => {
-    const next = !(appearance?.reduce_motion ?? false);
-    applyMotion(next);
-    setAppearance((cur) => (cur ? { ...cur, reduce_motion: next } : cur));
-    commands
-      .getSettings()
-      .then((s) => commands.setSettings({ ...s, reduce_motion: next }))
-      .catch((e) => {
-        pushToast("err", `Не удалось сохранить настройку анимаций: ${String(e)}`);
-        setAppearance((cur) => (cur ? { ...cur, reduce_motion: !next } : cur));
-        applyMotion(!next);
-      });
-  }, [appearance]);
+  // Выключатель моторики в топбаре удалён вместе с кнопкой: значение пишется
+  // те же настройки, что и тумблер в «Настройках», и два места с одним
+  // переключателем расходились при рассинхронизации IPC.
+  const onAppearance = useCallback((s: SettingsDto) => setAppearance(s), []);
 
   return (
     <div className={`shell ${collapsed ? "rail-collapsed" : ""}`}>
       <TitleBar
         collapsed={collapsed}
         onToggleCollapse={toggleCollapse}
-        motionOff={appearance?.reduce_motion ?? false}
-        onToggleMotion={toggleMotion}
         status={sectionDetail}
         hardware={hwChip}
         hardwareFull={hwFull}
@@ -262,11 +246,14 @@ export default function App() {
                 type="button"
                 className={`nav-item ${page === n.id ? "active" : ""}`}
                 data-value={n.id}
+                // Подпись в свёрнутом виде схлопнута, и пункт становится
+                // безымянным — имя переносится в подсказку на CSS.
+                data-tip={n.label}
                 onClick={() => setPage(n.id)}
                 // Навигация была на `<div onClick>`: с клавиатуры и со
                 // скринридера до неё было не добраться вовсе.
                 aria-current={page === n.id ? "page" : undefined}
-                title={collapsed ? n.label : undefined}
+                title={collapsed ? undefined : n.label}
               >
                 <span className="nav-glyph">{n.icon}</span>
                 <span className="nav-label">{n.label}</span>
@@ -278,9 +265,10 @@ export default function App() {
               type="button"
               className={`nav-item ${page === "settings" ? "active" : ""}`}
               data-value="settings"
+              data-tip="Настройки"
               onClick={() => setPage("settings")}
               aria-current={page === "settings" ? "page" : undefined}
-              title={collapsed ? "Настройки" : undefined}
+              title={collapsed ? undefined : "Настройки"}
             >
               <span className="nav-glyph">
                 <GearIcon />

@@ -152,7 +152,23 @@ impl AppSettings {
 
     /// Загрузить из конкретного пути.
     pub fn load_from(path: &Path) -> Self {
-        crate::storage::read_json(path).unwrap_or_default()
+        Self::load_checked(path).unwrap_or_default()
+    }
+
+    /// Загрузить, различая «нет файла» и «файл повреждён».
+    ///
+    /// Регресс H39: повреждённый файл раньше читался как дефолты, и первая же
+    /// следующая запись (`update_locked`) перезаписывала его — все настройки
+    /// пользователя исчезали безвозвратно. Вызывающий обязан узнать о
+    /// повреждении и сказать об этом, а не заменить файл дефолтами.
+    pub fn load_checked(path: &Path) -> Result<Self, String> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(format!("не удалось прочитать настройки: {e}")),
+        };
+        crate::storage::parse_user_file(&bytes, path)
+            .map(|opt| opt.unwrap_or_default())
     }
 
     /// Сохранить настройки по стандартному пути (атомарно).
@@ -186,25 +202,41 @@ impl AppSettings {
     /// а `set_settings` целиком перезаписывает файл. Без блокировки параллельные
     /// правки затирали друг друга — пользователь терял, например, отметку
     /// «избранное», сохранённую секундой раньше.
+    ///
+    /// Повреждённый файл **не перезаписывается** (регресс H39). Раньше он
+    /// разбирался как дефолты, и первая же правка стирала всё, что в нём было:
+    /// настройки пользователя исчезали безвозвратно, а интерфейс показывал
+    /// «всё сброшено» и не говорил почему. Теперь приходит `Err` с диагнозом,
+    /// файл остаётся на диске, а команда интерфейса сообщает пользователю, куда
+    /// смотреть.
     pub fn update_locked<F: FnOnce(&mut Self)>(f: F) -> io::Result<()> {
-        let path = appsettings_path();
+        Self::update_locked_to(&appsettings_path(), f)
+    }
+
+    /// То же для произвольного пути (тесты и отчёт для поддержки).
+    pub fn update_locked_to<F: FnOnce(&mut Self)>(path: &Path, f: F) -> io::Result<()> {
         // `Option` позволяет вызвать замыкание ровно один раз: `update_file`
         // гарантирует единственный вызов, но компилятор этого не знает.
         let mut f = Some(f);
-        let mut applied = false;
-        crate::storage::update_file(&path, |cur| {
-            let mut s: Self = serde_json::from_slice(cur).unwrap_or_default();
+        // `update_file_checked` запрещает запись поверх повреждённого содержимого,
+        // поэтому запасной путь «записать дефолты» больше не нужен вовсе: он
+        // был ровно тем местом, где стирались данные пользователя.
+        crate::storage::update_file_checked(path, |cur| {
+            let mut s: Self = crate::storage::parse_user_file(cur, path)
+                .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?
+                .unwrap_or_default();
             if let Some(apply) = f.take() {
                 apply(&mut s);
             }
-            applied = true;
-            serde_json::to_vec_pretty(&s).unwrap_or_default()
+            serde_json::to_vec_pretty(&s)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })?;
         if let Some(apply) = f {
-            // Файл не читался и остался пустым — записываем дефолты с правкой.
+            // Замыкание не вызвано: файл не читался вовсе. Пишем настройки с
+            // правкой, но только если читать было нечего.
             let mut s = Self::default();
             apply(&mut s);
-            s.save_to(&path)?;
+            s.save_to(path)?;
         }
         Ok(())
     }
@@ -303,6 +335,67 @@ mod tests {
         assert_eq!(s.appearance.theme, "Graphite");
         assert_eq!(s.favorite_schemes, vec!["x"]);
         assert!(s.excluded_schemes.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Регресс H39: усечённый файл настроек обязан быть виден, а не стёрт.
+    ///
+    /// Раньше он читался как дефолты, и первая же автосохранённая правка
+    /// перезаписывала его целиком: заметка о разгоне, избранное, исключённые
+    /// схемы исчезали безвозвратно, а интерфейс показывал «всё сброшено».
+    #[test]
+    fn a_corrupt_settings_file_is_reported_and_not_overwritten() {
+        let dir = tmp_dir("corrupt");
+        let path = dir.join(APPSETTINGS_FILE_NAME);
+        let broken = "{\"cpu_notes\": \"андерволт -30\"";
+        std::fs::write(&path, broken).unwrap();
+
+        // Чтение обязано сообщить о повреждении, а не выдать дефолты.
+        let err = AppSettings::load_checked(&path)
+            .expect_err("повреждённые настройки прочитаны как дефолты");
+        assert!(err.contains("повреждён"), "{err}");
+        // Для мест, где отказ хуже, мягкий вариант остаётся — но тихо.
+        assert!(AppSettings::load_from(&path).cpu_notes.is_empty());
+
+        // Автосохранение обязано отказать и оставить файл как есть.
+        let saved = AppSettings::update_locked_to(&path, |s| {
+            s.appearance.theme = "Ocean".to_string();
+        });
+        assert!(
+            saved.is_err(),
+            "правка повреждённого файла прошла успехом: пользователь потерял данные"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            broken,
+            "повреждённый файл перезаписан — данные пользователя уничтожены"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Целый файл по-прежнему обновляется, а отсутствующий — создаётся.
+    #[test]
+    fn update_locked_creates_and_updates_a_missing_file() {
+        let dir = tmp_dir("locked-missing");
+        let path = dir.join(APPSETTINGS_FILE_NAME);
+        AppSettings::update_locked_to(&path, |s| {
+            s.cpu_notes = "разгон памяти".to_string();
+        })
+        .unwrap();
+        assert_eq!(
+            AppSettings::load_from(&path).cpu_notes,
+            "разгон памяти",
+            "файл создан не с той правкой"
+        );
+
+        // Вторая правка применяется поверх первой, а не вместо неё.
+        AppSettings::update_locked_to(&path, |s| {
+            s.favorite_schemes.push("guid-1".to_string());
+        })
+        .unwrap();
+        let loaded = AppSettings::load_from(&path);
+        assert_eq!(loaded.cpu_notes, "разгон памяти", "прежняя правка потеряна");
+        assert_eq!(loaded.favorite_schemes, vec!["guid-1"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

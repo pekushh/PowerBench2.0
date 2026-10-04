@@ -99,11 +99,23 @@ pub const fn profile_params(p: Profile) -> ProfileParams {
             worker_jobs: 16,
         },
         // Половина работы профиля Heavy при половине занятых ядер: половина
-        // воркеров получает задачи, вторая парковка простаивает.
+        // воркеров получает задачи, вторая половина пула простаивает.
+        //
+        // Регресс M28: объявлено было «половина работы Heavy», а стояло 75 %
+        // (24_576 из 32_768 и 98_304 из 131_072) — и только `worker_jobs` были
+        // вдвое меньше. Итог: на 50 % ядер приходилось 75 % работы Heavy, то
+        // есть КАЖДЫЙ занятый воркер выполнял в полтора раза больше работы, чем
+        // в тяжёлой фазе. Фаза, названная «половина пула занята», оказывалась
+        // интенсивнее тяжёлой, и различие схем питания в ней измерялось уже
+        // вместе с artificial различием интенсивности, а не отдельно.
+        //
+        // Теперь объём ровно вдвое меньше Heavy по всем четырём величинам:
+        // интенсивность на занятый воркер совпадает с тяжёлой фазой, и фазы
+        // отличаются только занятостью пула — как и задумано.
         Profile::Partial => ProfileParams {
-            main_entity_updates: 24_576,
-            visibility_probes: 98_304,
-            animation_items: 24_576,
+            main_entity_updates: 16_384,
+            visibility_probes: 65_536,
+            animation_items: 16_384,
             worker_jobs: 32,
         },
         Profile::Heavy => ProfileParams {
@@ -322,6 +334,104 @@ mod tests {
             assert_eq!(params.visibility_probes % params.worker_jobs, 0);
             assert_eq!(params.animation_items % params.worker_jobs, 0);
         }
+    }
+
+    /// Регресс M28: объявленная пропорция объёма работы обязана быть реальной.
+    ///
+    /// В комментарии к `Profile::Partial` написано «половина работы профиля
+    /// Heavy при половине занятых ядер», но стояло 75 % по объёму и 50 % по
+    /// числу задач. На 50 % ядер тогда приходилось 75 % работы Heavy, то есть
+    /// каждый занятый воркер делал в полтора раза больше, чем в тяжёлой фазе, и
+    /// фаза «половина пула занята» оказывалась интенсивнее тяжёлой. Различие
+    /// схем питания в ней измерялось вместе с этим различием интенсивности, а
+    /// не отдельно. Проверки на саму пропорцию не было — только делимость на
+    /// число задач, которую 75 % тоже удовлетворяли.
+    #[test]
+    fn partial_is_exactly_half_the_work_of_heavy() {
+        let _g = crate::tests::lock();
+        let heavy = profile_params(Profile::Heavy);
+        let partial = profile_params(Profile::Partial);
+
+        for (name, heavy_v, partial_v) in [
+            (
+                "main_entity_updates",
+                heavy.main_entity_updates,
+                partial.main_entity_updates,
+            ),
+            (
+                "visibility_probes",
+                heavy.visibility_probes,
+                partial.visibility_probes,
+            ),
+            (
+                "animation_items",
+                heavy.animation_items,
+                partial.animation_items,
+            ),
+            ("worker_jobs", heavy.worker_jobs, partial.worker_jobs),
+        ] {
+            assert_eq!(
+                partial_v * 2,
+                heavy_v,
+                "{name}: заявлено «половина работы Heavy», получено {partial_v} \
+                 против {heavy_v}"
+            );
+        }
+
+        // Отдельно — про занятость пула: она и должна быть вдвое меньше, иначе
+        // «половина работы» означала бы ещё и «половина мощности».
+        assert_eq!(Phase::Partial.active_worker_percent(), 50);
+        assert_eq!(Phase::Heavy.active_worker_percent(), 100);
+
+        // Следствие, ради которого пропорция и важна: интенсивность на ЗАНЯТЫЙ
+        // воркер у частичной фазы обязана совпадать с тяжёлой. Иначе фазы
+        // отличаются не только занятостью, и сравнивать их throughput нельзя.
+        let heavy_per_worker = heavy.visibility_probes / heavy.worker_jobs;
+        let partial_per_worker = partial.visibility_probes / partial.worker_jobs;
+        assert_eq!(
+            partial_per_worker, heavy_per_worker,
+            "на занятый воркер в частичной фазе работы больше, чем в тяжёлой: \
+             {partial_per_worker} против {heavy_per_worker}"
+        );
+        // Суммарно на тик — ровно вдвое меньше, и это тоже обязано быть ровно.
+        let heavy_total = heavy.main_entity_updates
+            + heavy.visibility_probes
+            + heavy.animation_items
+            + heavy.worker_jobs;
+        let partial_total = partial.main_entity_updates
+            + partial.visibility_probes
+            + partial.animation_items
+            + partial.worker_jobs;
+        assert_eq!(
+            partial_total * 2,
+            heavy_total,
+            "суммарный объём работы на тик в частичной фазе — не половина Heavy"
+        );
+    }
+
+    /// Фаза обязана оставаться истинно частичной и по числу задач на воркер:
+    /// интенсивность сравнима с тяжёлой, но задач у каждого воркера вдвое
+    /// меньше, потому что вовлечено вдвое меньше воркеров.
+    #[test]
+    fn partial_engages_half_the_pool_with_the_same_intensity_as_heavy() {
+        let _g = crate::tests::lock();
+        let heavy = profile_params(Profile::Heavy);
+        let partial = profile_params(Profile::Partial);
+        // Работа на один активный воркер: активных вдвое меньше, задач вдвое
+        // меньше, но каждая задача того же размера.
+        assert_eq!(
+            partial.visibility_probes / partial.worker_jobs,
+            heavy.visibility_probes / heavy.worker_jobs
+        );
+        // И это меньше, чем у тяжёлой фазы в пересчёте на один воркер, если
+        // считать по ЗАНЯТЫМ: 32 задачи против 64 — вдвое меньше задач на
+        // воркер при вдвое меньшем числе занятых.
+        assert!(partial.worker_jobs * 2 <= heavy.worker_jobs);
+        // Профиль частичной фазы не может оказаться интенсивнее профиля
+        // тяжёлой ни по одной величине.
+        assert!(partial.main_entity_updates <= heavy.main_entity_updates);
+        assert!(partial.visibility_probes <= heavy.visibility_probes);
+        assert!(partial.animation_items <= heavy.animation_items);
     }
 
     #[test]

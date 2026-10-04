@@ -17,7 +17,7 @@ use powerbench_core::engine::{
     Engine, ProgressSnapshot, RunError, RunReport, RunTarget, Scoreboard,
 };
 use powerbench_metrics::run::{
-    RunStats, burst_retention_percent, consistency_percent, median, run_stats,
+    RunStats, burst_retention_percent, consistency_group, median, run_stats,
 };
 use powerbench_metrics::{
     AggregateResult, CompatibilitySignature, DeterminismSignature, aggregate_runs,
@@ -28,7 +28,7 @@ use powerbench_windows::monitor::{
 };
 use powerbench_windows::powercfg::PowerScheme;
 
-use crate::checkpoint::{Checkpoint, PhaseStats, PowerSnapshot, StoredRun};
+use crate::checkpoint::{Checkpoint, LaunchConditions, PhaseStats, PowerSnapshot, StoredRun};
 use crate::config::{
     PHASES_PER_RUN, SessionConfig, canonical_scheme_order, phase_durations, round_order, run_key,
     validate_config,
@@ -37,7 +37,7 @@ use crate::quarantine::{
     CATASTROPHIC_SHARE_LIMIT, DEGRADED_MIN_RUNS, DEGRADED_SHARE_LIMIT, MACHINE_COLLAPSE_SHARE,
     MIN_RUNS_FOR_JUDGMENT, QuarantineKind, TestingMarker, UNSTABLE_MAD_LIMIT,
     below_machine_baseline, catastrophic_share, clear_testing_marker, degraded_share,
-    load_quarantine, phase_floor_collapse, preflight_filter, quarantine_add, unstable_spread,
+    phase_floor_collapse, preflight_filter, quarantine_add, unstable_spread,
     write_testing_marker,
 };
 
@@ -77,6 +77,15 @@ pub enum SessionError {
         expected: String,
         found: String,
     },
+    /// Прогоны в точке сделаны при других условиях запуска, чем текущие.
+    ///
+    /// Продолжение такого плана смешало бы в одном отчёте числа, измеренные
+    /// разным числом воркеров, разной привязкой или разной нагрузкой, —
+    /// а ранжировать такую смесь нельзя.
+    RunConditionsMismatch {
+        difference: String,
+        recorded: String,
+    },
     ApplyScheme {
         scheme_id: String,
         cause: String,
@@ -103,6 +112,15 @@ impl std::fmt::Display for SessionError {
             SessionError::CheckpointPlanMismatch { expected, found } => write!(
                 f,
                 "контрольная точка относится к другому плану: ожидался {expected}, найден {found}"
+            ),
+            SessionError::RunConditionsMismatch {
+                difference,
+                recorded,
+            } => write!(
+                f,
+                "прогоны в контрольной точке сделаны при других условиях запуска ({difference}; \
+                 записано: {recorded}). Продолжение смешало бы несравнимые замеры в одном \
+                 отчёте — начните новую сессию"
             ),
             SessionError::ApplyScheme { scheme_id, cause } => {
                 write!(f, "не удалось применить схему {scheme_id}: {cause}")
@@ -399,6 +417,51 @@ pub fn apply_and_verify(driver: &dyn SchemeDriver, guid: &str) -> Result<(), Str
     ))
 }
 
+/// Сколько раз повторяем ЧТО ИМЕННО: возврат исходной схемы дороже отказа
+/// применения тестовой.
+///
+/// Применение тестовой схемы можно повторить ещё раз. Возврат исходной — нет:
+/// если пользовательский план не вернулся, машина остаётся на тестовом, и
+/// следующий запуск не сможет ни подтвердить восстановление, ни отличить
+/// «уже вернули» от «думаем, вернули». Поэтому и попыток больше, и пауза
+/// между ними длиннее.
+pub const RESTORE_ATTEMPTS: u32 = 3;
+/// Пауза между попытками возврата исходной схемы, мс.
+pub const RESTORE_RETRY_MS: u64 = 750;
+
+/// Вернуть исходную схему питания и **убедиться**, что ОС её приняла.
+///
+/// Единственная точка возврата на исходный план во всём проекте: её зовут
+/// `restore_original`, `OsRestoreGuard` на панике, продолжение сессии и
+/// восстановление после прерывания. Все четыре прежних звали «голый»
+/// `set_active`, который проверяет только код возврата `powercfg.exe`:
+/// команда завершается успехом, план при этом может не смениться (конфликт
+/// доменной политики, OEM-агент). Ставить `original_restored = true` по
+/// такому «успеху» нельзя — тогда точка навсегда осталась бы в состоянии
+/// «восстановлено», а машина продолжала бы работать на тестовой схеме.
+///
+/// Повтор делается целиком: и команда, и подтверждение. План мог не
+/// примениться из-за занятого Power Manager, и следующая попытка обычно
+/// проходит.
+pub fn restore_verified(driver: &dyn SchemeDriver, guid: &str) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..RESTORE_ATTEMPTS {
+        match apply_and_verify(driver, guid) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e,
+        }
+        if attempt + 1 < RESTORE_ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(RESTORE_RETRY_MS));
+        }
+    }
+    Err(format!(
+        "исходную схему «{guid}» вернуть в ОС не удалось за {} мс: {last}. \
+         Схема питания машины осталась другой — верните план вручную \
+         (powercfg /list, затем powercfg /setactive <GUID>)",
+        RESTORE_ATTEMPTS as u64 * (SCHEME_APPLY_RETRY_MS + RESTORE_RETRY_MS)
+    ))
+}
+
 /// Убедиться, что во время измерения осталась та же схема.
 ///
 /// Проверка на границе каждой фазы ловит подмену плана посторонним
@@ -411,6 +474,35 @@ pub fn verify_scheme_active(driver: &dyn SchemeDriver, expected: &str) -> Result
             "активна схема «{active}» вместо «{expected}» — план сменили извне"
         )),
         Err(e) => Err(format!("не удалось прочитать активную схему: {e}")),
+    }
+}
+
+/// Полный текст настроек схемы (`powercfg /query <guid>`).
+///
+/// Дамп снимается один раз на прогон: без него отчёт через год содержит
+/// только GUID, а по нему не сказать, какие ограничения были заданы, —
+/// Windows и OEM-агенты молча правят планы при обновлениях. Съём стоит
+/// единицы миллисекунд, поэтому ошибка не должна проваливать измерение:
+/// она уходит в предупреждение, а дамп остаётся `None`.
+fn capture_scheme_dump(
+    guid: &str,
+    observer: &Option<Arc<dyn TelemetryObserver>>,
+    events: &mut Vec<SessionEvent>,
+) -> Option<String> {
+    match powerbench_windows::powercfg::query(guid) {
+        Ok(dump) => Some(dump),
+        Err(e) => {
+            note(
+                observer,
+                events,
+                SessionEvent::Warn(format!(
+                    "не удалось сохранить настройки схемы {guid}: {}. \
+                     Результат верный, но воспроизвести его по одному GUID нельзя",
+                    e.message
+                )),
+            );
+            None
+        }
     }
 }
 
@@ -959,7 +1051,13 @@ fn spawn_monitor(
             let sec = now_unix_secs();
             let samples = sampler.sample();
             if !samples.is_empty() {
-                map.lock().unwrap().insert(sec, samples);
+                // Отравленный мьютекс НЕ должен убивать поток мониторинга
+                // (регресс H38): один заход с паникой в другом потоке оставлял бы
+                // прогон без фоновых корреляций до конца сессии. `into_inner`
+                // отдаёт внутренности и снимает отравление.
+                map.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(sec, samples);
             }
             std::thread::sleep(Duration::from_secs(1));
         }
@@ -1279,7 +1377,13 @@ enum PhaseFailure {
         phase: String,
     },
     /// Машина сломалась: темп упал относительно её собственной медианы.
-    /// Замер недостоверен — схема в карантин.
+    ///
+    /// Замер недостоверен, и виновата МАШИНА, а не схема (регресс H40): так
+    /// ведут себя термальный троттлинг, энергосбережение по температуре,
+    /// посторонний процесс, уход ноутбука в сон. Поэтому прогон помечается
+    /// невалидным, схема остаётся допущенной и перемеривается при следующем
+    /// запуске. В карантин уходят только зависания самой схемы
+    /// ([`PhaseFailure::Hung`]).
     Collapsed {
         phase: String,
         ticks_per_sec: u64,
@@ -1329,15 +1433,17 @@ struct RunData {
     supercycles: u64,
     first_tick_checksums: [u64; PHASES_PER_RUN as usize],
     run_checksums: [u64; PHASES_PER_RUN as usize],
-    phase_times: Vec<(u8, Vec<f64>)>,
+    /// Готовые итоги одной фазы: статистика, срез питания, номинальная
+    /// длительность. Хранятся числами, а не сэмплами: времена тиков нужны
+    /// только в момент расчёта статистики.
+    phase_stats: Vec<PhaseStats>,
     combined: RunStats,
     cross_phase_consistency: f64,
     burst_retention_percent: f64,
     background: Vec<CorrelatedProcess>,
     spike_windows_total: usize,
-    /// Срез питания в конце каждой измеряемой фазы (индексы фаз в том же
-    /// порядке, что `phase_times`).
-    phase_power: Vec<PowerSnapshot>,
+    /// Полный дамп настроек схемы на момент прогона.
+    scheme_dump: Option<String>,
     /// Снимок питания в конце прогона.
     power: PowerSnapshot,
     /// Фоновая нагрузка (сумма по процессам, % одного ядра) по секундам
@@ -1380,10 +1486,31 @@ pub fn run_session(
     if let Some(reason) = validate_config(&plan) {
         return Err(SessionError::Config(reason));
     }
-    // Карантин (префлайт): забракованные схемы не допускаются к прогонам.
+// Карантин (префлайт): забракованные схемы не допускаются к прогонам.
     // Фильтруем здесь, а не в UI, чтобы работало и для CLI.
+    //
+    // Файл карантина читается мягко: при повреждении он считается пустым, и
+    // запись в него запрещена (см. `quarantine_add`). Но молчать об этом
+    // нельзя — пользователь увидел бы «все схемы разрешены» и не понял бы,
+    // почему ранее заблокированная схема снова попала в замер. Поэтому
+    // повреждение сообщается ОДИН раз за сессию.
+    let quarantine = match crate::quarantine::load_quarantine_checked() {
+        Ok(entries) => entries,
+        Err(cause) => {
+            note(
+                &observer,
+                &mut events,
+                SessionEvent::Warn(format!(
+                    "файл карантина не читается, список браковки пуст ({cause}). \
+                     Карантин не применялся; сохраните файл для разбора и удалите, \
+                     чтобы вернуть список"
+                )),
+            );
+            Vec::new()
+        }
+    };
     let plan = {
-        let (admitted, skipped) = preflight_filter(&plan.scheme_ids, &load_quarantine());
+        let (admitted, skipped) = preflight_filter(&plan.scheme_ids, &quarantine);
         for (id, why) in &skipped {
             note(
                 &observer,
@@ -1416,8 +1543,14 @@ pub fn run_session(
     // коде нет намеренно: 100 тик/с — это много для ноутбука и мало для
     // станции. Пока сопоставимой истории нет, ориентира нет — и тогда решения
     // о браке по абсолютной величине не принимаются вовсе.
-    let baseline =
-        crate::history::machine_baseline(&crate::result::IdentityJson::from_signature(&signature));
+    let baseline = crate::history::machine_baseline(
+        &crate::result::IdentityJson::from_signature_with_machine(
+            &signature,
+            &powerbench_windows::power::os_build(),
+            &powerbench_windows::power::cpu_brand(),
+            powerbench_windows::power::memory_gib(),
+        ),
+    );
 
     // Список схем и карта «guid → имя»: имя нужно только для отображения
     // (PlanName), в идентификации/матчинге никогда не участвует.
@@ -1465,6 +1598,14 @@ pub fn run_session(
                     found: existing.plan.plan_guid,
                 });
             }
+            // Условия запуска тоже обязаны совпадать. Совпадение plan_guid
+            // говорит лишь, что план тот же; число воркеров, привязка и
+            // конфигурация нагрузки — часть измерения, и без их проверки
+            // `resume` с другими параметрами перештамповывает старые прогоны
+            // подписью текущего движка (регресс H41).
+            if let Some(mismatch) = run_conditions_mismatch(&existing.runs, engine) {
+                return Err(mismatch);
+            }
             existing
         }
         None => {
@@ -1479,6 +1620,12 @@ pub fn run_session(
 
     // Восстановление после прерывания: если активна не исходная схема —
     // восстанавливаем до продолжения.
+    //
+    // Тот же контракт, что и у [`restore_original`]: возврат идёт через
+    // [`restore_verified`], поэтому `original_restored = true` означает
+    // подтверждённое ОС состояние. Раньше здесь стоял «голый» `set_active`, и
+    // точка могла быть помечена восстановленной при плане, который так и не
+    // вернулся.
     // MSRV 1.85: схлопывание через let-цепочки требует Rust 1.88+.
     #[allow(clippy::collapsible_if)]
     if !checkpoint.original_restored {
@@ -1490,9 +1637,8 @@ pub fn run_session(
                 .find(|s| s.active)
                 .map(|s| s.guid);
             if active_guid.as_deref() != Some(original.as_str()) {
-                driver
-                    .set_active(&original)
-                    .map_err(SessionError::RestoreScheme)?;
+                restore_verified(driver, &original)
+                    .map_err(|cause| SessionError::RestoreScheme(format!("{original}: {cause}")))?;
                 note(
                     &observer,
                     &mut events,
@@ -1697,6 +1843,10 @@ fn run_session_loop(
     let mut early_stop_reason: Option<String> = None;
     let run_total = (plan.scheme_ids.len() as u32) * plan.repetitions;
     let mut run_index: u32 = 0;
+    // Условия запуска фиксируются ОДИН раз на сессию и пишутся в каждый
+    // прогон: движок не переинициализируется посреди цикла, и подпись,
+    // которую увидит `resume`, должна совпадать с той, что была при замере.
+    let run_conditions = current_run_conditions(engine);
 
     'outer: for round in 0..plan.repetitions {
         let order = round_order(&plan.scheme_ids, round);
@@ -1704,6 +1854,9 @@ fn run_session_loop(
         // «раунд выполнен целиком». Внутри раунда выполненные схемы
         // распознаются по записям прогонов (см. `Checkpoint::has_run`).
         let key = run_key(round, &plan.plan_guid);
+        // Копия ротации нужна после цикла: по ней проверяется, покрыт ли раунд
+        // целиком, а сам `order` расходуется перебором.
+        let round_order_schemes = order.clone();
         let round_done = checkpoint.is_completed(&key);
         if round_done {
             note(
@@ -1822,6 +1975,9 @@ fn run_session_loop(
             // не идёт — тяжёлый фон свойство машины, а не схемы.
             let threshold = plan.background_threshold_percent * engine.logical_cpus() as f64;
             let mut background_ok = false;
+            // Последняя измеренная загрузка: без неё в сообщении о пропуске
+            // нечего было бы назвать.
+            let mut dirtiest = 0.0f64;
             for attempt in 1..=BACKGROUND_RUN_ATTEMPTS {
                 let Some(verdict) = measure_background(
                     engine.logical_cpus(),
@@ -1855,6 +2011,7 @@ fn run_session_loop(
                         background_ok = true;
                     }
                     BackgroundVerdict::TooDirty { measured } => {
+                        dirtiest = dirtiest.max(measured);
                         note(
                             observer,
                             events,
@@ -1865,6 +2022,14 @@ fn run_session_loop(
                                 attempts: BACKGROUND_RUN_ATTEMPTS,
                             },
                         );
+                        // Пользователь нажал «продолжить с риском»: гейт по фону
+                        // для этой сессии выключен, и ждать второй попытки незачем —
+                        // фон не станет чище сам. Иначе кнопка в интерфейсе была бы
+                        // формой согласия, которая ничего не разрешает.
+                        if plan.accept_dirty_background {
+                            background_ok = true;
+                            break;
+                        }
                         if attempt < BACKGROUND_RUN_ATTEMPTS
                             && interruptible_sleep_ms(user_cancel, BACKGROUND_RETRY_PAUSE_MS)
                         {
@@ -1878,6 +2043,32 @@ fn run_session_loop(
                 }
             }
             if !background_ok {
+                // Причина пропуска обязана попасть в отчёт. Раньше здесь был
+                // голый `continue`, и прогон, не начавшийся из-за фоновой
+                // нагрузки, не оставлял следов: в результате схема
+                // показывалась с `runs: 0`, `rejected: false` и без единого
+                // предупреждения — выглядело как поломка приложения, а не
+                // как «машина была занята». Причина идёт в `rejections`
+                // (из неё берутся `rejected` и `rejection_reason`), но НЕ в
+                // карантин: тяжёлый фон — свойство машины, а не схемы.
+                let critical = threshold * BACKGROUND_DIRTY_FACTOR;
+                let reason = format!(
+                    "фон {dirtiest:.1} % CPU при критическом пороге {critical:.0} % \
+                     (порог из настроек — {:.1} % на ядро × {} ядер × {BACKGROUND_DIRTY_FACTOR}) — \
+                     прогон не начался после {BACKGROUND_RUN_ATTEMPTS} попыток",
+                    plan.background_threshold_percent,
+                    engine.logical_cpus(),
+                );
+                note(
+                    observer,
+                    events,
+                    SessionEvent::RunInvalid {
+                        scheme_id: scheme_id.clone(),
+                        reason: reason.clone(),
+                    },
+                );
+                checkpoint.rejections.insert(scheme_id.clone(), reason);
+                store.save(checkpoint).map_err(SessionError::Persist)?;
                 clear_testing_marker();
                 continue 'scheme;
             }
@@ -1921,7 +2112,14 @@ fn run_session_loop(
                 clear_testing_marker();
                 return Err(SessionError::LoadDidNotStop);
             }
-            engine.prepare_sample_buffer(Phase::Response, plan.warmup_seconds.max(1));
+            // Разогрев идёт фазой «Лёгкая», а не «Отклик». Фаза «Отклик» — это
+            // короткий замер суперциклов, и на длинном разогреве она
+            // переполняет буфер сэмплов и переписывает его много раз; кроме
+            // того, она нагружает ровно одно ядро, то есть прогревает не то,
+            // что затем измеряется. Растёт буфер по той же оценке сэмплов,
+            // что и раньше, поэтому объём памяти не изменился.
+            let warmup_phase = Phase::Light;
+            engine.prepare_sample_buffer(warmup_phase, plan.warmup_seconds.max(1));
             let warmup_cancel = engine.canceller();
             let warmup_scoreboard = engine.scoreboard_arc();
             let warmup_finished = Arc::new(AtomicBool::new(false));
@@ -1935,7 +2133,7 @@ fn run_session_loop(
                 Arc::clone(&warmup_finished),
             );
             let warmup_result = engine.run_phase(
-                Phase::Response,
+                warmup_phase,
                 RunTarget::Duration(Duration::from_secs(plan.warmup_seconds.max(1))),
             );
             // Сторож разогрева обязан узнать, что фаза закончилась: иначе он
@@ -2016,10 +2214,30 @@ fn run_session_loop(
             let started_at_ns = now_unix_ns();
             let run_started_secs = now_unix_secs();
             let phase_started = Instant::now();
-            let mut times_by_phase: Vec<(u8, Vec<f64>)> = Vec::new();
+            // Дамп настроек схемы снимается здесь: прогрев уже закончился, но ни
+            // одна измеряемая фаза ещё не началась, поэтому в дампе ровно то,
+            // что сейчас активно и что сейчас же будет измерено. Снимок
+            // делается один раз на прогон, а не на фазу.
+            let scheme_dump = capture_scheme_dump(&scheme_id, observer, events);
+            // Статистика каждой фазы считается сразу же после её измерения,
+            // а сами `Vec<f64>` с временами тиков выбрасываются. Раньше они
+            // жили до конца прогона в четырёх копиях (`times_by_phase`,
+            // `all_times`, `group_refs`, `RunData.phase_times`), и на длинной
+            // сессии четыре полных массива сэмплов держались в памяти ради
+            // чисел, которые уже посчитаны.
+            let mut phase_stats: Vec<PhaseStats> = Vec::new();
+            // Единственный оставшийся массив сэмплов: объединение фаз для
+            // `combined`. Процентили объединённого набора не выводятся из
+            // пофазных статистик, поэтому сами времена тиков нужны.
+            let mut all_times: Vec<f64> = Vec::new();
+            // Среднее удержание темпа: средние Light/Heavy и вклад фаз в
+            // ConsistencyPercent накапливаются числами, без хранения сэмплов.
+            let mut light_avg = 0.0f64;
+            let mut heavy_avg = 0.0f64;
+            let mut cross_weighted = 0.0f64;
+            let mut cross_weight = 0.0f64;
             let mut spike_count_total = 0usize;
             let mut all_spike_windows: Vec<SpikeWindow> = Vec::new();
-            let mut phase_power: Vec<PowerSnapshot> = Vec::new();
             let mut first_tick_checksums = [0u64; PHASES_PER_RUN as usize];
             let mut run_checksums = [0u64; PHASES_PER_RUN as usize];
             let mut ticks = 0u64;
@@ -2197,7 +2415,6 @@ fn run_session_loop(
                             clear_testing_marker();
                             break 'outer;
                         }
-                        phase_power.push(phase_snapshot);
                         // Шаг перевода индекса сэмпла в секунды и начало фазы
                         // считаем по ФАКТИЧЕСКОМУ времени, а не по номинальному
                         // `secs`: фаза включает запуск нагрузки и разгон, из-за
@@ -2212,9 +2429,32 @@ fn run_session_loop(
                             sec_per_index,
                             label,
                         );
-                        spike_count_total += windows.len();
-                        all_spike_windows.extend(windows.clone());
-                        times_by_phase.push((phase.index(), times));
+                        let window_count = windows.len();
+                        spike_count_total += window_count;
+                        all_spike_windows.extend(windows);
+                        // Всё, что нужно от сэмплов фазы, считается здесь же,
+                        // после чего `times` освобождается вместе с `windows`.
+                        let stats = matched_stats(&times);
+                        if phase == Phase::Light {
+                            light_avg = stats.average_throughput;
+                        }
+                        // Индекс берём у самой фазы, а не литералом: после
+                        // появления фазы «Частичная» литерал 1 перестал быть
+                        // «Тяжёлой», и метрика удержания темпа молча считалась
+                        // по чужой фазе.
+                        if phase == Phase::Heavy {
+                            heavy_avg = stats.average_throughput;
+                        }
+                        let (score, n) = consistency_group(&times);
+                        cross_weighted += n * score;
+                        cross_weight += n;
+                        all_times.extend_from_slice(&times);
+                        phase_stats.push(PhaseStats {
+                            phase_index: phase.index(),
+                            stats,
+                            power: Some(phase_snapshot),
+                            seconds: secs,
+                        });
                         // Стабилизационная пауза после каждой фазы —
                         // прерываемая, иначе кнопка «Стоп» ждала бы её целиком.
                         if interruptible_sleep(user_cancel, STABILIZATION_SECS) {
@@ -2228,7 +2468,7 @@ fn run_session_loop(
                                 events,
                                 SessionEvent::SpikeWindows {
                                     label: label.to_string(),
-                                    count: windows.len(),
+                                    count: window_count,
                                 },
                             );
                         }
@@ -2273,35 +2513,39 @@ fn run_session_loop(
                         own_median,
                     }) => {
                         // Машина сломалась ПО ХОДУ фазы: темп упал относительно
-                        // того, что она же показывала минуту назад. Замер недостоверен,
-                        // и виновата машина, а не схема — но здесь мы обязаны
-                        // остановиться, потому что доверять данным нельзя.
+                        // того, что она же показывала минуту назад.
+                        //
+                        // Регресс H40: здесь раньше схема попадала в
+                        // ПЕРМАНЕНТНЫЙ карантин как `Degraded`. Но падение темпа
+                        // посреди фазы — это не свойство схемы: так ведёт себя
+                        // термальный троттлинг, уход в энергосбережение по
+                        // температуре, посторонний процесс, уход ноутбука в сон.
+                        // Пользователю после такого оставался заблокированный
+                        // здоровый план питания — вернуть его можно было только
+                        // руками через карантин в интерфейсе, и причина
+                        // блокировки («деградация схемы») была ложной.
+                        //
+                        // Теперь прогон помечается невалидным и схема
+                        // остаётся допущенной: раунд не закрывается (см.
+                        // `round_is_covered`), и следующий запуск перемерит её
+                        // заново. В карантин уходят только зависания самой
+                        // схемы (`Hung` → `NoProgress`) и статистические
+                        // правила пост-сессии.
                         let reason = format!(
                             "темп упал до {ticks_per_sec} тик/с против медианы фазы \
-                             {own_median} (фаза «{phase}») — замер недостоверен"
+                             {own_median} (фаза «{phase}») — замер недостоверен, причина \
+                             на стороне машины (охлаждение, троттлинг, посторонняя нагрузка)"
                         );
                         note(
                             observer,
                             events,
-                            SessionEvent::SchemeRejected {
+                            SessionEvent::RunInvalid {
                                 scheme_id: scheme_id.clone(),
                                 reason: reason.clone(),
                             },
                         );
-                        checkpoint
-                            .rejections
-                            .insert(scheme_id.clone(), reason.clone());
-                        store.save(checkpoint).map_err(SessionError::Persist)?;
-                        quarantine_scheme(
-                            &scheme_id,
-                            name_map,
-                            QuarantineKind::Degraded,
-                            &reason,
-                            &plan.plan_guid,
-                            observer,
-                            events,
-                        );
                         clear_testing_marker();
+                        // Зависла одна фаза — остальные фазы и схемы идут дальше.
                         continue 'scheme;
                     }
                     Err(PhaseFailure::UserCancelled) => {
@@ -2322,37 +2566,52 @@ fn run_session_loop(
             let duration_ms = phase_started.elapsed().as_millis() as u64;
             let run_ended_secs = now_unix_secs();
 
-            let light_avg = times_by_phase
-                .iter()
-                .find(|(i, _)| *i == Phase::Light.index())
-                .and_then(|(_, t)| run_stats(t))
-                .map(|s| s.average_throughput)
-                .unwrap_or(0.0);
-            // Индекс берём у самой фазы, а не литералом: после появления фазы
-            // «Частичная» литерал 1 перестал быть «Тяжёлой», и метрика
-            // удержания темпа молча считалась по чужой фазе.
-            let heavy_avg = times_by_phase
-                .iter()
-                .find(|(i, _)| *i == Phase::Heavy.index())
-                .and_then(|(_, t)| run_stats(t))
-                .map(|s| s.average_throughput)
-                .unwrap_or(0.0);
             let burst = burst_retention_percent(heavy_avg, light_avg);
 
-            // Объединённая статистика прогона.
-            let mut all_times: Vec<f64> = Vec::new();
-            let mut group_refs: Vec<(u32, Vec<f64>)> = Vec::new();
-            for (_, times) in &times_by_phase {
-                all_times.extend_from_slice(times);
-                group_refs.push((0u32, times.clone()));
-            }
+            // Объединённая статистика прогона. `all_times` — единственный
+            // массив сэмплов, переживающий фазы, и он нужен только здесь.
             let combined = run_stats(&all_times).unwrap_or_else(zero_run_stats);
-            let combined_groups: Vec<(u32, &[f64])> =
-                group_refs.iter().map(|(g, t)| (*g, t.as_slice())).collect();
-            let cross = consistency_percent(&combined_groups);
+            drop(all_times);
+            let cross = if cross_weight == 0.0 {
+                0.0
+            } else {
+                cross_weighted / cross_weight
+            };
+
+            // Регресс H3: прогон без единого валидного сэмпла — это НЕ измерение.
+            //
+            // Раньше `run_stats` возвращал `None`, и подставлялся `RunStats` из
+            // нулей. Такой прогон попадал в чекпоинт как обычный: нули тянули
+            // среднее и σ всей схемы к нулю, а сама схема ранжировалась наравне
+            // с честно измеренными — и выглядела при этом «очень нестабильной».
+            // Именно по нулевому среднему `admitted()` и отсекает кандидата, но
+            // не из-за отсутствия данных, а как будто они есть и равны нулю.
+            if combined.samples == 0 {
+                note(
+                    observer,
+                    events,
+                    SessionEvent::RunInvalid {
+                        scheme_id: scheme_id.clone(),
+                        reason: format!(
+                            "прогон не дал ни одного валидного сэмпла тика (тиков всего \
+                             {ticks}) — измерение не засчитано"
+                        ),
+                    },
+                );
+                clear_testing_marker();
+                continue 'scheme;
+            }
 
             // Фоновые корреляции по окнам скачков этого прогона.
-            let map_snapshot = monitor_map.lock().unwrap().clone();
+            //
+            // Отравление мьютекса не должно ронять сессию (регресс H38): раньше
+            // здесь стоял `lock().unwrap()`, и паника в потоке мониторинга или в
+            // любом другом владельце карты завершала бы весь прогон паникой вместо
+            // того, чтобы просто отдать неполные фоновые данные.
+            let map_snapshot = monitor_map
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let background = correlate(&all_spike_windows, &map_snapshot);
             // Непрерывная оценка фона: сэмплер уже ходит раз в секунду на
             // протяжении всех фаз, но вердикт до этого строился на одной
@@ -2373,20 +2632,20 @@ fn run_session_loop(
                 supercycles,
                 first_tick_checksums,
                 run_checksums,
-                phase_times: times_by_phase.clone(),
+                phase_stats: phase_stats.clone(),
                 combined,
                 cross_phase_consistency: cross,
                 burst_retention_percent: burst,
                 background,
                 spike_windows_total: spike_count_total,
-                phase_power,
+                scheme_dump,
                 power: PowerSnapshot::capture(),
                 background_cpu,
             });
 
-            if let Some(run) = run_outcome {
-                let stored = build_stored_run(&run, plan, name_map);
-                checkpoint.runs.push(stored);
+if let Some(run) = run_outcome {
+                let stored = build_stored_run(&run, plan, name_map, &run_conditions);
+                checkpoint.runs.push(drop_duplicate_scheme_dump(checkpoint, stored));
                 store.save(checkpoint).map_err(SessionError::Persist)?;
                 note(
                     observer,
@@ -2418,10 +2677,39 @@ fn run_session_loop(
                 }
             }
         }
-        // Раунд отработан целиком (все схемы прогона записаны): отмечаем ключ
-        // раунда, чтобы повторный запуск пропустил ротацию одним махом.
-        checkpoint.completed_keys.push(key.clone());
-        store.save(checkpoint).map_err(SessionError::Persist)?;
+        // Раунд отработан целиком (у каждой схемы есть запись прогона либо
+        // браковка): отмечаем ключ раунда, чтобы повторный запуск пропустил
+        // ротацию одним махом.
+        //
+        // Проверка обязательна. Раньше ключ попадал в `completed_keys`
+        // безусловно — сразу после выхода из цикла по схемам, даже если
+        // половина схем ушла через `break 'scheme` (план сменили извне, машина
+        // не загрузилась, не нашлось ни одного валидного сэмпла). При
+        // `resume` ключ означал «раунд доделан», и непокрытые схемы
+        // перетестировались уже никогда: сессия выглядела завершённой, а данные
+        // о схемах в ней не было.
+        let round_covered = round_is_covered(checkpoint, round, &round_order_schemes);
+        if round_covered {
+            checkpoint.completed_keys.push(key.clone());
+            store.save(checkpoint).map_err(SessionError::Persist)?;
+        } else {
+            let missing: Vec<&str> = round_order_schemes
+                .iter()
+                .filter(|id| {
+                    !checkpoint.has_run(round, id) && !checkpoint.is_rejected(id)
+                })
+                .map(String::as_str)
+                .collect();
+            note(
+                observer,
+                events,
+                SessionEvent::Warn(format!(
+                    "раунд {round} отмечен незавершённым: без записи остались схемы \
+                     [{}]. Их можно перемерить: powerbench-cli resume",
+                    missing.join(", ")
+                )),
+            );
+        }
 
         // --- Адаптивная ранняя остановка ---
         //
@@ -2429,15 +2717,23 @@ fn run_session_loop(
         // забракованными, из статистики исключены: их средние не отвечают ни за
         // что, а решение о лидерстве принимается по тем, что честно отработали
         // своё число раундов.
-        let done_rounds = checkpoint
-            .completed_keys
-            .iter()
-            .filter(|k| k.as_str() == run_key(round, &plan.plan_guid).as_str())
-            .count() as u32;
+        //
+        // Незавершённый раунд исключает остановку: решение принимается по
+        // статистике, а принимать его нельзя, пока часть плана не измерена.
+        // Иначе сессия завершалась бы досрочно, оставив схему вовсе без данных.
+        if !round_covered {
+            continue;
+        }
+        // Число завершённых раундов — по ключам в точке, а не по номеру
+        // итерации. Раньше здесь стояло `done_rounds.max(round + 1)`, то есть
+        // незавершённый раунд всё равно засчитывался: «осталось N раундов» в
+        // сообщении о решении было неверным, и при `resume` могло выглядеть так,
+        // будто часть плана уже отработана.
+        let done_rounds = completed_rounds(checkpoint, round, &plan.plan_guid);
         let inputs = crate::early_stop::leader_inputs(&checkpoint.runs, &checkpoint.rejections);
         let decision = crate::early_stop::early_stop_decision(
             &inputs,
-            done_rounds.max(round + 1),
+            done_rounds,
             plan.repetitions,
         );
         if decision.stop {
@@ -2457,6 +2753,69 @@ fn run_session_loop(
         cancelled,
         early_stop_reason,
     })
+}
+
+/// Условия запуска, под которыми работает текущий движок.
+fn current_run_conditions(engine: &Engine) -> LaunchConditions {
+    LaunchConditions {
+        worker_count: engine.worker_count(),
+        affinity_mode: engine.affinity_mode().as_str().to_string(),
+        affinity_signature: engine.affinity_signature(),
+        config_hash: engine.config_hash().to_string(),
+    }
+}
+
+/// Первый прогон точки, сделанный при других условиях, чем у текущего движка.
+///
+/// Точки, записанные прошлыми версиями, условий не содержат: они пропускаются
+/// (`has_launch_conditions`), иначе любое чтение старой точки ломало бы работу.
+fn run_conditions_mismatch(
+    runs: &[StoredRun],
+    engine: &Engine,
+) -> Option<SessionError> {
+    let now = current_run_conditions(engine);
+    for run in runs {
+        if !run.has_launch_conditions() {
+            continue;
+        }
+        let recorded = run.launch_conditions();
+        if let Some(difference) = recorded.first_difference(&now) {
+            return Some(SessionError::RunConditionsMismatch {
+                difference,
+                recorded: recorded.describe(),
+            });
+        }
+    }
+    None
+}
+
+/// Сколько раундов плана до `up_to` включительно реально завершено.
+///
+/// Считается по ключам в контрольной точке, а не по номеру итерации: раунд,
+/// в котором не покрыты все схемы, ключа не получает (см.
+/// [`round_is_covered`]) и потому завершённым не считается.
+///
+/// Забытый `max(round + 1)` означал ровно обратное: незавершённый раунд
+/// засчитывался, и в сообщении о досрочной остановке показывалось неверное
+/// «осталось N раундов».
+fn completed_rounds(checkpoint: &Checkpoint, up_to: u32, plan_guid: &str) -> u32 {
+    (0..=up_to)
+        .filter(|r| checkpoint.is_completed(&run_key(*r, plan_guid)))
+        .count() as u32
+}
+
+/// Покрыт ли раунд целиком: у каждой его схемы есть запись прогона либо
+/// браковка.
+///
+/// Пропущенная по любой причине схема (план сменили извне, машина не
+/// загрузилась, фоновой нагрузки слишком много, не нашлось валидных сэмплов)
+/// делает раунд незавершённым, и ключ раунда в `completed_keys` ставиться не
+/// должен: при `resume` иначе непокрытые схемы считались бы уже измеренными и
+/// никогда бы не перетестировались.
+fn round_is_covered(checkpoint: &Checkpoint, round: u32, order: &[String]) -> bool {
+    order
+        .iter()
+        .all(|id| checkpoint.has_run(round, id) || checkpoint.is_rejected(id))
 }
 
 /// Итог цикла раундов.
@@ -2502,13 +2861,23 @@ impl Drop for OsRestoreGuard<'_> {
             return;
         }
         let Some(original) = self.original.clone() else {
+            // Исходную схему так и не запомнили (powercfg не отдал активную
+            // при старте). Схему вернуть нечем, но сказать об этом надо:
+            // молча выйти значит оставить машину на тестовом плане.
+            eprintln!(
+                "PowerBench: исходная схема питания неизвестна — вернуть её нечем, \
+                 на машине остался план последнего замера"
+            );
             return;
         };
-        if let Err(e) = self.driver.set_active(&original) {
+        // С подтверждением от ОС, а не «команда ушла»: после паники никто
+        // больше не проверит состояние, и неподтверждённый возврат здесь —
+        // молчаливая потеря пользовательского плана.
+        if let Err(e) = restore_verified(self.driver, &original) {
             // Паника при разворачивании паники = аварийный останов процесса,
             // поэтому ограничиваемся сообщением: восстановить схему не удалось,
             // и пользователю нужно сказать об этом прямо.
-            eprintln!("PowerBench: не удалось вернуть исходную схему питания: {e}");
+            eprintln!("PowerBench: {e}");
         }
     }
 }
@@ -2523,40 +2892,46 @@ fn restore_original(
     if checkpoint.original_restored {
         return Ok(());
     }
-    if let Some(original) = checkpoint.original_scheme_guid.clone() {
-        // Проверяем, активна ли уже (например, браковка могла не менять схему).
-        let active_guid = driver
-            .list_schemes()
-            .map_err(SessionError::Config)?
-            .into_iter()
-            .find(|s| s.active)
-            .map(|s| s.guid);
-        if active_guid.as_deref() != Some(original.as_str()) {
-            driver
-                .set_active(&original)
-                .map_err(SessionError::RestoreScheme)?;
-        }
-        note(
-            observer,
-            events,
-            SessionEvent::Restored {
-                scheme_id: original.clone(),
-                label: "после теста".to_string(),
-            },
-        );
-    } else {
+    let Some(original) = checkpoint.original_scheme_guid.clone() else {
         // Исходную схему так и не запомнили (powercfg не отдал активную).
-        // Помечать «восстановлено» нельзя: следующий запуск и восстановление
-        // после сбоя увидят «всё в порядке» и ничего не починят.
+        // Помечать «восстановлено» нельзя: подтверждения от ОС нет, а сам
+        // `Ok(())` означал бы «всё в порядке» — и точка осталась бы навсегда
+        // в состоянии «не восстановлено», и следующий запуск думал бы, что
+        // есть что чинить, хотя чинить нечем.
+        //
+        // Возвращаем Err: тестовая схема могла остаться активной, и сказать
+        // об этом пользователю важнее, чем отчитаться об успехе. Поверх
+        // ошибки виден результат сессии — она уже записана в чекпоинт и
+        // разбирается из него.
         note(
             observer,
             events,
             SessionEvent::Warn(
-                "исходная схема питания неизвестна — восстанавливать нечего".to_string(),
+                "исходная схема питания неизвестна — вернуть её нечем, на машине \
+                 остался план последнего замера"
+                    .to_string(),
             ),
         );
-        return Ok(());
-    }
+        return Err(SessionError::RestoreScheme(
+            "исходная схема питания не была зафиксирована (powercfg не отдал активную \
+             до первого прогона), вернуть её нечем; на машине остался план последнего \
+             замера — верните его вручную через powercfg"
+                .to_string(),
+        ));
+    };
+    // Возврат только с подтверждением от ОС: `set_active` сам по себе означает
+    // лишь «команда ушла». Флаг `original_restored` взводится ниже только
+    // после успеха, то есть после `active_scheme()` с нужным GUID.
+    restore_verified(driver, &original)
+        .map_err(|cause| SessionError::RestoreScheme(format!("{original}: {cause}")))?;
+    note(
+        observer,
+        events,
+        SessionEvent::Restored {
+            scheme_id: original.clone(),
+            label: "после теста".to_string(),
+        },
+    );
     checkpoint.original_restored = true;
     store.save(checkpoint).map_err(SessionError::Persist)?;
     Ok(())
@@ -2936,10 +3311,41 @@ fn matched_stats(times: &[f64]) -> RunStats {
 
 /// Собрать StoredRun из данных прогона. Отображаемое имя схемы (PlanName)
 /// берётся из карты «guid → имя», но только для вывода.
+///
+/// Условия запуска (число воркеров, привязка, конфигурация нагрузки)
+/// Убрать повторный дамп настроек схемы (регресс M35).
+///
+/// Чекпоинт переписывается целиком после каждого прогона. Дамп
+/// `powercfg /query <guid>` писался в каждый прогон, поэтому при R повторах и
+/// S схемах в файле оказывалось R×S копий одного и того же текста об одних и
+/// те�� же настройках — и они переписывались после каждого прогона. На типовой
+/// сессии это мегабайты, а данных там на единицы килобайт.
+///
+/// Оставляем дамп у ПЕРВОГО прогона схемы: настройки щита между повторами не
+/// меняются (их меняют между сессиями), так что копии были побайтово
+/// одинаковыми, а воспроизводимость результата не пострадала — dump по GUID и
+/// раньше требовался ровно один.
+///
+/// Сравнение GUID регистронезависимо: `powercfg` отдаёт идентификаторы в
+/// верхнем регистре, а чекпоинт мог сохранить их в нижнем.
+fn drop_duplicate_scheme_dump(checkpoint: &Checkpoint, mut stored: StoredRun) -> StoredRun {
+    if stored.scheme_dump.is_some()
+        && checkpoint.runs.iter().any(|r| {
+            r.scheme_id.eq_ignore_ascii_case(&stored.scheme_id) && r.scheme_dump.is_some()
+        })
+    {
+        stored.scheme_dump = None;
+    }
+    stored
+}
+
+/// записи в каждый прогон: без них `resume` не может отличить свои
+/// прогоны от чужих и перештампует их подписью текущего движка.
 fn build_stored_run(
     run: &RunData,
     plan: &SessionConfig,
     name_map: &BTreeMap<String, String>,
+    conditions: &LaunchConditions,
 ) -> StoredRun {
     let _ = plan;
     StoredRun {
@@ -2953,25 +3359,21 @@ fn build_stored_run(
         supercycles: run.supercycles,
         first_tick_checksums: run.first_tick_checksums,
         run_checksums: run.run_checksums,
-        phases: run
-            .phase_times
-            .iter()
-            .enumerate()
-            .map(|(i, (idx, times))| PhaseStats {
-                phase_index: *idx,
-                stats: matched_stats(times),
-                power: run.phase_power.get(i).copied(),
-            })
-            .collect(),
+        phases: run.phase_stats.clone(),
         combined: run.combined,
         cross_phase_consistency: run.cross_phase_consistency,
         burst_retention_percent: run.burst_retention_percent,
         background: run.background.clone(),
         spike_windows: run.spike_windows_total,
         power: Some(run.power),
+        scheme_dump: run.scheme_dump.clone(),
         background_cpu_p50: run.background_cpu.0,
         background_cpu_p95: run.background_cpu.1,
         background_sample_seconds: run.background_cpu.2,
+        worker_count: conditions.worker_count,
+        affinity_mode: conditions.affinity_mode.clone(),
+        affinity_signature: conditions.affinity_signature.clone(),
+        config_hash: conditions.config_hash.clone(),
     }
 }
 
@@ -3121,6 +3523,12 @@ mod tests {
         /// `set_active` возвращает успех, но НЕ переключает схему — так ведёт
         /// себя `powercfg` под доменной политикой.
         lie_on_set: Mutex<bool>,
+        /// Сколько следующих вызовов `set_active` провалятся (не считая
+        /// `lie_on_set`): эмуляция занятого Power Manager.
+        set_failures: Mutex<usize>,
+        /// Сколько раз звали `set_active` — по этому счётчику видно, что
+        /// восстановление не поверило одному коду возврата.
+        set_calls: Mutex<u32>,
     }
 
     impl RecordingDriver {
@@ -3131,6 +3539,8 @@ mod tests {
                 stale_reads: Mutex::new(0),
                 active_read_fails: Mutex::new(false),
                 lie_on_set: Mutex::new(false),
+                set_failures: Mutex::new(0),
+                set_calls: Mutex::new(0),
             }
         }
 
@@ -3140,6 +3550,18 @@ mod tests {
             let d = Self::new(initial);
             *d.lie_on_set.lock().unwrap() = true;
             d
+        }
+
+        /// Драйвер, который первые `times` вызовов `set_active` провалит, а
+        /// дальше работает нормально.
+        fn failing_first(initial: &str, times: usize) -> Self {
+            let d = Self::new(initial);
+            *d.set_failures.lock().unwrap() = times;
+            d
+        }
+
+        fn set_calls(&self) -> u32 {
+            *self.set_calls.lock().unwrap()
         }
     }
 
@@ -3158,6 +3580,12 @@ mod tests {
         }
 
         fn set_active(&self, guid: &str) -> Result<(), String> {
+            *self.set_calls.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            let mut failures = self.set_failures.lock().unwrap_or_else(|e| e.into_inner());
+            if *failures > 0 {
+                *failures -= 1;
+                return Err("мост питания занят".to_string());
+            }
             if !*self.lie_on_set.lock().unwrap_or_else(|e| e.into_inner()) {
                 *self.active.lock().unwrap_or_else(|e| e.into_inner()) = guid.to_string();
                 self.calls
@@ -3515,6 +3943,7 @@ mod tests {
             cooling_seconds: 1,
             repetitions: 2,
             background_threshold_percent: 5.0,
+            accept_dirty_background: false,
             worker_count: None,
             scheme_ids: vec!["a".to_string(), "b".to_string()],
             plan_guid: "g".to_string(),
@@ -3694,6 +4123,220 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Волна 0, C8: возврат исходной схемы только с подтверждением от ОС
+    // ------------------------------------------------------------------
+
+    /// Хранилище чекпоинта в памяти: `restore_original` не должен писать на
+    /// диск пользователя.
+    #[derive(Default)]
+    struct MemStore {
+        checkpoint: Option<Checkpoint>,
+        saves: usize,
+    }
+
+    impl CheckpointStore for MemStore {
+        fn load(&self) -> Result<Option<Checkpoint>, String> {
+            Ok(self.checkpoint.clone())
+        }
+        fn save(&mut self, checkpoint: &Checkpoint) -> Result<(), String> {
+            self.saves += 1;
+            self.checkpoint = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+
+    fn plan() -> SessionConfig {
+        SessionConfig {
+            duration_seconds: 1,
+            warmup_seconds: 0,
+            cooling_seconds: 0,
+            repetitions: 1,
+            background_threshold_percent: 5.0,
+            accept_dirty_background: false,
+            worker_count: None,
+            scheme_ids: vec!["test-guid".to_string()],
+            plan_guid: "c8-plan".to_string(),
+            reference_scheme_id: None,
+        }
+    }
+
+    fn checkpoint_on(original: Option<&str>) -> Checkpoint {
+        let mut cp = Checkpoint::new(plan());
+        cp.original_scheme_guid = original.map(str::to_string);
+        cp
+    }
+
+    /// Ключевой случай C8: `powercfg /setactive` вернул код 0, но план не
+    /// вернулся. Прежние пути восстановления на этом строили вывод
+    /// «схема восстановлена» и ставили `original_restored = true` — точка
+    /// навсегда оставалась в состоянии «восстановлено», а машина продолжала
+    /// работать на тестовом плане.
+    #[test]
+    fn restore_is_not_claimed_when_the_os_ignored_the_command() {
+        let driver = RecordingDriver::lying("test-guid");
+        let err = restore_verified(&driver, "original-guid")
+            .expect_err("ОС не приняла схему — восстановление не состоялось");
+        assert!(err.contains("original-guid"), "в ошибке нет GUID: {err}");
+        assert!(
+            err.contains("вернуть в ОС не удалось"),
+            "ошибка обязана называть суть, а не код возврата: {err}"
+        );
+        assert!(
+            err.contains("powercfg /setactive"),
+            "в ошибке нужна инструкция, как починить руками: {err}"
+        );
+        assert!(
+            driver.set_calls() >= RESTORE_ATTEMPTS,
+            "возврат обязан быть повторён, а не выполнен один раз: {} попыток",
+            driver.set_calls()
+        );
+    }
+
+    /// Power Manager бывает занят: одна неудачная команда не должна
+    /// оставлять машину на тестовой схеме.
+    #[test]
+    fn restore_retries_before_giving_up() {
+        let driver = RecordingDriver::failing_first("test-guid", 2);
+        assert_eq!(
+            restore_verified(&driver, "original-guid"),
+            Ok(()),
+            "две неудачные попытки не должны считаться отказом"
+        );
+        assert_eq!(driver.active_scheme().unwrap(), "original-guid");
+        assert_eq!(driver.set_calls(), 3, "ожидались три попытки");
+    }
+
+    /// Штатное восстановление: схема возвращена, ОС это подтвердила, флаг
+    /// взведён и точка сохранена.
+    #[test]
+    fn restore_marks_the_flag_only_after_the_os_confirms() {
+        let driver = RecordingDriver::new("test-guid");
+        let mut store = MemStore::default();
+        let mut cp = checkpoint_on(Some("original-guid"));
+        let mut events = Vec::new();
+        assert_eq!(
+            restore_original(&driver, &mut cp, &mut events, &mut store, &None),
+            Ok(())
+        );
+        assert!(cp.original_restored, "подтверждённый возврат не помечен");
+        assert_eq!(store.saves, 1, "точка не сохранена после восстановления");
+        assert_eq!(driver.active_scheme().unwrap(), "original-guid");
+    }
+
+    /// Регресс C8: неподтверждённый возврат не должен выставлять
+    /// `original_restored` — иначе следующий запуск увидит «всё в порядке» и
+    /// не станет чинить схему.
+    #[test]
+    fn unconfirmed_restore_keeps_the_flag_down() {
+        let driver = RecordingDriver::lying("test-guid");
+        let mut store = MemStore::default();
+        let mut cp = checkpoint_on(Some("original-guid"));
+        let mut events = Vec::new();
+        let err = restore_original(&driver, &mut cp, &mut events, &mut store, &None)
+            .expect_err("ОС не переключила схему — восстановление не состоялось");
+        let text = format!("{err:?}");
+        assert!(text.contains("original-guid"), "{text}");
+        assert!(
+            !cp.original_restored,
+            "флаг взведён без подтверждения от ОС: следующий запуск не починит схему"
+        );
+        assert_eq!(store.saves, 0, "неподтверждённое восстановление не пишется");
+        // И наружу успех объявлять нельзя: событие «схема восстановлена»
+        // попало бы в отчёт и в журнал сессии.
+        assert!(
+            !events.iter().any(|e| matches!(e, SessionEvent::Restored { .. })),
+            "восстановление объявлено успехом, хотя ОС не переключила схему: {events:?}"
+        );
+        assert!(
+            cp.original_scheme_guid.is_some(),
+            "исходный GUID обязан сохраниться для следующей попытки"
+        );
+    }
+
+    /// Регресс C8: `original_scheme_guid == None` больше не выглядит как
+    /// успешное восстановление. Прежний `Ok(())` означал «всё в порядке» при
+    /// схеме, которую никто не может вернуть.
+    #[test]
+    fn unknown_original_scheme_is_not_a_successful_restore() {
+        let driver = RecordingDriver::new("test-guid");
+        let mut store = MemStore::default();
+        let mut cp = checkpoint_on(None);
+        let mut events = Vec::new();
+        restore_original(&driver, &mut cp, &mut events, &mut store, &None)
+            .expect_err("нечего восстанавливать — это не успех");
+        assert!(
+            !cp.original_restored,
+            "неизвестная исходная схема не должна помечаться восстановленной"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, SessionEvent::Warn(w) if w.contains("неизвестна"))),
+            "нужно предупреждение о том, что вернуть нечем: {events:?}"
+        );
+    }
+
+    /// Паника в сессии — тоже путь возврата, и он обязан повторять команду,
+    /// а не верить одному коду возврата.
+    #[test]
+    fn os_restore_guard_retries_instead_of_trusting_one_command() {
+        let driver = RecordingDriver::failing_first("test-guid", 1);
+        drop(OsRestoreGuard {
+            original: Some("original-guid".to_string()),
+            driver: &driver,
+            restored: Arc::new(AtomicBool::new(false)),
+        });
+        assert_eq!(
+            driver.active_scheme().unwrap(),
+            "original-guid",
+            "после паники схема не вернулась, а попытка была одна"
+        );
+        assert_eq!(driver.set_calls(), 2);
+    }
+
+    /// Четыре пути возврата не должны снова начать звать «голый» `set_active`:
+    /// это молчаливо вернуло бы баг C8 целиком. Проверяется по исходнику —
+    /// воспроизвести отказ ОС во всех четырёх местах через публичный API
+    /// нельзя, а регресс здесь молчаливый: код компилируется и работает, пока
+    /// не вернётся ровно тот дефект, ради которого написаны проверки.
+    #[test]
+    fn no_restore_path_calls_bare_set_active() {
+        let src = include_str!("session.rs");
+        let slice = |from: &str, to: &str| -> String {
+            let start = src.find(from).unwrap_or_else(|| panic!("не найдено: {from}"));
+            let rest = &src[start..];
+            let end = rest.find(to).unwrap_or_else(|| panic!("не найдено: {to}"));
+            rest[..end].to_string()
+        };
+        let sites = [
+            (
+                "fn restore_original(",
+                "/// Последний ли это плановый прогон",
+            ),
+            ("impl Drop for OsRestoreGuard", "fn restore_original("),
+            (
+                "    // Восстановление после прерывания: если активна не исходная схема —",
+                "let n_schemes = plan.scheme_ids.len();",
+            ),
+        ];
+        for (from, to) in sites {
+            let body = slice(from, to);
+            assert!(
+                !body.contains(".set_active("),
+                "путь восстановления снова зовёт «голый» set_active без \
+                 подтверждения от ОС:\n{body}"
+            );
+        }
+        // Продолжение сессии обязано идти через общий проверенный вход.
+        let resume = slice(
+            "    // Восстановление после прерывания: если активна не исходная схема —",
+            "let n_schemes = plan.scheme_ids.len();",
+        );
+        assert!(
+            resume.contains("restore_verified(driver"),
+            "продолжение сессии обязано возвращать схему через restore_verified"
+        );
+    }
+
+    // ------------------------------------------------------------------
     // Фаза 2: фон влияет на замер
     // ------------------------------------------------------------------
 
@@ -3862,5 +4505,585 @@ mod tests {
             Some(SchemeStabilizeFailure::SchemeUnconfirmed)
         );
         assert!(report.waited_ms <= SCHEME_STABILIZE_MAX_SECS * 1000 + 1000);
+    }
+
+    // ------------------------------------------------------------------
+    // Волна 1: C9 (незавершённый раунд), H3 (прогон без сэмплов),
+    // H41 (подпись условий запуска)
+    // ------------------------------------------------------------------
+
+    fn order_of(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Регресс H38: отравленный мьютекс фоновой карты не должен ронять ни поток
+/// мониторинга, ни сессию.
+///
+/// Раньше стоял `lock().unwrap()`. Любая паника в другом владельце карты
+/// (мониторинг, отчёт, тест) отравляла мьютекс, после чего первый же
+/// `unwrap` убивал поток мониторинга — и прогон оставался без фоновых
+/// корреляций до конца сессии, а сама сессия паниковала вместо того, чтобы
+/// отдать неполные данные.
+#[test]
+fn a_poisoned_monitor_map_does_not_kill_the_session() {
+    use std::collections::BTreeMap as Map;
+
+    let map: Arc<Mutex<Map<u64, Vec<powerbench_windows::monitor::ProcessSample>>>> =
+        Arc::new(Mutex::new(Map::new()));
+    // Отравляем мьютекс паникой в его владельце.
+    let poisoned = Arc::clone(&map);
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoned.lock().expect("первая блокировка обязана удаться");
+        panic!("отравляем карту фоновых измерений");
+    })
+    .join();
+    assert!(map.lock().is_err(), "мьютекс не отравлен — тест бессмыслен");
+
+    // Чтение обязано выдать хоть что-то, а не паниковать.
+    let snapshot = map.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert!(snapshot.is_empty(), "из отравленной карты взяты не те данные");
+
+    // И запись в отравленный мьютекс тоже обязана работать.
+    map.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(1, Vec::new());
+    assert_eq!(map.lock().unwrap_or_else(|e| e.into_inner()).len(), 1);
+}
+
+/// Мониторинг обязан переживать отравление мьютекса своей карты.
+///
+/// Иначе один заход с паникой в другом потоке оставлял бы весь прогон без
+/// фоновых корреляций: `spawn_monitor` звал `map.lock().unwrap()`.
+#[test]
+fn the_monitor_thread_survives_a_poisoned_map() {
+    use std::collections::BTreeMap as Map;
+
+    let map: Arc<Mutex<Map<u64, Vec<powerbench_windows::monitor::ProcessSample>>>> =
+        Arc::new(Mutex::new(Map::new()));
+    let poisoned = Arc::clone(&map);
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoned.lock().expect("первая блокировка обязана удаться");
+        panic!("отравляем карту до старта мониторинга");
+    })
+    .join();
+
+    let run = Arc::new(AtomicBool::new(true));
+    let handle = spawn_monitor(Arc::clone(&map), Arc::clone(&run));
+    std::thread::sleep(Duration::from_millis(1500));
+    run.store(false, Ordering::Relaxed);
+    // Поток обязан завершиться штатно: если бы он умер на панике, `join`
+    // вернул бы ошибку, и мы бы это увидели.
+    assert!(
+        handle.join().is_ok(),
+        "поток мониторинга умер на отравленном мьютексе"
+    );
+}
+    /// Регресс M35: дамп настроек схемы хранится один раз на схему, а не в
+    /// каждом прогоне.
+    ///
+    /// Чекпоинт переписывается целиком после каждого прогона. Дамп
+    /// `powercfg /query` писался в каждый прогон, поэтому при повторах в файле
+    /// накапливались копии одного и того же текста об одних и тех же настройках:
+    /// размер чекпоинта рос линейно по числу прогонов, хотя уникальных данных
+    /// в нём не прибавлялось. Итоговый JSON истории уносил эти копии с собой.
+    ///
+    /// Проверяем все три свойства: первая копия остаётся, повтор у той же схемы
+    /// убирается, а другая схема сохраняет свой дамп.
+    #[test]
+    fn a_scheme_dump_is_stored_once_per_scheme() {
+        let mut cp = checkpoint_on(None);
+        cp.runs.clear();
+
+        // Схема A: первый прогон — дамп нужен.
+        let mut a1 = minimal_stored_run();
+        a1.scheme_id = "AAAAAAAA-0000-0000-0000-000000000001".to_string();
+        a1.round = 1;
+        a1.scheme_dump = Some("НАСТРОЙКИ A".to_string());
+        let a1 = drop_duplicate_scheme_dump(&cp, a1);
+        assert!(
+            a1.scheme_dump.is_some(),
+            "первый прогон схемы обязан сохранить дамп: без него результат \
+             невоспроизводим"
+        );
+        cp.runs.push(a1);
+
+        // Тот же щит, второй раунд — тот же дамп, хранить его нечего.
+        let mut a2 = minimal_stored_run();
+        a2.scheme_id = "aaaaaaaa-0000-0000-0000-000000000001".to_string(); // другой регистр
+        a2.round = 2;
+        a2.scheme_dump = Some("НАСТРОЙКИ A".to_string());
+        let a2 = drop_duplicate_scheme_dump(&cp, a2);
+        assert!(
+            a2.scheme_dump.is_none(),
+            "дамп той же схемы сохранён повторно (и по нижнему регистру GUID — \
+             тоже): чекпоинт снова распух"
+        );
+        cp.runs.push(a2);
+
+        // Схема B — своя, её дамп обязан остаться.
+        let mut b1 = minimal_stored_run();
+        b1.scheme_id = "BBBBBBBB-0000-0000-0000-000000000002".to_string();
+        b1.round = 1;
+        b1.scheme_dump = Some("НАСТРОЙКИ B".to_string());
+        let b1 = drop_duplicate_scheme_dump(&cp, b1);
+        assert!(
+            b1.scheme_dump.is_some(),
+            "дамп другой схемы убран: это уже не дубликат"
+        );
+        cp.runs.push(b1);
+
+        // Итог: два уникальных дампа на четыре прогона, а не четыре копии.
+        let dumps = cp.runs.iter().filter(|r| r.scheme_dump.is_some()).count();
+        assert_eq!(dumps, 2, "в чекпоинте {dumps} дампов вместо двух");
+        assert_eq!(cp.runs.len(), 3);
+
+        // Ничего не потеряно: по любому GUID настроек восстановить можно.
+        for scheme in ["AAAAAAAA-0000-0000-0000-000000000001", "BBBBBBBB-0000-0000-0000-000000000002"] {
+            assert!(
+                cp.runs
+                    .iter()
+                    .any(|r| r.scheme_id.eq_ignore_ascii_case(scheme) && r.scheme_dump.is_some()),
+                "по GUID {scheme} настройки восстановить нельзя"
+            );
+        }
+    }
+
+    /// Регресс M35 (продолжение): размер сериализованного чекпоинта не должен
+    /// расти вместе с числом повторов одной схемы.
+    ///
+    /// Это и есть исходная жалоба: не «сколько полей», а сколько байт
+    /// переписывается после каждого прогона.
+    #[test]
+    fn checkpoint_size_does_not_grow_with_repeats_of_one_scheme() {
+        let dump = "x".repeat(4096);
+        let dump_len = dump.len();
+        let mut cp = checkpoint_on(None);
+        cp.runs.clear();
+
+        // Первый прогон схемы — с дампом.
+        let mut first = minimal_stored_run();
+        first.scheme_id = "AAAAAAAA-0000-0000-0000-000000000001".to_string();
+        first.round = 1;
+        first.scheme_dump = Some(dump.clone());
+        cp.runs.push(drop_duplicate_scheme_dump(&cp, first));
+        let with_first = serde_json::to_vec(&cp).expect("чекпоинт сериализуется").len();
+
+        // Пять повторов той же схемы — без дампа.
+        for round in 2..=6 {
+            let mut next = minimal_stored_run();
+            next.scheme_id = "AAAAAAAA-0000-0000-0000-000000000001".to_string();
+            next.round = round;
+            next.scheme_dump = Some(dump.clone());
+            cp.runs.push(drop_duplicate_scheme_dump(&cp, next));
+        }
+        let with_all = serde_json::to_vec(&cp).expect("чекпоинт сериализуется").len();
+
+        // Пять лишних прогонов не должны стоить шесть копий дампа: прирост
+        // заметно меньше одной копии.
+        let per_run = (with_all - with_first) / 5;
+        assert!(
+            per_run * 2 < dump_len,
+            "повтор схемы добавляет {per_run} байт — это заметная часть дампа \
+             в {dump_len} байт, копии снова пишутся"
+        );
+        // И дамп в файле ровно один.
+        let dumps = cp.runs.iter().filter(|r| r.scheme_dump.is_some()).count();
+        assert_eq!(dumps, 1);
+    }
+
+    /// Минимальный прогон для проверок, не касающихся его содержимого.
+    fn minimal_stored_run() -> StoredRun {
+        StoredRun {
+            key: "0:plan".to_string(),
+            round: 0,
+            scheme_id: String::new(),
+            scheme_name: None,
+            started_at_ns: 0,
+            duration_ms: 0,
+            ticks: 0,
+            supercycles: 0,
+            first_tick_checksums: [0; PHASES_PER_RUN as usize],
+            run_checksums: [0; PHASES_PER_RUN as usize],
+            phases: Vec::new(),
+            combined: zero_run_stats(),
+            cross_phase_consistency: 0.0,
+            burst_retention_percent: 0.0,
+            background: Vec::new(),
+            spike_windows: 0,
+            power: None,
+            scheme_dump: None,
+            background_cpu_p50: 0.0,
+            background_cpu_p95: 0.0,
+            background_sample_seconds: 0,
+            worker_count: 4,
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:test".to_string(),
+            config_hash: "cfg-test".to_string(),
+        }
+    }
+
+    fn checkpoint_with_runs(plan: SessionConfig, runs: &[(&str, u32)]) -> Checkpoint {
+        let mut cp = Checkpoint::new(plan);
+        for &(scheme, round) in runs {
+            cp.runs.push(StoredRun {
+                round,
+                scheme_id: scheme.to_string(),
+                ..minimal_stored_run()
+            });
+        }
+        cp
+    }
+
+    /// Регресс C9: ключ раунда ставится только когда покрыты ВСЕ схемы раунда.
+    ///
+    /// Раньше ключ попадал в `completed_keys` безусловно, сразу после выхода из
+    /// цикла по схемам. Раунд, где одна схема упала (план сменили извне, машина
+    /// не загрузилась, не нашлось валидных сэмплов), считался завершённым, и
+    /// при `resume` пропускался целиком: непокрытые схемы не перетестировались
+    /// никогда, а сессия выглядела завершённой.
+    #[test]
+    fn a_round_with_a_missing_scheme_is_not_marked_completed() {
+        let cp = checkpoint_with_runs(plan(), &[("a", 0), ("b", 0)]);
+        let order = order_of(&["a", "b", "c"]);
+        assert!(
+            !round_is_covered(&cp, 0, &order),
+            "раунд без схемы «c» помечен завершённым: resume её пропустит"
+        );
+
+        // Все три на месте — раунд закрыт.
+        let full = checkpoint_with_runs(plan(), &[("a", 0), ("b", 0), ("c", 0)]);
+        assert!(round_is_covered(&full, 0, &order));
+
+        // Бракованная схема покрыта: её не перетестируют, и это правильно.
+        let mut rejected = checkpoint_with_runs(plan(), &[("a", 0), ("b", 0)]);
+        rejected.rejections.insert("c".to_string(), "брак".to_string());
+        assert!(
+            round_is_covered(&rejected, 0, &order),
+            "забракованная схема считается непокрытой: её придётся мерить снова"
+        );
+    }
+
+    /// Регресс C9: прогон ДРУГОГО раунда не закрывает текущий.
+    ///
+    /// Иначе `resume`, у которого в точке есть прогоны поздних раундов, счёл бы
+    /// ранний раунд завершённым по чужим записям.
+    #[test]
+    fn runs_from_another_round_do_not_close_this_one() {
+        let cp = checkpoint_with_runs(plan(), &[("a", 1), ("b", 1)]);
+        let order = order_of(&["a", "b"]);
+        assert!(
+            !round_is_covered(&cp, 0, &order),
+            "прогоны раунда 1 закрыли раунд 0"
+        );
+        assert!(round_is_covered(&cp, 1, &order));
+    }
+
+    /// Ключ раунда ставится по результату проверки покрытия, а не безусловно.
+    #[test]
+    fn the_round_key_is_written_only_when_the_round_is_covered() {
+        let src = include_str!("session.rs");
+        let start = src
+            .find("fn run_session_loop(")
+            .expect("не найден run_session_loop");
+        let body = &src[start..];
+        let guard_at = body
+            .find("let round_covered = round_is_covered(checkpoint, round, &round_order_schemes);")
+            .expect("покрытие раунда не проверяется");
+        let push_at = body
+            .find("checkpoint.completed_keys.push(key.clone());")
+            .expect("не найдено добавление ключа раунда");
+        assert!(
+            guard_at < push_at,
+            "ключ раунда добавляется раньше проверки покрытия"
+        );
+    }
+
+    /// Незавершённый раунд исключает раннюю остановку (заметка из Волны 1).
+    ///
+    /// Раньше `done_rounds.max(round + 1)` засчитывал незавершённый раунд как
+    /// завершённый, и «осталось N раундов» в решении о досрочной остановке
+    /// показывалось неверно. Договорённость: пока часть плана не измерена,
+    /// останавливаться рано нельзя.
+    #[test]
+    fn completed_rounds_counts_only_rounds_with_a_key() {
+        let mut cp = Checkpoint::new(plan());
+        // Ничего не завершено.
+        assert_eq!(completed_rounds(&cp, 0, "c8-plan"), 0);
+        // Раунд 0 закрыт, раунд 1 — нет.
+        cp.completed_keys.push(run_key(0, "c8-plan"));
+        assert_eq!(completed_rounds(&cp, 0, "c8-plan"), 1);
+        assert_eq!(completed_rounds(&cp, 1, "c8-plan"), 1);
+        // Оба закрыты.
+        cp.completed_keys.push(run_key(1, "c8-plan"));
+        assert_eq!(completed_rounds(&cp, 1, "c8-plan"), 2);
+        // Ключ чужого плана не засчитывается.
+        cp.completed_keys.push(run_key(2, "other-plan"));
+        assert_eq!(
+            completed_rounds(&cp, 2, "c8-plan"),
+            2,
+            "чужой ключ попал в счётчик завершённых раундов"
+        );
+        // Ключ будущего раунда тоже не влияет на счёт за текущий.
+        cp.completed_keys.push(run_key(9, "c8-plan"));
+        assert_eq!(completed_rounds(&cp, 1, "c8-plan"), 2);
+    }
+
+    /// Ранняя остановка не должна срабатывать на незакрытом раунде.
+    ///
+    /// Проверяется по исходнику: решение о досрочной остановке принимается
+    /// внутри цикла раундов, куда без живого движка не попасть.
+    #[test]
+    fn an_incomplete_round_forbids_early_stop() {
+        let src = include_str!("session.rs");
+        let start = src
+            .find("fn run_session_loop(")
+            .expect("не найден run_session_loop");
+        let body = &src[start..];
+        let guard_at = body
+            .find("if !round_covered {")
+            .expect("незавершённый раунд не исключает раннюю остановку");
+        let decision_at = body
+            .find("crate::early_stop::early_stop_decision(")
+            .expect("не найдено решение о ранней остановке");
+        assert!(
+            guard_at < decision_at,
+            "решение о ранней остановке принимается до проверки покрытия раунда"
+        );
+        // Число завершённых раундов идёт из ключей точки, а не выводится из
+        // номера итерации (сама арифметика — в `completed_rounds`).
+        let between = &body[guard_at..decision_at];
+        assert!(
+            between.contains("completed_rounds(checkpoint, round, &plan.plan_guid)"),
+            "число завершённых раундов не берётся из ключей точки"
+        );
+    }
+
+    /// Регресс H3: прогон без валидных сэмплов обязан быть опознан как
+    /// несостоявшийся.
+    ///
+    /// `run_stats` возвращает `None`, и раньше подставлялся `RunStats` из нулей.
+    /// Такой прогон попадал в чекпоинт как обычный: нули тянули среднее и σ
+    /// схемы к нулю, а сама схема ранжировалась наравне с честно измеренными.
+    #[test]
+    fn a_run_without_valid_samples_is_not_treated_as_a_measurement() {
+        let stats = run_stats(&[]);
+        assert!(stats.is_none(), "пустая выборка обязана давать None");
+        let zeros = stats.unwrap_or_else(zero_run_stats);
+        assert_eq!(
+            zeros.samples, 0,
+            "прогон без сэмплов не отличить от настоящего измерения"
+        );
+        assert_eq!(zeros.average_throughput, 0.0);
+
+        // И наоборот: прогон с данными — это измерение с положительным средним,
+        // и никакой нулевой маркер на нём не должен срабатывать.
+        let real = run_stats(&[1.0, 2.0, 1.5]).expect("есть валидные сэмплы");
+        assert!(real.samples > 0, "валидные сэмплы не опознаны");
+        assert!(real.average_throughput > 0.0);
+        assert_ne!(real.average_throughput, zeros.average_throughput);
+    }
+
+    /// Нулевой прогон обязан отбрасываться до записи в чекпоинт.
+    ///
+    /// Иначе нули попадут в агрегат и испортят среднее и σ всей схемы.
+    #[test]
+    fn a_run_with_zero_samples_is_skipped_before_being_stored() {
+        let src = include_str!("session.rs");
+        let start = src
+            .find("let combined = run_stats(&all_times)")
+            .expect("не найден расчёт объединённой статистики");
+        let body = &src[start..];
+        let end = body
+            .find("if let Some(run) = run_outcome {")
+            .expect("не найдена запись прогона в чекпоинт");
+        let build = &body[..end];
+        let guard_at = build
+            .find("if combined.samples == 0 {")
+            .expect("нулевой прогон не отбрасывается");
+        assert!(
+            build[guard_at..].contains("continue 'scheme"),
+            "нулевой прогон обязан уйти из цикла по схемам, а не быть записан"
+        );
+        assert!(
+            !build[guard_at..].contains("build_stored_run"),
+            "нулевой прогон всё равно попал в чекпоинт"
+        );
+    }
+
+    /// Регресс H41: подпись условий запуска обязана ловить расхождение.
+    ///
+    /// Именно на этом держался дефект: `StoredRun` условий не содержал, и
+    /// `resume` с другим числом воркеров перештамповывал старые прогоны
+    /// подписью текущего движка — в одном отчёте оказывались числа, измеренные
+    /// при разных условиях.
+    #[test]
+    fn run_conditions_mismatch_names_the_field_that_differs() {
+        let base = LaunchConditions {
+            worker_count: 4,
+            affinity_mode: "p-only".to_string(),
+            affinity_signature: "p-only:0,1,2,3".to_string(),
+            config_hash: "cfg-a".to_string(),
+        };
+        assert_eq!(
+            base.first_difference(&base),
+            None,
+            "своя подпись сравнивается с собой"
+        );
+
+        // Порядок влияния на величину: сначала число воркеров.
+        let other_workers = LaunchConditions {
+            worker_count: 8,
+            ..base.clone()
+        };
+        let diff = other_workers
+            .first_difference(&base)
+            .expect("разное число воркеров не замечено");
+        assert!(diff.contains("воркер"), "{diff}");
+
+        let other_affinity = LaunchConditions {
+            affinity_signature: "p-only:0,2,4,6".to_string(),
+            ..base.clone()
+        };
+        let diff = other_affinity
+            .first_difference(&base)
+            .expect("разная привязка не замечена");
+        assert!(diff.contains("привязк"), "{diff}");
+
+        let other_config = LaunchConditions {
+            config_hash: "cfg-b".to_string(),
+            ..base.clone()
+        };
+        let diff = other_config
+            .first_difference(&base)
+            .expect("разная конфигурация не замечена");
+        assert!(diff.contains("конфигурац"), "{diff}");
+
+        // Условия, которых нет ни у кого, — это не расхождение: старые точки
+        // читаются, а не отвергаются.
+        let unknown = LaunchConditions {
+            worker_count: 0,
+            affinity_mode: String::new(),
+            affinity_signature: String::new(),
+            config_hash: String::new(),
+        };
+        assert_eq!(
+            unknown.first_difference(&base),
+            None,
+            "отсутствующие условия объявлены расхождением: старые точки \
+             перестанут читаться"
+        );
+    }
+
+    /// Точки, записанные прошлой версией, условий не содержат и обязаны
+    /// продолжать читаться — иначе волна обновлений ломает все старые сессии.
+    #[test]
+    fn a_checkpoint_without_launch_conditions_still_resumes() {
+        let mut old = minimal_stored_run();
+        old.worker_count = 0;
+        old.affinity_mode = String::new();
+        old.affinity_signature = String::new();
+        old.config_hash = String::new();
+        assert!(
+            !old.has_launch_conditions(),
+            "старая точка не должна считаться хранящей условия"
+        );
+        assert_eq!(old.launch_conditions().worker_count, 0);
+
+        // И десериализация старого JSON не падает: полей нет вовсе, `default`
+        // подставляет нули и пустые строки.
+        let legacy = r#"{
+            "key": "0:plan",
+            "round": 0,
+            "scheme_id": "s1",
+            "started_at_ns": 0,
+            "duration_ms": 1000,
+            "ticks": 100,
+            "supercycles": 0,
+            "first_tick_checksums": [1, 2, 3, 4],
+            "run_checksums": [1, 2, 3, 4],
+            "phases": [],
+            "combined": {"samples": 10, "samples_raw": 10, "excluded_fraction": 0.0,
+                "work_units": 10, "active_time_ms_total": 2.0, "average_throughput": 5000.0,
+                "average_execution_time_ms": 0.2, "median_throughput": 5000.0,
+                "p1_throughput": 5000.0, "p01_throughput": 5000.0,
+                "p95_execution_time_ms": 0.2, "p99_execution_time_ms": 0.2,
+                "consistency_percent": 100.0, "jitter_p99_ms": 0.0},
+            "cross_phase_consistency": 100.0,
+            "burst_retention_percent": 100.0,
+            "background": [],
+            "spike_windows": 0
+        }"#;
+        let back: StoredRun = serde_json::from_str(legacy).expect("старый формат читается");
+        assert_eq!(back.worker_count, 0);
+        assert!(back.config_hash.is_empty());
+        assert!(!back.has_launch_conditions());
+
+        // Проверка на движке такие прогоны пропускает: неизвестные условия —
+        // не повод отказывать в продолжении.
+        let engine = Engine::new(Some(4));
+        assert!(
+            run_conditions_mismatch(&[old], &engine).is_none(),
+            "старая точка без условий блокирует продолжение сессии"
+        );
+    }
+
+    /// А вот расхождение условий блокировать обязано.
+    #[test]
+    fn a_checkpoint_with_other_conditions_blocks_resume() {
+        let engine = Engine::new(Some(4));
+        let now = current_run_conditions(&engine);
+
+        let mut mismatched = minimal_stored_run();
+        mismatched.worker_count = now.worker_count + 4;
+        mismatched.config_hash = "cfg-other".to_string();
+        let err = run_conditions_mismatch(&[mismatched], &engine)
+            .expect("чужие условия продолжения не замечены");
+        let text = format!("{err}");
+        assert!(text.contains("других условиях запуска"), "{text}");
+        assert!(text.contains("воркеров"), "{text}");
+        assert!(
+            text.contains("начните новую сессию"),
+            "пользователю нужно сказать, что делать: {text}"
+        );
+
+        // Совпадающие условия продолжению не мешают.
+        let same = StoredRun {
+            worker_count: now.worker_count,
+            affinity_mode: now.affinity_mode.clone(),
+            affinity_signature: now.affinity_signature.clone(),
+            config_hash: now.config_hash.clone(),
+            ..minimal_stored_run()
+        };
+        assert!(
+            run_conditions_mismatch(&[same], &engine).is_none(),
+            "прогон, сделанный при тех же условиях, блокирует продолжение"
+        );
+    }
+
+    /// Каждый записанный прогон обязан нести условия запуска: иначе проверка
+    /// при `resume` не увидит расхождения, потому что сведёт его «ни к чему».
+    #[test]
+    fn stored_runs_always_carry_launch_conditions() {
+        let src = include_str!("session.rs");
+        let start = src
+            .find("fn build_stored_run(")
+            .expect("не найдена build_stored_run");
+        let body = &src[start..];
+        let end = body
+            .find("\n/// Итог агрегации")
+            .expect("не найден конец build_stored_run");
+        let body = &body[..end];
+        for field in [
+            "worker_count: conditions.worker_count",
+            "affinity_mode: conditions.affinity_mode",
+            "affinity_signature: conditions.affinity_signature",
+            "config_hash: conditions.config_hash",
+        ] {
+            assert!(
+                body.contains(field),
+                "StoredRun не сохраняет {field}: resume перештампует прогон подписью \
+                 текущего движка"
+            );
+        }
     }
 }

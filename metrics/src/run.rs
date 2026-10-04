@@ -54,6 +54,23 @@ pub fn consistency_score(throughput: &[f64]) -> f64 {
     (100.0 - variation).clamp(0.0, 100.0)
 }
 
+/// Вклад одной группы сэмплов в ConsistencyPercent прогона.
+///
+/// Отдаёт пару `(score стабильности, вес)`, где вес — число валидных
+/// сэмплов группы. Итог — взвешенное среднее score по фазам.
+///
+/// Считается по НЕУСЕЧЁННЫМ валидным сэмплам: усечение 2,5 % по краям
+/// применяется к перцентилям и к `RunStats.consistency_percent` фазы, но
+/// сглаживание ConsistencyPercent прогона по ним искажало бы картину.
+pub fn consistency_group(times_ms: &[f64]) -> (f64, f64) {
+    // Фильтр первым: 1000/0 или 1000/NaN дали бы inf/NaN в скор.
+    let throughput: Vec<f64> = filter_valid_times(times_ms)
+        .iter()
+        .map(|ms| 1000.0 / ms)
+        .collect();
+    (consistency_score(&throughput), throughput.len() as f64)
+}
+
 /// ConsistencyPercent прогона с группами по фазам: в каждой фазе считается
 /// score стабильности, итог — взвешенное среднее score по числу сэмплов фаз.
 ///
@@ -63,13 +80,8 @@ pub fn consistency_percent(times_by_phase: &[(u32, &[f64])]) -> f64 {
     let mut weighted = 0.0;
     let mut total_weight = 0.0;
     for &(_, times) in times_by_phase {
-        // Фильтр первым: 1000/0 или 1000/NaN дали бы inf/NaN в скор.
-        let throughput: Vec<f64> = filter_valid_times(times)
-            .iter()
-            .map(|ms| 1000.0 / ms)
-            .collect();
-        let n = throughput.len() as f64;
-        weighted += n * consistency_score(&throughput);
+        let (score, n) = consistency_group(times);
+        weighted += n * score;
         total_weight += n;
     }
     if total_weight == 0.0 {
@@ -81,6 +93,12 @@ pub fn consistency_percent(times_by_phase: &[(u32, &[f64])]) -> f64 {
 
 /// TickJitterP99Ms: перцентиль 0.99 попарных разностей времён соседних тиков.
 /// Если данных нет (меньше двух сэмплов) — 0 (спецификация).
+///
+/// ВАЖНО: на входе ожидается **хронологический** порядок. Разности берутся между
+/// соседями во времени, и это единственное, что делает метрику джиттером.
+/// Сортированный набор здесь даёт почти нули: разность соседей в отсортированном
+/// массиве равна зазору между соседними значениями, то есть плотности выборки, а
+/// не скачку времени тика (регресс C10 — занижение на порядки).
 pub fn jitter_p99_ms(times_ms: &[f64]) -> f64 {
     let times = filter_valid_times(times_ms);
     if times.len() < 2 {
@@ -133,6 +151,11 @@ pub const MAX_TRIM_FRACTION: f64 = 0.25;
 /// `Σwork·1000 / ΣactiveMs`, и чтобы убрать одно плохое событие, надо убрать
 /// его время работы из знаменателя. Отбрасывание сэмпла по throughput
 /// испортило бы соответствие между числом работы и суммой времени.
+///
+/// ВАЖНО: результат **отсортирован по возрастанию** — это нужно перцентилям и
+/// среднему. Хронологический порядок при этом теряется, поэтому метрики
+/// времени по соседям (джиттер) обязаны считаться по исходной выборке, а не по
+/// этому массиву.
 pub fn trim_outliers(times_ms: &[f64], fraction: f64) -> Vec<f64> {
     let mut sorted = times_ms.to_vec();
     if sorted.len() < MIN_TRIM_SAMPLES || !(0.0..=MAX_TRIM_FRACTION).contains(&fraction) {
@@ -159,12 +182,32 @@ pub const P01_WINDOW_MS: u64 = 100;
 /// Окно для расчёта худшей секунды.
 pub const WORST_SECOND_WINDOW_MS: u64 = 1000;
 
+/// Во сколько раз окно должно быть хуже типичного, чтобы сохранить его без
+/// оглядки на число сэмплов (регресс M1).
+///
+/// Порог в 2 раза — с запасом: речь о заведомо выбросном окне, а не о шуме
+/// между соседними окнами одной фазы.
+const STALL_KEEP_RATIO: f64 = 0.5;
+
 /// Throughput по скользящим окнам кумулятивного времени.
 ///
 /// Окна идут по НАКОПЛЕННОМУ времени, а не по длительности тика: иначе все
 /// тики короче окна попали бы в нулевое окно. Окна с малым числом сэмплов
 /// отбрасываются — иначе последнее неполное окно дало бы шумную оценку из
 /// двух точек, и «худшая секунда» зависела бы от того, где закончилась фаза.
+///
+/// Регресс M1: это отбрасывание съедало МИКРОФРИЗЫ, то есть ровно то, ради чего
+/// окна и считаются. Задержка длиной в десятки миллисекунд при обычном тике
+/// в доли миллисекуды занимает почти всё своё окно целиком: в него попадает
+/// один-единственный сэмпл, `min_samples` его отбрасывал, и худший момент
+/// фазы исчезал из `p01_throughput` и `worst_second_throughput`. Метрика,
+/// обещанная как «ловушка кратковременной остановки», показывала норму.
+///
+/// Поэтому число сэмплов — не единственный повод оставить окно: если окно
+/// заметно ХУЖЕ типичного (см. [`STALL_KEEP_RATIO`]), оно сохраняется всегда.
+/// Оценка такого окна шумной не является — её определило время, а не
+/// количество точек. Порог относительный, поэтому сам по себе не требует
+/// подгонки под конкретную машину или workload.
 pub fn windowed_throughput(times_ms: &[f64], window_ms: u64, min_samples: usize) -> Vec<f64> {
     let times = filter_valid_times(times_ms);
     if times.is_empty() || window_ms == 0 {
@@ -182,10 +225,28 @@ pub fn windowed_throughput(times_ms: &[f64], window_ms: u64, min_samples: usize)
         e.0 += 1;
         e.1 += ms;
     }
-    buckets
+    // Оценка throughput каждого окна, у которого есть хоть один валидный
+    // сэмпл. Считаем ДО фильтра: типичный уровень нужен, чтобы решить, какие
+    // окна являются выбросами.
+    let all: Vec<(usize, f64)> = buckets
         .values()
-        .filter(|(work, active_ms)| *work as usize >= min_samples && *active_ms > 0.0)
-        .map(|(work, active_ms)| *work as f64 * 1000.0 / active_ms)
+        .filter_map(|(work, active_ms)| {
+            if *active_ms <= 0.0 || *work == 0 {
+                return None;
+            }
+            let tp = *work as f64 * 1000.0 / *active_ms;
+            tp.is_finite().then_some((*work as usize, tp))
+        })
+        .collect();
+    if all.is_empty() {
+        return Vec::new();
+    }
+    let typical = median(&all.iter().map(|(_, tp)| *tp).collect::<Vec<f64>>());
+    all.into_iter()
+        .filter_map(|(work, tp)| {
+            let keep = work >= min_samples || (typical > 0.0 && tp < typical * STALL_KEEP_RATIO);
+            keep.then_some(tp)
+        })
         .collect()
 }
 
@@ -251,8 +312,14 @@ pub struct RunStats {
     /// AverageExecutionTimeMs = (Σ activeMs) / (Σ work).
     pub average_execution_time_ms: f64,
     /// MedianThroughput = перцентиль 0.50 от throughput сэмплов.
+    ///
+    /// Медиана — по УСЕЧЁННОМУ набору: это устойчивая оценка положения центра
+    /// распределения, и именно она выбирает лидера.
     pub median_throughput: f64,
     /// P1Throughput = перцентиль 0.01 от throughput сэмплов.
+    ///
+    /// По ПОЛНОМУ набору валидных сэмплов, как P01/P95/P99 и худшая секунда.
+    /// Усечение 2,5 % с каждого края сдвигало бы сюда 3,5-й перцентиль.
     pub p1_throughput: f64,
     /// P01Throughput = 0,1-й перцентиль по ОКНАМ в 100 мс.
     ///
@@ -265,6 +332,9 @@ pub struct RunStats {
     /// ConsistencyPercent прогона (сэмплы одной фазы = одна группа).
     pub consistency_percent: f64,
     /// TickJitterP99Ms.
+    ///
+    /// Считается по полной хронологической выборке: разности берутся между
+    /// соседними во времени тиками.
     pub jitter_p99_ms: f64,
     /// Худшая секунда: минимум AverageThroughput среди 1-секундных окон.
     #[serde(default)]
@@ -275,7 +345,7 @@ pub struct RunStats {
 ///
 /// Расчёт идёт по УСЕЧЁННОМУ набору: 2,5 % худших и столько же лучших
 /// сэмплов отбрасываются, и только потом считаются среднее, σ и стабильность.
-/// Метрики, смысл которых в экстремуме (P01, P95, P99, худшая секунда),
+/// Метрики, смысл которых в экстремуме (P01, P95, P99, джиттер, худшая секунда),
 /// считаются по ПОЛНОМУ набору — иначе усечение съело бы ровно то, что они
 /// измеряют.
 pub fn run_stats(times_ms: &[f64]) -> Option<RunStats> {
@@ -303,6 +373,17 @@ pub fn run_stats(times_ms: &[f64]) -> Option<RunStats> {
     let mut all_times_sorted = valid.clone();
     all_times_sorted.sort_by(|a, b| a.total_cmp(b));
 
+    // P1 — тоже по ПОЛНОМУ набору, и это не опечатка, а смысл метрики.
+    //
+    // Раньше P1 считался по усечённому набору, а усечение снимает по 2,5 % с
+    // каждого края: 1-й перцентиль усечённого распределения — это 3,5-й
+    // перцентиль полного. Метрика, обещанная как «худший 1 % тиков», молча
+    // показывала 3,5-й процентиль и завышала его тем сильнее, чем короче
+    // был набор (усечение не работает вовсе при < 400 сэмплов — там разрыв
+    // между полным и усечённым набором максимален).
+    let mut all_throughput_sorted: Vec<f64> = valid.iter().map(|ms| 1000.0 / ms).collect();
+    all_throughput_sorted.sort_by(|a, b| a.total_cmp(b));
+
     Some(RunStats {
         samples,
         samples_raw,
@@ -316,12 +397,16 @@ pub fn run_stats(times_ms: &[f64]) -> Option<RunStats> {
         average_throughput,
         average_execution_time_ms,
         median_throughput: percentile_sorted(&throughput, 0.50),
-        p1_throughput: percentile_sorted(&throughput, 0.01),
+        p1_throughput: percentile_sorted(&all_throughput_sorted, 0.01),
         p01_throughput: p01_throughput(&valid),
         p95_execution_time_ms: percentile_sorted(&all_times_sorted, 0.95),
         p99_execution_time_ms: percentile_sorted(&all_times_sorted, 0.99),
         consistency_percent: consistency_percent(&[(0, &times)]),
-        jitter_p99_ms: jitter_p99_ms(&times),
+        // Джиттер — по ХРОНОЛОГИЧЕСКОЙ выборке `valid`, а не по усечённому
+        // `times`: усечение сортирует массив, и разности соседей в нём — это
+        // зазоры между соседними значениями, то есть плотность выборки, а не
+        // скачки времени тика (регресс C10 — занижение на 3-4 порядка).
+        jitter_p99_ms: jitter_p99_ms(&valid),
         worst_second_throughput: worst_second_throughput(&valid),
     })
 }
@@ -631,6 +716,8 @@ mod tests {
     /// Окна с малым числом сэмплов отбрасываются: неполное последнее окно
     /// дало бы «худшую секунду» из двух точек, и величина зависела бы от того,
     /// где закончилась фаза.
+    ///
+    /// Оговорка: хуже типичного окно всё равно остаётся — см. регресс M1 ниже.
     #[test]
     fn windows_without_enough_samples_are_dropped() {
         // 9 тиков по 10 мс: первое окно полное (10 сэмплов), второе — 9,
@@ -642,5 +729,278 @@ mod tests {
             strict.is_empty(),
             "порог выше числа сэмплов отбрасывает всё"
         );
+    }
+
+/// Регресс M1: микрофриз не должен исчезать из-за фильтра `min_samples`.
+    ///
+    /// Задержка, занявшая окно целиком, попадает в него В ОДИН-ЕДИНСТВЕННЫЙ
+    /// сэмпл: соседние быстрые тики уже отнесены к другим окнам, и следующий
+    /// тик перескакивает через границу. Фильтр «мало сэмплов — окно вон» его
+    /// отбрасывал, и P01 показывал норму вместо провала: метрика, обещанная
+    /// как ловушка кратковременной остановки, молчала именно о ней.
+    ///
+    /// Сценарий правдоподобный: тик 25 мс (40 тик/с) — это как раз тот случай,
+    /// когда в 100-мс окне всего четыре сэмпла, то есть когда фильтр и умеет
+    /// отбрасывать. Задержка 80 мс после ровно четырёх тиков приходится на
+    /// начало окна и остаётся в нём одна.
+    #[test]
+    fn a_micro_freeze_survives_the_min_samples_filter() {
+        const TICK_MS: f64 = 20.0;
+        const FREEZE_MS: f64 = 80.0;
+        let typical = 1000.0 / TICK_MS;
+
+        let mut times = vec![TICK_MS; 400];
+        times[4] = FREEZE_MS; // ровно на границе окна: elapsed = 100 мс
+
+        let windows = windowed_throughput(&times, P01_WINDOW_MS, 5);
+        let worst = windows.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            worst < typical * STALL_KEEP_RATIO,
+            "окно с микрофризом отброшено: худшее окно {worst} тик/с при типичных {typical:.0}"
+        );
+
+        // Контроль: без задержки те же окна дают ровно типичный уровень. Значит
+        // падение ниже вызвано именно микрофризом, а не тем, что окна с малым
+        // числом сэмплов вдруг стали попадать в выборку всегда.
+        let control = windowed_throughput(&vec![TICK_MS; 400], P01_WINDOW_MS, 5);
+        let control_worst = control.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            (control_worst - typical).abs() < 1e-6,
+            "контроль: ровная фаза должна давать типичный уровень, получено {control_worst}"
+        );
+        assert!(
+            worst < control_worst / 2.0,
+            "микрофриз не изменил худшее окно: {worst} против {control_worst}"
+        );
+
+        let p01 = p01_throughput(&times);
+        assert!(
+            p01 < typical * STALL_KEEP_RATIO,
+            "P01 не увидел микрофриз: {p01} при типичных {typical:.0}"
+        );
+    }
+
+    /// Регресс M1 для «худшей секунды»: там окно в десять раз крупнее, а
+    /// задержка — того же порядка, что и весь обычный тик, и она снова
+    /// оказывается одна в своём окне.
+    #[test]
+    fn a_long_stall_survives_the_filter_for_the_worst_second() {
+        const TICK_MS: f64 = 20.0;
+        const STALL_MS: f64 = 800.0;
+        let typical = 1000.0 / TICK_MS;
+
+        let mut times = vec![TICK_MS; 400];
+        times[50] = STALL_MS; // elapsed = 1000 мс, начало окна в 1 с
+
+        let windows = windowed_throughput(&times, WORST_SECOND_WINDOW_MS, 20);
+        let worst = windows.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            worst < typical * STALL_KEEP_RATIO,
+            "окно с остановкой отброшено: худшая секунда {worst} тик/с при типичных {typical:.0}"
+        );
+
+        let worst_second = worst_second_throughput(&times);
+        assert!(
+            worst_second < typical * STALL_KEEP_RATIO,
+            "худшая секунда не увидела остановку: {worst_second} при типичных {typical:.0}"
+        );
+    }
+
+    /// Обратная сторона: filter не должен сохранять окна, которые не хуже
+    /// типичного. Иначе «микрофризом» станет любой неполный хвост фазы, и
+    /// P01 перестанет зависеть от того, где закончилась фаза.
+    #[test]
+    fn an_ordinary_tail_window_is_not_mistaken_for_a_stall() {
+        // Медленная, но ровная фаза: 20 мс на тик, окно 100 мс, порог 5.
+        // В окно попадает ровно 5 сэмплов, окно обычное, выбросов нет.
+        let even = vec![20.0f64; 50];
+        let windows = windowed_throughput(&even, P01_WINDOW_MS, 5);
+        assert!(
+            windows.iter().all(|w| (w - 50.0).abs() < 1e-9),
+            "окна ровной фазы искажены: {windows:?}"
+        );
+        // Неполный хвост (5 сэмплов по 20 мс = 100 мс, затем 2 тика) не должен
+        // ни добавлять окно с выбросом, ни выбрасывать настоящие.
+        let mut tail = even.clone();
+        tail.extend_from_slice(&[20.0, 20.0]);
+        let with_tail = windowed_throughput(&tail, P01_WINDOW_MS, 5);
+        let plain_tp = with_tail
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            (plain_tp - 50.0).abs() < 1e-9,
+            "хвост фазы изменил худшее окно: {plain_tp} при типичных 50"
+        );
+    }
+
+    /// Регресс H1: P1 обязан считаться по ПОЛНОЙ выборке.
+    ///
+    /// Усечение снимает по 2,5 % с каждого края ВРЕМЁН, поэтому 1-й перцентиль
+    /// throughput усечённого набора — это 3,5-й перцентиль полного. Метрика,
+    /// обещанная как «худший 1 % тиков», показывала совсем другую величину и
+    /// завышала её.
+    ///
+    /// Серия линейно-градуирована по времени: времена 1.000 … 10.999 мс, значит
+    /// throughput строго убывает, и оба ответа можно посчитать руками.
+    #[test]
+    fn p1_is_taken_from_the_full_sample_not_from_the_trimmed_one() {
+        let n = 10_000usize;
+        let times: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 0.001).collect();
+        let stats = run_stats(&times).expect("есть валидные сэмплы");
+        assert!(
+            stats.samples < n,
+            "тест бессмысленен без усечения: {} из {}",
+            stats.samples,
+            n
+        );
+
+        // По возрастанию throughput элемент с индексом i — это время
+        // `10.999 − i·0.001`, то есть МЕДЛЕННЫЕ тики.
+        let throughput_at = |i: f64| 1000.0 / (10.999 - i * 0.001);
+        let interp = |pos: f64| {
+            let (lo, frac) = (pos.floor(), pos - pos.floor());
+            throughput_at(lo) + (throughput_at(lo + 1.0) - throughput_at(lo)) * frac
+        };
+
+        // Полный набор: pos = 0.01 · 9999 = 99.99.
+        let from_full = interp(99.99);
+        assert!(
+            (stats.p1_throughput - from_full).abs() < 1e-6,
+            "P1 = {} вместо 1-го перцентиля полного набора ({from_full})",
+            stats.p1_throughput
+        );
+
+        // Усечённый набор: отброшено по 250 с краёв (всего 9500), его индекс j
+        // — это индекс 250 + j полного. pos = 0.01 · 9499 = 94.99.
+        let from_trimmed = interp(250.0 + 94.99);
+        assert!(
+            (stats.p1_throughput - from_trimmed).abs() > 1.0,
+            "P1 посчитан по усечённому набору: {} (3,5-й перцентиль = {from_trimmed})",
+            stats.p1_throughput
+        );
+        // И P1 ниже медианы: худшие тики он по-прежнему видит.
+        assert!(stats.p1_throughput < stats.median_throughput);
+    }
+
+    /// Регресс H1 на настоящих данных замера: P1 обязан видеть медленный хвост,
+    /// иначе он неотличим от p50 и перестаёт быть нижней границей диапазона.
+    #[test]
+    fn p1_still_sees_the_slow_tail() {
+        // 2 % самых медленных тиков по 20 мс среди тиков по 0,2 мс.
+        let with_outliers = realistic_series(10_000, 50, 20.0);
+        let stats = run_stats(&with_outliers).expect("есть валидные сэмплов");
+        assert_eq!(stats.samples_raw, 10_000);
+        assert!(
+            stats.p1_throughput < stats.median_throughput * 0.9,
+            "P1 = {} не отличается от медианы {} — хвост не виден",
+            stats.p1_throughput,
+            stats.median_throughput
+        );
+    }
+
+    /// На коротких сериях усечения нет вовсе, поэтому P1 обязан совпадать с
+    /// расчётом по полному набору — регресс H1 не должен ломать малые данные.
+    #[test]
+    fn p1_on_short_series_is_the_full_sample_percentile() {
+        let short: Vec<f64> = (0..50).map(|i| 1.0 + i as f64 * 0.01).collect();
+        let stats = run_stats(&short).expect("есть валидные сэмплы");
+        assert_eq!(stats.samples, short.len());
+        let mut by_hand = short.clone();
+        by_hand.sort_by(|a, b| a.total_cmp(b));
+        let mut throughput: Vec<f64> = by_hand.iter().map(|ms| 1000.0 / ms).collect();
+        throughput.sort_by(|a, b| a.total_cmp(b));
+        assert_eq!(stats.p1_throughput, percentile_sorted(&throughput, 0.01));
+    }
+
+    // ------------------------------------------------------------------
+    // Регресс C10 / M10: джиттер по хронологическим соседям
+    // ------------------------------------------------------------------
+
+    /// Регресс C10: джиттер обязан считаться по хронологической выборке.
+    ///
+    /// `trim_outliers` возвращает **отсортированный** массив. Если посчитать по
+    /// нему разности соседей, они окажутся зазорами между соседними значениями,
+    /// то есть плотностью выборки. Для тиков по 0,2 мс это ~1e-5 мс вместо
+    /// настоящих скачков — занижение на порядки.
+    #[test]
+    fn jitter_is_not_computed_on_a_sorted_array() {
+        let n = 10_000usize;
+        // Тики по 0,2 мс, каждый 50-й — 20 мс: 2 % выбросов, то есть около 4 %
+        // соседних пар. Этого достаточно, чтобы 99-й перцентиль разностей
+        // попал именно в хвост, а не стоял ровно на его границе.
+        let series = realistic_series(n, 50, 20.0);
+        let stats = run_stats(&series).expect("есть валидные сэмплы");
+        assert!(
+            stats.samples < n,
+            "усечение должно сработать, иначе тест не проверяет порядок: {}",
+            stats.samples
+        );
+
+        // Настоящий хвост джиттера: разности вида |19.8 − 0.2| = 19.8 мс.
+        assert!(
+            stats.jitter_p99_ms > 1.0,
+            "джиттер {} не видит скачков времени тика — посчитан по отсортированному набору",
+            stats.jitter_p99_ms
+        );
+        // И он на порядки больше, чем зазор между соседями в отсортированном
+        // массиве: 0,2 мс на 10 000 сэмплов даёт ~2e-5 мс.
+        let sorted_gap = {
+            let trimmed = trim_outliers(&filter_valid_times(&series), TRIM_FRACTION);
+            let mut diffs: Vec<f64> = trimmed.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+            diffs.sort_by(|a, b| a.total_cmp(b));
+            let at = (0.99 * (diffs.len() - 1) as f64) as usize;
+            diffs[at]
+        };
+        assert!(
+            stats.jitter_p99_ms > sorted_gap * 1000.0,
+            "джиттер {} всего лишь в тысячу раз больше зазора {} — похоже на старую ошибку",
+            stats.jitter_p99_ms,
+            sorted_gap
+        );
+    }
+
+    /// Джиттер по возрастающему ряду ровно ноль: соседи во времени не отличаются.
+    ///
+    /// Это же значение даёт и отсортированный набор — потому и ловится только
+    /// на данных со скачками. Но на монотонном ряде метрика обязана быть нулём,
+    /// то есть наивная сортировка не может «сработать» вместо хронологии.
+    #[test]
+    fn jitter_of_a_smooth_series_is_zero() {
+        let smooth: Vec<f64> = (0..1000).map(|_| 0.2).collect();
+        let stats = run_stats(&smooth).expect("есть валидные сэмплы");
+        assert!(
+            stats.jitter_p99_ms < 1e-12,
+            "гладкий ряд дал джиттер {}",
+            stats.jitter_p99_ms
+        );
+    }
+
+    /// Хронологический скачок обязан попасть в джиттер: два тика 0,2 мс,
+    /// затем один 20 мс, затем снова 0,2 мс — соседние различия 19,8 мс.
+    ///
+    /// Усечение здесь не срабатывает (< 400 сэмплов), поэтому проверка
+    /// изолирует именно хронологию: если бы массив сортировали, скачок
+    /// оказался бы в хвосте и соседних различий не дал.
+    #[test]
+    fn jitter_sees_a_single_chronological_spike() {
+        // Тики по 0,2 мс, каждый 10-й — 20 мс. Хвост занимает 10 % соседних
+        // пар, то есть заметно выше 1 %: 99-й перцентиль обязан в него попасть.
+        //
+        // Отдельный случай с одним скачком проверить нельзя: 2 выбросные пары
+        // из 200 — это ровно 1 %, и 99-й перцентиль стоит на границе хвоста.
+        let series: Vec<f64> = (0..200)
+            .map(|i| if i % 10 == 0 { 20.0 } else { 0.2 })
+            .collect();
+        let stats = run_stats(&series).expect("есть валидные сэмплы");
+        assert!(
+            stats.jitter_p99_ms > 19.0,
+            "хронологические скачки 19,8 мс не попали в джиттер (получено {})",
+            stats.jitter_p99_ms
+        );
+
+        // По хронологии на каждом «выбросном» тике разность со следующим равна
+        // 19,8 мс — это и есть то, что джиттер обязан показать.
+        assert!((jitter_p99_ms(&series) - 19.8).abs() < 1e-9);
     }
 }

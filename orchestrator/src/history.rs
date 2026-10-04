@@ -329,13 +329,11 @@ pub fn sanitize_for_filename(name: &str) -> String {
     // такой файл не создаётся, а экспорт молча падает (или, что хуже, уводит
     // запись на устройство), поэтому имя префиксуется.
     let stem = safe.split('.').next().unwrap_or_default();
-    let reserved = ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
-        "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",
-        "LPT9"];
-    if reserved
-        .iter()
-        .any(|r| stem.eq_ignore_ascii_case(r))
-    {
+    let reserved = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if reserved.iter().any(|r| stem.eq_ignore_ascii_case(r)) {
         return format!("схема-{safe}");
     }
     safe
@@ -953,7 +951,11 @@ mod tests {
         }
         // Обычные значения не трогаем, иначе CSV станет нечитаемым.
         for value in ["", "План Один", "GamingCpuV1", "s1", "0", "1e-3"] {
-            assert_eq!(csv_field(value), value, "обычное значение искажено: {value:?}");
+            assert_eq!(
+                csv_field(value),
+                value,
+                "обычное значение искажено: {value:?}"
+            );
         }
     }
 
@@ -1039,7 +1041,11 @@ mod tests {
             let stem = sanitize_for_filename(reserved);
             assert!(
                 !stem.eq_ignore_ascii_case(reserved)
-                    && !stem.split('.').next().unwrap_or_default().eq_ignore_ascii_case(reserved),
+                    && !stem
+                        .split('.')
+                        .next()
+                        .unwrap_or_default()
+                        .eq_ignore_ascii_case(reserved),
                 "зарезервированное имя Windows не обезврежено: {reserved:?} -> {stem:?}"
             );
         }

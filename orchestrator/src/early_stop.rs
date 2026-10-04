@@ -186,10 +186,8 @@ pub fn leader_inputs(
     runs: &[crate::checkpoint::StoredRun],
     rejected: &BTreeMap<String, String>,
 ) -> BTreeMap<String, Vec<f64>> {
-    let rejected_lower: std::collections::BTreeSet<String> = rejected
-        .keys()
-        .map(|k| k.to_ascii_lowercase())
-        .collect();
+    let rejected_lower: std::collections::BTreeSet<String> =
+        rejected.keys().map(|k| k.to_ascii_lowercase()).collect();
     let mut out: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for r in runs {
         if rejected_lower.contains(&r.scheme_id.to_ascii_lowercase()) {
@@ -382,10 +380,7 @@ mod tests {
             inputs.keys().collect::<Vec<_>>()
         );
         assert_eq!(inputs.len(), 1, "в статистику попало лишнее: {inputs:?}");
-        assert_eq!(
-            inputs["aaaaaaaa-0000-0000-0000-000000000000"],
-            vec![950.0]
-        );
+        assert_eq!(inputs["aaaaaaaa-0000-0000-0000-000000000000"], vec![950.0]);
 
         // И наоборот: брак в верхнем регистре не должен пропускать схему,
         // записанную в нижнем.
@@ -409,10 +404,20 @@ mod tests {
         // перевес доказывается — то есть остановка случилась бы, если бы эта
         // схема не была отфильтрована.
         let bad: Vec<_> = (0..6)
-            .map(|i| stored_run("381B4222-F694-41F0-9685-FF5BB260DF2E", 1200.0 + i as f64 % 3.0))
+            .map(|i| {
+                stored_run(
+                    "381B4222-F694-41F0-9685-FF5BB260DF2E",
+                    1200.0 + i as f64 % 3.0,
+                )
+            })
             .collect();
         let good: Vec<_> = (0..6)
-            .map(|i| stored_run("aaaaaaaa-0000-0000-0000-000000000000", 980.0 + i as f64 % 3.0))
+            .map(|i| {
+                stored_run(
+                    "aaaaaaaa-0000-0000-0000-000000000000",
+                    980.0 + i as f64 % 3.0,
+                )
+            })
             .collect();
         let all: Vec<_> = bad.iter().chain(good.iter()).cloned().collect();
         let with_bad = leader_inputs(&all, &BTreeMap::new());

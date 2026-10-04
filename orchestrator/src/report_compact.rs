@@ -1707,9 +1707,7 @@ mod tests {
         // Всё, что лежит внутри единственного блока скрипта, обязано быть
         // экранировано: «сырой» `</script>` внутри него означал бы, что JSON
         // вырвался и разметка развалилась.
-        let script_start = html
-            .find("<script>")
-            .expect("в отчёте нет блока скрипта");
+        let script_start = html.find("<script>").expect("в отчёте нет блока скрипта");
         let script_end = html[script_start..]
             .find("</script>")
             .expect("блок скрипта не закрыт");
@@ -1746,7 +1744,8 @@ mod tests {
     /// переживать ту же остановку JSON, что и раньше.
     #[test]
     fn json_escape_keeps_ordinary_values_readable() {
-        for value in ["", "План Обычный", "План \"с кавычками\"", "a\\b", "≈5 %"] {
+        for value in ["", "План Обычный", "План \"с кавычками\"", "a\\b", "≈5 %"]
+        {
             let escaped = json_escape(value);
             let back: String =
                 serde_json::from_str(&escaped).expect("экранированный JSON не читается");
@@ -1782,7 +1781,10 @@ mod tests {
             card.contains("+2.0%"),
             "накопленное изменение считается не по интервалам: {card}"
         );
-        assert!(!card.contains("+3.0%"), "вернулось старое умножение на n: {card}");
+        assert!(
+            !card.contains("+3.0%"),
+            "вернулось старое умножение на n: {card}"
+        );
         // Карточка обязана совпадать с решением по стабильности дрейфа.
         let r = reference(2.0);
         let expected = r.trend_percent_per_round * (r.per_round.len() - 1) as f64;

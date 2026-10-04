@@ -3,8 +3,14 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    # Теги нужны для сборки релиза: без них воркфлоу не стартует по
+    # `git push origin v1.1.0`, и условие `refs/tags/` в `build-release` не
+    # проверяется никогда. Релиз просто не появлялся бы.
+    tags: ["v*"]
   pull_request:
     branches: [main, develop]
+  # Ручной запуск: нужно пересобрать релиз, не выпуская новый тег.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -85,8 +91,12 @@ jobs:
   build-release:
     name: Build Release
     runs-on: windows-latest
-    needs: test
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [check, test, ui]
+    # Тег или ручной запуск. На обычном пуше в ветку этот job не выполняется:
+    # сборка релизных бинарников на каждый коммит не нужна.
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write   # нужны для публикации файлов в GitHub Release
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -99,25 +109,83 @@ jobs:
         with:
           workdir: .
 
-      - name: Build release
-        run: cargo build --workspace --release --all-targets
-
-      - name: Upload CLI artifact
-        uses: actions/upload-artifact@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          name: powerbench-cli-${{ github.ref_name }}-windows-x64
-          path: target/release/powerbench-cli.exe
-          retention-days: 30
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
 
-      - name: Upload App artifacts
-        uses: actions/upload-artifact@v4
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app
+
+      # Консольный валидатор собирается обычным cargo: у него нет бандла.
+      - name: Build CLI release
+        run: cargo build --release -p powerbench-cli
+
+      # Приложение собирается ИМЕННО через `tauri build`, а не через cargo
+      # build. Разница существенна: `cargo build` даёт только
+      # `powerbench-app.exe`, а установщики NSIS/MSI собирает только Tauri.
+      # Старая версия этого шага обещала `target/release/bundle/nsis/*.exe`,
+      # которых там никогда не было, — шаг молча упал бы с «не найдено».
+      # `beforeBuildCommand` сам пересобирает фронтенд, поэтому зашитый в
+      # приложение bundle соответствует исходникам этого тега, а не
+      # закоммиченной копии build-ui.
+      - name: Build app bundles (NSIS + MSI)
+        run: npm run tauri build
+        working-directory: app
+
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-files | Out-Null
+          # Кэш cargo восстанавливает и `target/release/bundle`, поэтому в сборке
+          # могут лежать установщики ПРЕДЫДУЩИХ версий (1.0.0 рядом с 1.1.0).
+          # Отбираем строго по текущей версии, иначе в релиз уедет старый .exe.
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' |
+                      Select-Object -First 1).Matches[0].Groups[1].Value
+          "версия: $version"
+          $files = @()
+          # Установщики: ровно те, что собирает Tauri (targets в tauri.conf.json).
+          # Путь ИМЕННО такой: `app/src-tauri` — член корневого workspace, поэтому
+          # target-каталог общий, `target/release/bundle/...`.
+          $files += Get-ChildItem -Path target/release/bundle -Recurse -Include *.exe,*.msi -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -like "*$version*" }
+          # Сами бинарники — для тех, кому установщик не нужен.
+          $files += Get-ChildItem -Path target/release -Filter powerbench-app.exe -ErrorAction SilentlyContinue
+          $files += Get-ChildItem -Path target/release -Filter powerbench-cli.exe -ErrorAction SilentlyContinue
+          if (-not $files) { throw "ни одного бинарника не собрано" }
+          $files | ForEach-Object { Copy-Item $_.FullName release-files/ }
+          Get-ChildItem release-files | ForEach-Object { "{0}  {1:N1} МБ" -f $_.Name, ($_.Length / 1MB) }
+
+      # Подпись кода не настроена (сертификата нет), поэтому Windows будет
+      # ругаться SmartScreen на установщик — см. раздел «Установка» в README.
+      # Отпечаток прикладываем, чтобы пользователь мог сверить файл.
+      - name: Checksums
+        shell: pwsh
+        run: Get-ChildItem release-files | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } | Out-File release-files/SHA256SUMS.txt -Encoding utf8
+
+      # Файлы идут на страницу Releases, а не в артефакты Actions: артефакты
+      # живут 30 дней и требуют аккаунта GitHub, а релиз должны быть видно с
+      # главной страницы репозитория без входа.
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
-          name: powerbench-app-${{ github.ref_name }}-windows-x64
-          path: |
-            target/release/powerbench-app.exe
-            target/release/bundle/nsis/*.exe
-            target/release/bundle/msi/*.msi
-          retention-days: 30
+          files: release-files/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            Windows 10/11 x64.
+
+            **Приложение** — установщик NSIS (`.exe`) или MSI.
+            **Консольный валидатор** — `powerbench-cli.exe`, без установки.
+
+            Установщик не подписан: Windows покажет «Windows защитила ваш
+            компьютер». Нажмите «Подробнее» → «Выполнить в любом случае».
+            Сверьте файл по `SHA256SUMS.txt`, если хотите убедиться в
+            целостности.
 
   ui:
     name: UI (types, build, adaptive)

@@ -529,7 +529,8 @@ fn separate_by(
             // Гейта не было вовсе: стабильность по одному прогону — это шум,
             // и схема с единственным измерением выигрывала «ничью» тем, что
             // её единственный замер случайно вышел ровным.
-            if !(runs_ok(top, 1, STABILITY_TIE_MIN_RUNS) && runs_ok(second, 1, STABILITY_TIE_MIN_RUNS))
+            if !(runs_ok(top, 1, STABILITY_TIE_MIN_RUNS)
+                && runs_ok(second, 1, STABILITY_TIE_MIN_RUNS))
             {
                 return None;
             }

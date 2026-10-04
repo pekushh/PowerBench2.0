@@ -37,8 +37,7 @@ use crate::quarantine::{
     CATASTROPHIC_SHARE_LIMIT, DEGRADED_MIN_RUNS, DEGRADED_SHARE_LIMIT, MACHINE_COLLAPSE_SHARE,
     MIN_RUNS_FOR_JUDGMENT, QuarantineKind, TestingMarker, UNSTABLE_MAD_LIMIT,
     below_machine_baseline, catastrophic_share, clear_testing_marker, degraded_share,
-    phase_floor_collapse, preflight_filter, quarantine_add, unstable_spread,
-    write_testing_marker,
+    phase_floor_collapse, preflight_filter, quarantine_add, unstable_spread, write_testing_marker,
 };
 
 /// Период опроса сторожевого таймера.
@@ -1486,7 +1485,7 @@ pub fn run_session(
     if let Some(reason) = validate_config(&plan) {
         return Err(SessionError::Config(reason));
     }
-// Карантин (префлайт): забракованные схемы не допускаются к прогонам.
+    // Карантин (префлайт): забракованные схемы не допускаются к прогонам.
     // Фильтруем здесь, а не в UI, чтобы работало и для CLI.
     //
     // Файл карантина читается мягко: при повреждении он считается пустым, и
@@ -2643,9 +2642,11 @@ fn run_session_loop(
                 background_cpu,
             });
 
-if let Some(run) = run_outcome {
+            if let Some(run) = run_outcome {
                 let stored = build_stored_run(&run, plan, name_map, &run_conditions);
-                checkpoint.runs.push(drop_duplicate_scheme_dump(checkpoint, stored));
+                checkpoint
+                    .runs
+                    .push(drop_duplicate_scheme_dump(checkpoint, stored));
                 store.save(checkpoint).map_err(SessionError::Persist)?;
                 note(
                     observer,
@@ -2695,9 +2696,7 @@ if let Some(run) = run_outcome {
         } else {
             let missing: Vec<&str> = round_order_schemes
                 .iter()
-                .filter(|id| {
-                    !checkpoint.has_run(round, id) && !checkpoint.is_rejected(id)
-                })
+                .filter(|id| !checkpoint.has_run(round, id) && !checkpoint.is_rejected(id))
                 .map(String::as_str)
                 .collect();
             note(
@@ -2731,11 +2730,8 @@ if let Some(run) = run_outcome {
         // будто часть плана уже отработана.
         let done_rounds = completed_rounds(checkpoint, round, &plan.plan_guid);
         let inputs = crate::early_stop::leader_inputs(&checkpoint.runs, &checkpoint.rejections);
-        let decision = crate::early_stop::early_stop_decision(
-            &inputs,
-            done_rounds,
-            plan.repetitions,
-        );
+        let decision =
+            crate::early_stop::early_stop_decision(&inputs, done_rounds, plan.repetitions);
         if decision.stop {
             early_stop_reason = Some(decision.reason.clone());
             note(
@@ -2769,10 +2765,7 @@ fn current_run_conditions(engine: &Engine) -> LaunchConditions {
 ///
 /// Точки, записанные прошлыми версиями, условий не содержат: они пропускаются
 /// (`has_launch_conditions`), иначе любое чтение старой точки ломало бы работу.
-fn run_conditions_mismatch(
-    runs: &[StoredRun],
-    engine: &Engine,
-) -> Option<SessionError> {
+fn run_conditions_mismatch(runs: &[StoredRun], engine: &Engine) -> Option<SessionError> {
     let now = current_run_conditions(engine);
     for run in runs {
         if !run.has_launch_conditions() {
@@ -3330,9 +3323,10 @@ fn matched_stats(times: &[f64]) -> RunStats {
 /// верхнем регистре, а чекпоинт мог сохранить их в нижнем.
 fn drop_duplicate_scheme_dump(checkpoint: &Checkpoint, mut stored: StoredRun) -> StoredRun {
     if stored.scheme_dump.is_some()
-        && checkpoint.runs.iter().any(|r| {
-            r.scheme_id.eq_ignore_ascii_case(&stored.scheme_id) && r.scheme_dump.is_some()
-        })
+        && checkpoint
+            .runs
+            .iter()
+            .any(|r| r.scheme_id.eq_ignore_ascii_case(&stored.scheme_id) && r.scheme_dump.is_some())
     {
         stored.scheme_dump = None;
     }
@@ -4244,7 +4238,9 @@ mod tests {
         // И наружу успех объявлять нельзя: событие «схема восстановлена»
         // попало бы в отчёт и в журнал сессии.
         assert!(
-            !events.iter().any(|e| matches!(e, SessionEvent::Restored { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Restored { .. })),
             "восстановление объявлено успехом, хотя ОС не переключила схему: {events:?}"
         );
         assert!(
@@ -4269,7 +4265,9 @@ mod tests {
             "неизвестная исходная схема не должна помечаться восстановленной"
         );
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::Warn(w) if w.contains("неизвестна"))),
+            events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Warn(w) if w.contains("неизвестна"))),
             "нужно предупреждение о том, что вернуть нечем: {events:?}"
         );
     }
@@ -4301,7 +4299,9 @@ mod tests {
     fn no_restore_path_calls_bare_set_active() {
         let src = include_str!("session.rs");
         let slice = |from: &str, to: &str| -> String {
-            let start = src.find(from).unwrap_or_else(|| panic!("не найдено: {from}"));
+            let start = src
+                .find(from)
+                .unwrap_or_else(|| panic!("не найдено: {from}"));
             let rest = &src[start..];
             let end = rest.find(to).unwrap_or_else(|| panic!("не найдено: {to}"));
             rest[..end].to_string()
@@ -4517,67 +4517,70 @@ mod tests {
     }
 
     /// Регресс H38: отравленный мьютекс фоновой карты не должен ронять ни поток
-/// мониторинга, ни сессию.
-///
-/// Раньше стоял `lock().unwrap()`. Любая паника в другом владельце карты
-/// (мониторинг, отчёт, тест) отравляла мьютекс, после чего первый же
-/// `unwrap` убивал поток мониторинга — и прогон оставался без фоновых
-/// корреляций до конца сессии, а сама сессия паниковала вместо того, чтобы
-/// отдать неполные данные.
-#[test]
-fn a_poisoned_monitor_map_does_not_kill_the_session() {
-    use std::collections::BTreeMap as Map;
+    /// мониторинга, ни сессию.
+    ///
+    /// Раньше стоял `lock().unwrap()`. Любая паника в другом владельце карты
+    /// (мониторинг, отчёт, тест) отравляла мьютекс, после чего первый же
+    /// `unwrap` убивал поток мониторинга — и прогон оставался без фоновых
+    /// корреляций до конца сессии, а сама сессия паниковала вместо того, чтобы
+    /// отдать неполные данные.
+    #[test]
+    fn a_poisoned_monitor_map_does_not_kill_the_session() {
+        use std::collections::BTreeMap as Map;
 
-    let map: Arc<Mutex<Map<u64, Vec<powerbench_windows::monitor::ProcessSample>>>> =
-        Arc::new(Mutex::new(Map::new()));
-    // Отравляем мьютекс паникой в его владельце.
-    let poisoned = Arc::clone(&map);
-    let _ = std::thread::spawn(move || {
-        let _guard = poisoned.lock().expect("первая блокировка обязана удаться");
-        panic!("отравляем карту фоновых измерений");
-    })
-    .join();
-    assert!(map.lock().is_err(), "мьютекс не отравлен — тест бессмыслен");
+        let map: Arc<Mutex<Map<u64, Vec<powerbench_windows::monitor::ProcessSample>>>> =
+            Arc::new(Mutex::new(Map::new()));
+        // Отравляем мьютекс паникой в его владельце.
+        let poisoned = Arc::clone(&map);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().expect("первая блокировка обязана удаться");
+            panic!("отравляем карту фоновых измерений");
+        })
+        .join();
+        assert!(map.lock().is_err(), "мьютекс не отравлен — тест бессмыслен");
 
-    // Чтение обязано выдать хоть что-то, а не паниковать.
-    let snapshot = map.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    assert!(snapshot.is_empty(), "из отравленной карты взяты не те данные");
+        // Чтение обязано выдать хоть что-то, а не паниковать.
+        let snapshot = map.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(
+            snapshot.is_empty(),
+            "из отравленной карты взяты не те данные"
+        );
 
-    // И запись в отравленный мьютекс тоже обязана работать.
-    map.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(1, Vec::new());
-    assert_eq!(map.lock().unwrap_or_else(|e| e.into_inner()).len(), 1);
-}
+        // И запись в отравленный мьютекс тоже обязана работать.
+        map.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(1, Vec::new());
+        assert_eq!(map.lock().unwrap_or_else(|e| e.into_inner()).len(), 1);
+    }
 
-/// Мониторинг обязан переживать отравление мьютекса своей карты.
-///
-/// Иначе один заход с паникой в другом потоке оставлял бы весь прогон без
-/// фоновых корреляций: `spawn_monitor` звал `map.lock().unwrap()`.
-#[test]
-fn the_monitor_thread_survives_a_poisoned_map() {
-    use std::collections::BTreeMap as Map;
+    /// Мониторинг обязан переживать отравление мьютекса своей карты.
+    ///
+    /// Иначе один заход с паникой в другом потоке оставлял бы весь прогон без
+    /// фоновых корреляций: `spawn_monitor` звал `map.lock().unwrap()`.
+    #[test]
+    fn the_monitor_thread_survives_a_poisoned_map() {
+        use std::collections::BTreeMap as Map;
 
-    let map: Arc<Mutex<Map<u64, Vec<powerbench_windows::monitor::ProcessSample>>>> =
-        Arc::new(Mutex::new(Map::new()));
-    let poisoned = Arc::clone(&map);
-    let _ = std::thread::spawn(move || {
-        let _guard = poisoned.lock().expect("первая блокировка обязана удаться");
-        panic!("отравляем карту до старта мониторинга");
-    })
-    .join();
+        let map: Arc<Mutex<Map<u64, Vec<powerbench_windows::monitor::ProcessSample>>>> =
+            Arc::new(Mutex::new(Map::new()));
+        let poisoned = Arc::clone(&map);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().expect("первая блокировка обязана удаться");
+            panic!("отравляем карту до старта мониторинга");
+        })
+        .join();
 
-    let run = Arc::new(AtomicBool::new(true));
-    let handle = spawn_monitor(Arc::clone(&map), Arc::clone(&run));
-    std::thread::sleep(Duration::from_millis(1500));
-    run.store(false, Ordering::Relaxed);
-    // Поток обязан завершиться штатно: если бы он умер на панике, `join`
-    // вернул бы ошибку, и мы бы это увидели.
-    assert!(
-        handle.join().is_ok(),
-        "поток мониторинга умер на отравленном мьютексе"
-    );
-}
+        let run = Arc::new(AtomicBool::new(true));
+        let handle = spawn_monitor(Arc::clone(&map), Arc::clone(&run));
+        std::thread::sleep(Duration::from_millis(1500));
+        run.store(false, Ordering::Relaxed);
+        // Поток обязан завершиться штатно: если бы он умер на панике, `join`
+        // вернул бы ошибку, и мы бы это увидели.
+        assert!(
+            handle.join().is_ok(),
+            "поток мониторинга умер на отравленном мьютексе"
+        );
+    }
     /// Регресс M35: дамп настроек схемы хранится один раз на схему, а не в
     /// каждом прогоне.
     ///
@@ -4638,7 +4641,10 @@ fn the_monitor_thread_survives_a_poisoned_map() {
         assert_eq!(cp.runs.len(), 3);
 
         // Ничего не потеряно: по любому GUID настроек восстановить можно.
-        for scheme in ["AAAAAAAA-0000-0000-0000-000000000001", "BBBBBBBB-0000-0000-0000-000000000002"] {
+        for scheme in [
+            "AAAAAAAA-0000-0000-0000-000000000001",
+            "BBBBBBBB-0000-0000-0000-000000000002",
+        ] {
             assert!(
                 cp.runs
                     .iter()
@@ -4666,7 +4672,9 @@ fn the_monitor_thread_survives_a_poisoned_map() {
         first.round = 1;
         first.scheme_dump = Some(dump.clone());
         cp.runs.push(drop_duplicate_scheme_dump(&cp, first));
-        let with_first = serde_json::to_vec(&cp).expect("чекпоинт сериализуется").len();
+        let with_first = serde_json::to_vec(&cp)
+            .expect("чекпоинт сериализуется")
+            .len();
 
         // Пять повторов той же схемы — без дампа.
         for round in 2..=6 {
@@ -4676,7 +4684,9 @@ fn the_monitor_thread_survives_a_poisoned_map() {
             next.scheme_dump = Some(dump.clone());
             cp.runs.push(drop_duplicate_scheme_dump(&cp, next));
         }
-        let with_all = serde_json::to_vec(&cp).expect("чекпоинт сериализуется").len();
+        let with_all = serde_json::to_vec(&cp)
+            .expect("чекпоинт сериализуется")
+            .len();
 
         // Пять лишних прогонов не должны стоить шесть копий дампа: прирост
         // заметно меньше одной копии.
@@ -4756,7 +4766,9 @@ fn the_monitor_thread_survives_a_poisoned_map() {
 
         // Бракованная схема покрыта: её не перетестируют, и это правильно.
         let mut rejected = checkpoint_with_runs(plan(), &[("a", 0), ("b", 0)]);
-        rejected.rejections.insert("c".to_string(), "брак".to_string());
+        rejected
+            .rejections
+            .insert("c".to_string(), "брак".to_string());
         assert!(
             round_is_covered(&rejected, 0, &order),
             "забракованная схема считается непокрытой: её придётся мерить снова"

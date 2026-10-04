@@ -434,10 +434,7 @@ mod tests {
         // Усечённый — ошибка, а не пустой список.
         let err = parse_entries(b"[{\"scheme_id\": \"s1\"", &path)
             .expect_err("битый карантин обязан быть ошибкой");
-        assert!(
-            err.to_string().contains("повреждён"),
-            "нет диагноза: {err}"
-        );
+        assert!(err.to_string().contains("повреждён"), "нет диагноза: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -449,8 +446,14 @@ mod tests {
     fn quarantine_writes_go_through_the_checked_path() {
         let src = include_str!("quarantine.rs");
         for (fn_name, next) in [
-            ("pub fn quarantine_add(", "/// Разобрать содержимое файла карантина"),
-            ("pub fn quarantine_remove(", "/// Записать маркер активного прогона"),
+            (
+                "pub fn quarantine_add(",
+                "/// Разобрать содержимое файла карантина",
+            ),
+            (
+                "pub fn quarantine_remove(",
+                "/// Записать маркер активного прогона",
+            ),
         ] {
             let start = src
                 .find(fn_name)

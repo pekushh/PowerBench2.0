@@ -588,10 +588,10 @@ mod tests {
         let readme = include_str!("../../README.md");
         let example = include_str!("../../bench.example.toml");
 
-// `--config` не существует ни в CLI, ни в справочнике флагов. Ищем именно
+        // `--config` не существует ни в CLI, ни в справочнике флагов. Ищем именно
         // ветку разбора (`"--config" =>`), а не любое упоминание: иначе тест
         // находил бы сам себя — он тоже пишет про этот флаг.
-let cli_src = include_str!("../../cli/src/main.rs");
+        let cli_src = include_str!("../../cli/src/main.rs");
         let bench_src = include_str!("../../cli/src/bench.rs");
         assert!(
             !bench_src.contains("\"--config\" =>") && !cli_src.contains("\"--config\" =>"),

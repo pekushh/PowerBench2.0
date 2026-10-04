@@ -16,7 +16,8 @@ use powerbench_orchestrator::checkpoint::StoredRun;
 use powerbench_orchestrator::config::{Preset, SessionConfig, validate_config};
 use powerbench_orchestrator::result::{IdentityJson, RecommendationScheme, build_session_json};
 use powerbench_orchestrator::session::{
-    DiskCheckpointStore, RealSchemeDriver, SessionError, SessionEvent, run_session, session_signature,
+    DiskCheckpointStore, RealSchemeDriver, SessionError, SessionEvent, run_session,
+    session_signature,
 };
 use powerbench_recommend::{EvidenceLevel, Recommendation};
 use powerbench_windows::power::{SleepGuard, is_admin};
@@ -1112,7 +1113,7 @@ mod tests {
         let clear_at = body
             .find("checkpoint::clear_checkpoint()")
             .expect("снятие точки в finish_session");
-assert!(
+        assert!(
             json_at < clear_at,
             "точка снимается раньше записи результата: неудача записи JSON \
              приведёт к потере и данных, и точки"

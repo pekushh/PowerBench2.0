@@ -183,10 +183,7 @@ fn report_done(guard: &mut PoolInner, epoch: u64) {
 /// отчёта оставляло `busy` поднятым навсегда: `reset` не мог опустить флаг,
 /// `wait_batch` упирался в потолок, а движок отказывался мерить.
 fn expected_reports(inner: &PoolInner) -> usize {
-    inner
-        .worker_count
-        .saturating_sub(inner.lost_workers)
-        .max(1)
+    inner.worker_count.saturating_sub(inner.lost_workers).max(1)
 }
 
 /// Уменьшить счётчик живых воркеров, не уходя ниже нуля.
@@ -601,40 +598,40 @@ impl Pool {
         self.cancel.store(false, Ordering::Release);
     }
 
-/// Пул в idle перед фазой: батча нет, счётчик завершившихся воркеров нулевой.
-///
-/// Сначала дожидается «тишины» пула: если грейс отмены истёк, воркеры могут
-/// ещё писать в буферы сущностей. Сбрасывать буферы в этот момент — гонка
-/// памяти и рассинхрон контрольных сумм, поэтому сначала quiesce.
-///
-/// Регресс C2: при незатихшем пуле обнулялся `workers_done`, а `busy` и
-/// `epoch` оставались прежними. Дальше счётчик уже не мог достичь
-/// `worker_count` — все отчёты-то пришли, — поэтому `busy` не снимался
-/// никогда: `is_quiesced()` врал, каждая следующая `quiesce()` выжигала полные
-/// `QUIESCE_TIMEOUT`, `Engine::reset()` возвращал `false`, и пул оказывался
-/// заблокирован навсегда.
-///
-/// Поэтому состояние сбрасывается **только при подтверждённой тишине** и
-/// согласованно: `epoch` сдвигается (опоздавший отчёт будет отброшен, но при
-/// тихом пуле его и быть не может), `completed_epoch` догоняет `epoch`,
-/// `workers_done` обнуляется, `busy` снимается. Если пул НЕ затих, ни `busy`,
-/// ни `workers_done`, ни `epoch` не трогаем: оставшийся воркер обязан суметь
-/// дочитать свой батч и снять `busy` своим отчётом, а сброс счётчика сделал
-/// бы это невозможным и вернул вечную блокировку.
-pub fn reset_to_idle(&self) -> bool {
-    let quiet = self.quiesce();
-    let mut guard = lock_pool(&self.shared);
-    guard.active_jobs = 0;
-    guard.active_workers = 1;
-    guard.faulted = false;
-    if quiet {
-        guard.epoch = guard.epoch.wrapping_add(1);
-        guard.completed_epoch = guard.epoch;
-        guard.workers_done = 0;
-        guard.busy = false;
+    /// Пул в idle перед фазой: батча нет, счётчик завершившихся воркеров нулевой.
+    ///
+    /// Сначала дожидается «тишины» пула: если грейс отмены истёк, воркеры могут
+    /// ещё писать в буферы сущностей. Сбрасывать буферы в этот момент — гонка
+    /// памяти и рассинхрон контрольных сумм, поэтому сначала quiesce.
+    ///
+    /// Регресс C2: при незатихшем пуле обнулялся `workers_done`, а `busy` и
+    /// `epoch` оставались прежними. Дальше счётчик уже не мог достичь
+    /// `worker_count` — все отчёты-то пришли, — поэтому `busy` не снимался
+    /// никогда: `is_quiesced()` врал, каждая следующая `quiesce()` выжигала полные
+    /// `QUIESCE_TIMEOUT`, `Engine::reset()` возвращал `false`, и пул оказывался
+    /// заблокирован навсегда.
+    ///
+    /// Поэтому состояние сбрасывается **только при подтверждённой тишине** и
+    /// согласованно: `epoch` сдвигается (опоздавший отчёт будет отброшен, но при
+    /// тихом пуле его и быть не может), `completed_epoch` догоняет `epoch`,
+    /// `workers_done` обнуляется, `busy` снимается. Если пул НЕ затих, ни `busy`,
+    /// ни `workers_done`, ни `epoch` не трогаем: оставшийся воркер обязан суметь
+    /// дочитать свой батч и снять `busy` своим отчётом, а сброс счётчика сделал
+    /// бы это невозможным и вернул вечную блокировку.
+    pub fn reset_to_idle(&self) -> bool {
+        let quiet = self.quiesce();
+        let mut guard = lock_pool(&self.shared);
+        guard.active_jobs = 0;
+        guard.active_workers = 1;
+        guard.faulted = false;
+        if quiet {
+            guard.epoch = guard.epoch.wrapping_add(1);
+            guard.completed_epoch = guard.epoch;
+            guard.workers_done = 0;
+            guard.busy = false;
+        }
+        quiet
     }
-    quiet
-}
 
     /// Дождаться, пока все воркеры завершат текущий батч.
     ///
@@ -766,11 +763,7 @@ pub fn reset_to_idle(&self) -> bool {
     #[cfg(test)]
     pub(crate) fn inner_for_test(&self) -> (usize, usize, bool) {
         let guard = lock_pool(&self.shared);
-        (
-            guard.workers_done,
-            expected_reports(&guard),
-            guard.busy,
-        )
+        (guard.workers_done, expected_reports(&guard), guard.busy)
     }
 
     /// Пометить воркера ушедшим навсегда (тестовая замена панике вне
@@ -1063,7 +1056,10 @@ mod tests {
             Ok(()),
             "батч не закрылся, хотя все живые воркеры отчитались"
         );
-        assert!(p.is_quiesced(), "busy остался поднятым после сборки отчётов");
+        assert!(
+            p.is_quiesced(),
+            "busy остался поднятым после сборки отчётов"
+        );
     }
 
     /// Уход воркера посреди батча не должен оставить батч незавершённым: его

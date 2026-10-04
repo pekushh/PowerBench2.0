@@ -731,7 +731,7 @@ mod tests {
         );
     }
 
-/// Регресс M1: микрофриз не должен исчезать из-за фильтра `min_samples`.
+    /// Регресс M1: микрофриз не должен исчезать из-за фильтра `min_samples`.
     ///
     /// Задержка, занявшая окно целиком, попадает в него В ОДИН-ЕДИНСТВЕННЫЙ
     /// сэмпл: соседние быстрые тики уже отнесены к другим окнам, и следующий
@@ -824,10 +824,7 @@ mod tests {
         let mut tail = even.clone();
         tail.extend_from_slice(&[20.0, 20.0]);
         let with_tail = windowed_throughput(&tail, P01_WINDOW_MS, 5);
-        let plain_tp = with_tail
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
+        let plain_tp = with_tail.iter().copied().fold(f64::INFINITY, f64::min);
         assert!(
             (plain_tp - 50.0).abs() < 1e-9,
             "хвост фазы изменил худшее окно: {plain_tp} при типичных 50"

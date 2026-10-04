@@ -1122,7 +1122,7 @@ pub fn save_diagnostics(
     if target.as_os_str().is_empty() {
         return Err("не выбран путь для отчёта".to_string());
     }
-let log = state.log.snapshot();
+    let log = state.log.snapshot();
     // Перед сборкой дописываем журнал на диск: отчёт читает состояние из
     // памяти, но пользователь может приложить к обращению и сам `AppLog.json`.
     state.log.flush();
@@ -1399,21 +1399,26 @@ mod tests {
     #[test]
     fn discard_removes_the_file_even_when_the_scheme_was_not_restored() {
         let clears = AtomicUsize::new(0);
-        let report = discard_report(
-            &restore_failed,
-            &|| {
-                clears.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
+        let report = discard_report(&restore_failed, &|| {
+            clears.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(
+            clears.load(Ordering::SeqCst),
+            1,
+            "файл точки не снят с диска"
         );
-        assert_eq!(clears.load(Ordering::SeqCst), 1, "файл точки не снят с диска");
         assert!(
             report.cleared,
             "точка удалена, но сообщение об этом не поверили: {}",
             report.message
         );
         // Сообщение правдиво: файл снят, и про схему сказано отдельно.
-        assert!(report.message.contains("точка удалена"), "{}", report.message);
+        assert!(
+            report.message.contains("точка удалена"),
+            "{}",
+            report.message
+        );
         assert!(
             report.message.contains("powercfg /setactive"),
             "нужна инструкция, как вернуть план руками: {}",
@@ -1457,7 +1462,9 @@ mod tests {
             report.message
         );
         assert!(
-            report.message.contains(powerbench_orchestrator::checkpoint::CHECKPOINT_FILE_NAME),
+            report
+                .message
+                .contains(powerbench_orchestrator::checkpoint::CHECKPOINT_FILE_NAME),
             "в ошибке нужно имя файла, который надо удалить руками: {}",
             report.message
         );

@@ -724,10 +724,7 @@ fn empty_finished() -> FinishedPayload {
 ///
 /// Отравление блокировки игнорируется (регресс H38): после паники в любом
 /// владельце интерфейс не должен блокироваться навсегда.
-fn claim(
-    runner: &Arc<Mutex<Option<RunnerHandle>>>,
-    handle: RunnerHandle,
-) -> Result<(), String> {
+fn claim(runner: &Arc<Mutex<Option<RunnerHandle>>>, handle: RunnerHandle) -> Result<(), String> {
     let mut guard = runner.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_some() {
         return Err("сессия уже выполняется".to_string());
@@ -949,9 +946,15 @@ mod tests {
     fn release_frees_the_runner() {
         let runner = empty_runner();
         claim(&runner, handle()).expect("занято");
-        assert!(running(&runner), "после claim раннер должен считаться занятым");
+        assert!(
+            running(&runner),
+            "после claim раннер должен считаться занятым"
+        );
         release(&runner);
-        assert!(!running(&runner), "после release раннер должен быть свободен");
+        assert!(
+            !running(&runner),
+            "после release раннер должен быть свободен"
+        );
         // И занять его можно снова.
         claim(&runner, handle()).expect("раннер не освободился");
     }
@@ -1032,9 +1035,7 @@ mod tests {
             .find("pub fn identity_info()")
             .expect("не найдена identity_info");
         let body = &src[start..];
-        let end = body
-            .find("\n#[tauri::command")
-            .unwrap_or(body.len());
+        let end = body.find("\n#[tauri::command").unwrap_or(body.len());
         let body = &body[..end];
         assert!(
             !body.contains("self_check()"),

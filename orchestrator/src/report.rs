@@ -999,14 +999,11 @@ fn render_sessions(sessions: &[&SessionJson]) -> String {
 fn scheme_detail_block(s: &SessionJson, stamp: &str) -> String {
     let rec = &s.recommendation;
     let mut sch_rows = String::new();
-    let winner = rec
-        .recommended_scheme
-        .as_ref()
-        .and_then(|id| {
-            s.schemes
-                .iter()
-                .find(|x| x.scheme_id.eq_ignore_ascii_case(id))
-        });
+    let winner = rec.recommended_scheme.as_ref().and_then(|id| {
+        s.schemes
+            .iter()
+            .find(|x| x.scheme_id.eq_ignore_ascii_case(id))
+    });
     let tie = matches!(rec.level.as_str(), "Equivalent" | "KeepCurrent");
     let has_winner = !tie && winner.is_some();
     for sch in &s.schemes {
@@ -2742,7 +2739,8 @@ mod tests {
         let stamp = "20260927T221320Z000";
         assert_eq!(time_hm(stamp), "22:13");
         assert_eq!(
-            &stamp[9..15], "221320",
+            &stamp[9..15],
+            "221320",
             "тест должен воспроизводить исходный дефект"
         );
         // Короткая (неполная) метка не режется по границе UTF-8.

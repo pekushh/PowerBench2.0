@@ -123,13 +123,10 @@ mod imp {
                 // ошибка выглядит снаружи невинно: разведка сообщает «0 ядер».
                 let rel = unsafe { rec.add(union_off) };
                 let group_count =
-                    read_field::<u16>(rel, offset_of!(PROCESSOR_RELATIONSHIP, GroupCount))
-                        as usize;
+                    read_field::<u16>(rel, offset_of!(PROCESSOR_RELATIONSHIP, GroupCount)) as usize;
                 let flags = read_field::<u8>(rel, offset_of!(PROCESSOR_RELATIONSHIP, Flags));
-                let efficiency_class = read_field::<u8>(
-                    rel,
-                    offset_of!(PROCESSOR_RELATIONSHIP, EfficiencyClass),
-                );
+                let efficiency_class =
+                    read_field::<u8>(rel, offset_of!(PROCESSOR_RELATIONSHIP, EfficiencyClass));
 
                 // ГРАНИЦА ДОВЕРИЯ (регресс C7).
                 //
@@ -147,9 +144,7 @@ mod imp {
                 // usize::MAX, и сравнение с `size` отбрасывает запись.
                 let needed = union_off
                     .checked_add(MASKS_OFFSET)
-                    .and_then(|v| {
-                        v.checked_add(group_count.saturating_mul(mask_size))
-                    })
+                    .and_then(|v| v.checked_add(group_count.saturating_mul(mask_size)))
                     .unwrap_or(usize::MAX);
                 if needed > size {
                     break;
@@ -162,7 +157,10 @@ mod imp {
                     let group = read_field::<u16>(ga, offset_of!(GROUP_AFFINITY, Group));
                     for bit in 0..64u32 {
                         if mask & (1u64 << bit) != 0 {
-                            threads.push(Placement { group, bit: bit as u8 });
+                            threads.push(Placement {
+                                group,
+                                bit: bit as u8,
+                            });
                         }
                     }
                 }
@@ -731,7 +729,11 @@ mod tests {
     /// Собрать синтетическую запись `RelationProcessorCore` ровно на
     /// `masks.len()` масок и длиной `extra` байт сверх необходимого.
     #[cfg(windows)]
-    fn core_record(masks: &[(u16, u64)], extra: usize, group_count_override: Option<u16>) -> Vec<u8> {
+    fn core_record(
+        masks: &[(u16, u64)],
+        extra: usize,
+        group_count_override: Option<u16>,
+    ) -> Vec<u8> {
         use std::mem::offset_of;
         use windows_sys::Win32::System::SystemInformation::{
             GROUP_AFFINITY, PROCESSOR_RELATIONSHIP, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
@@ -750,9 +752,12 @@ mod tests {
         // Flags = LTP_PC_SMT, EfficiencyClass = 0
         buf[rel + offset_of!(PROCESSOR_RELATIONSHIP, Flags)] = 0x01;
         buf[rel + offset_of!(PROCESSOR_RELATIONSHIP, EfficiencyClass)] = 0;
-        buf[rel + offset_of!(PROCESSOR_RELATIONSHIP, GroupCount)..rel + offset_of!(PROCESSOR_RELATIONSHIP, GroupCount) + 2]
+        buf[rel + offset_of!(PROCESSOR_RELATIONSHIP, GroupCount)
+            ..rel + offset_of!(PROCESSOR_RELATIONSHIP, GroupCount) + 2]
             .copy_from_slice(
-                &group_count_override.unwrap_or(masks.len() as u16).to_le_bytes(),
+                &group_count_override
+                    .unwrap_or(masks.len() as u16)
+                    .to_le_bytes(),
             );
         for (i, &(group, mask)) in masks.iter().enumerate() {
             let at = rel + masks_off + i * mask_size;
@@ -850,13 +855,20 @@ mod tests {
             unsafe { base_bytes.add(shifted + i).write(*b) };
         }
         let start = unsafe { base_bytes.add(shifted) };
-        assert_eq!(start as usize % align_of::<u64>(), shifted % align_of::<u64>());
+        assert_eq!(
+            start as usize % align_of::<u64>(),
+            shifted % align_of::<u64>()
+        );
         assert_ne!(start as usize % align_of::<u16>(), 0);
         assert_ne!(start as usize % align_of::<u64>(), 0);
 
         let window = unsafe { std::slice::from_raw_parts(start, record.len()) };
         let cores = imp::parse_cores(window, record.len());
-        assert_eq!(cores.len(), 1, "запись не разобрана на невыровненном буфере");
+        assert_eq!(
+            cores.len(),
+            1,
+            "запись не разобрана на невыровненном буфере"
+        );
         assert_eq!(
             cores[0].threads,
             vec![
@@ -903,7 +915,11 @@ mod tests {
     fn live_detection_still_finds_cores() {
         let _g = crate::tests::lock();
         let topo = CpuTopology::detect(AffinityMode::AllLogical);
-        assert!(topo.error().is_none(), "разведка сломана: {:?}", topo.error());
+        assert!(
+            topo.error().is_none(),
+            "разведка сломана: {:?}",
+            topo.error()
+        );
         assert!(topo.physical_cores() > 0);
         assert!(topo.slots() > 0);
     }

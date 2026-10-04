@@ -192,14 +192,14 @@ pub struct SleepGuard {
     /// `ES_CONTINUOUS` слишком рано — и «сон отменён на время замера» тихо
     /// перестало бы работать в самый неподходящий момент.
     ///
-/// `PhantomData<*const ()>` делает тип `!Send` и `!Sync`: это запрещено
-/// ровно то, что запрещено делать с ресурсом потока. Компилятор
-/// гарантирует, что guard не покинет поток, в котором был создан.
-///
-/// Поле не под `cfg(windows)`: привязка к потоку — свойство типа, а не
-/// платформенная деталь, и на других платформах guard точно так же нельзя
-/// отдавать другому потоку.
-#[doc = r#"
+    /// `PhantomData<*const ()>` делает тип `!Send` и `!Sync`: это запрещено
+    /// ровно то, что запрещено делать с ресурсом потока. Компилятор
+    /// гарантирует, что guard не покинет поток, в котором был создан.
+    ///
+    /// Поле не под `cfg(windows)`: привязка к потоку — свойство типа, а не
+    /// платформенная деталь, и на других платформах guard точно так же нельзя
+    /// отдавать другому потоку.
+    #[doc = r#"
     `SleepGuard` нельзя отправить в другой поток — тип намеренно `!Send`:
 
 ```compile_fail
@@ -208,7 +208,7 @@ fn требует_send<T: Send>() {}
 требует_send::<SleepGuard>();
 ```
 "#]
-_thread_bound: PhantomData<*const ()>,
+    _thread_bound: PhantomData<*const ()>,
 }
 
 impl SleepGuard {
@@ -554,8 +554,7 @@ fn clocks_from_buffer(buf: &[PROCESSOR_POWER_INFORMATION]) -> Clocks {
         // `CurrentMhz == 0` при ненулевом потолке — это тоже «ниже своего
         // потолка»: ядро существует (потолок известен), но не работает.
         if p.MaxMhz > 0
-            && p
-                .MaxMhz
+            && p.MaxMhz
                 .checked_sub(MHZ_TOLERANCE)
                 .is_some_and(|limit| p.CurrentMhz < limit)
         {
@@ -1087,10 +1086,7 @@ mod tests {
             "размер запроса нулевой — CallNtPowerInformation не вызовется"
         );
         // Старый фиксированный размер обязан быть позади.
-        assert!(
-            want > 256,
-            "вернулся фиксированный буфер на 256 записей"
-        );
+        assert!(want > 256, "вернулся фиксированный буфер на 256 записей");
     }
 
     /// Регресс H22: `policy_reason` содержит только настоящие причины.
@@ -1155,8 +1151,7 @@ mod tests {
             "настоящее ограничение потерялось из-за значения времени простоя"
         );
         assert_ne!(
-            state.policy_reason,
-            255,
+            state.policy_reason, 255,
             "в policy_reason снова лежит MaxIdlenessAllowed"
         );
     }
@@ -1236,7 +1231,10 @@ mod tests {
         }
         // Набор флагов описывается целиком.
         let both = throttle_cause::describe(PASSIVE_COOLING | HELD_BELOW_CEILING);
-        assert_eq!(both, "пассивное охлаждение, ядро ниже своего потолка", "{both}");
+        assert_eq!(
+            both, "пассивное охлаждение, ядро ниже своего потолка",
+            "{both}"
+        );
         // Неизвестные биты не теряются молча.
         let unknown = throttle_cause::describe(1 << 20);
         assert!(unknown.contains("неизвестные"), "{unknown}");
@@ -1250,8 +1248,15 @@ mod tests {
     /// Флаги обязаны быть непересекающимися, иначе описание врёт.
     #[test]
     fn throttle_flags_do_not_overlap() {
-        use throttle_cause::{ACTIVE_COOLING, HELD_BELOW_CEILING, PASSIVE_COOLING, PROCESSOR_THROTTLE};
-        let all = [PASSIVE_COOLING, ACTIVE_COOLING, HELD_BELOW_CEILING, PROCESSOR_THROTTLE];
+        use throttle_cause::{
+            ACTIVE_COOLING, HELD_BELOW_CEILING, PASSIVE_COOLING, PROCESSOR_THROTTLE,
+        };
+        let all = [
+            PASSIVE_COOLING,
+            ACTIVE_COOLING,
+            HELD_BELOW_CEILING,
+            PROCESSOR_THROTTLE,
+        ];
         for (i, a) in all.iter().enumerate() {
             assert_eq!(a.count_ones(), 1, "флаг {a:#x} не один бит");
             for b in &all[i + 1..] {
@@ -1273,7 +1278,9 @@ mod tests {
     #[test]
     fn sleep_guard_is_bound_to_its_thread() {
         let src = include_str!("power.rs");
-        let start = src.find("pub struct SleepGuard").expect("не найден SleepGuard");
+        let start = src
+            .find("pub struct SleepGuard")
+            .expect("не найден SleepGuard");
         let end = src[start..]
             .find("impl SleepGuard")
             .map(|i| start + i)

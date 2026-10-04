@@ -422,10 +422,7 @@ mod tests {
         impl io::Read for Truncated {
             fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
                 if self.served {
-                    return Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "обрыв канала",
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "обрыв канала"));
                 }
                 self.served = true;
                 let head = b"381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)\r\n";
@@ -436,7 +433,8 @@ mod tests {
         }
 
         let handle = spawn_pipe_reader(Some(Truncated { served: false }));
-        let err = collect_pipe_reader(handle, "stdout").expect_err("обрыв пайпа — фатальная ошибка");
+        let err =
+            collect_pipe_reader(handle, "stdout").expect_err("обрыв пайпа — фатальная ошибка");
         let text = err.to_string();
         assert!(
             text.contains("обрыв канала"),

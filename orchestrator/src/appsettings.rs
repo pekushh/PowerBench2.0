@@ -167,8 +167,7 @@ impl AppSettings {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(format!("не удалось прочитать настройки: {e}")),
         };
-        crate::storage::parse_user_file(&bytes, path)
-            .map(|opt| opt.unwrap_or_default())
+        crate::storage::parse_user_file(&bytes, path).map(|opt| opt.unwrap_or_default())
     }
 
     /// Сохранить настройки по стандартному пути (атомарно).
@@ -228,8 +227,7 @@ impl AppSettings {
             if let Some(apply) = f.take() {
                 apply(&mut s);
             }
-            serde_json::to_vec_pretty(&s)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            serde_json::to_vec_pretty(&s).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })?;
         if let Some(apply) = f {
             // Замыкание не вызвано: файл не читался вовсе. Пишем настройки с

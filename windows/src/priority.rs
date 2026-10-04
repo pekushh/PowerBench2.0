@@ -61,14 +61,14 @@ impl Guard {
             let process = unsafe { GetCurrentProcess() };
             let previous_class = unsafe { GetPriorityClass(process) };
             if previous_class == PRIORITY_UNKNOWN {
-return Self {
+                return Self {
                     previous_class,
                     raised: false,
                     restored: false,
                 };
             }
             let ok = unsafe { SetPriorityClass(process, HIGH_PRIORITY_CLASS) } != 0;
-Self {
+            Self {
                 previous_class,
                 raised: ok,
                 restored: false,
@@ -124,7 +124,7 @@ Self {
                 // восстанавливать дважды, а паника из FFI здесь исключена —
                 // значит, повтор можно сделать без риска двойного вызова.
                 self.previous_class = PRIORITY_UNKNOWN;
-self.raised = false;
+                self.raised = false;
                 self.restored = true;
                 // Регресс H19/H20: возврат класса молча игнорировался
                 // (`let _ =`). Если ОС отказала, процесс остаётся в HIGH до
@@ -221,7 +221,7 @@ mod tests {
     /// Вложенные guard'ы не должны терять исходный класс: внешний снимет
     /// HIGH раньше внутреннего, и второй по счёту Drop обязан это учесть.
     #[test]
-fn nested_guards_do_not_corrupt_priority() {
+    fn nested_guards_do_not_corrupt_priority() {
         let _g = lock();
         let before = unsafe { GetPriorityClass(GetCurrentProcess()) };
         {
@@ -256,7 +256,9 @@ fn nested_guards_do_not_corrupt_priority() {
     #[test]
     fn restore_failure_is_never_silently_ignored() {
         let src = include_str!("priority.rs");
-        let start = src.find("fn restore(&mut self)").expect("не найден метод restore");
+        let start = src
+            .find("fn restore(&mut self)")
+            .expect("не найден метод restore");
         let end = src[start..]
             .find("\nimpl Drop")
             .map(|i| start + i)
@@ -297,7 +299,7 @@ fn nested_guards_do_not_corrupt_priority() {
         );
     }
 
-/// `restore` обязан быть идемпотентным: он сбрасывает состояние, и повторный
+    /// `restore` обязан быть идемпотентным: он сбрасывает состояние, и повторный
     /// вызов (в том числе из `Drop`) не должен ни писать класс заново, ни врать
     /// о причине.
     #[test]
@@ -350,7 +352,10 @@ fn nested_guards_do_not_corrupt_priority() {
             guard.restore();
         }
         let reason = guard.not_raised_reason();
-        assert!(reason.is_some(), "у неподнятого guard'а обязана быть причина");
+        assert!(
+            reason.is_some(),
+            "у неподнятого guard'а обязана быть причина"
+        );
         // Причина обязана быть осмысленной, а не пустой строкой.
         assert!(!reason.unwrap().trim().is_empty());
         assert_eq!(

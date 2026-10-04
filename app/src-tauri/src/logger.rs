@@ -540,7 +540,9 @@ mod tests {
         log.append("info", "одна");
         // Ждём сдачи: писатель обязан исчерпать попытки и завершиться.
         let deadline = Instant::now()
-            + Duration::from_millis(FLUSH_BUDGET_MS + (WRITE_GIVE_UP_AFTER as u64 + 1) * FLUSH_INTERVAL_MS + 2_000);
+            + Duration::from_millis(
+                FLUSH_BUDGET_MS + (WRITE_GIVE_UP_AFTER as u64 + 1) * FLUSH_INTERVAL_MS + 2_000,
+            );
         while log.is_persisted() && Instant::now() < deadline {
             log.append("info", "подталкиваем писателя");
             std::thread::sleep(Duration::from_millis(FLUSH_POLL_MS));

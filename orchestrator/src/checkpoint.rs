@@ -296,7 +296,9 @@ impl LaunchConditions {
         // `worker_count == 0` означает «неизвестно» (точка прошлой версии), и
         // сравнивать его с настоящим значением нельзя: иначе любое чтение старой
         // точки превращалось бы в отказ продолжать сессию.
-        if self.worker_count > 0 && other.worker_count > 0 && self.worker_count != other.worker_count
+        if self.worker_count > 0
+            && other.worker_count > 0
+            && self.worker_count != other.worker_count
         {
             return Some(format!(
                 "число воркеров {} против {}",

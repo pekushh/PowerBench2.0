@@ -755,8 +755,17 @@ mod tests {
         for line in parse_body.lines() {
             let line = line.trim();
             for candidate in [
-                "--preset", "--duration", "--warmup", "--cooling", "--reps", "--threshold",
-                "--workers", "--allow-dirty-background", "--schemes", "--plan", "--out",
+                "--preset",
+                "--duration",
+                "--warmup",
+                "--cooling",
+                "--reps",
+                "--threshold",
+                "--workers",
+                "--allow-dirty-background",
+                "--schemes",
+                "--plan",
+                "--out",
             ] {
                 if line.starts_with(&format!("\"{candidate}\"")) && !declared.contains(&candidate) {
                     declared.push(candidate);
@@ -782,7 +791,13 @@ mod tests {
         // Ничего выдуманного: справка не должна обещать несуществующие флаги.
         // Реально поддерживается только `--config` из старой документации — его
         // и не было, и нет.
-        for phantom in ["--config", "--dry-run", "--verbose", "--quick", "--detailed"] {
+        for phantom in [
+            "--config",
+            "--dry-run",
+            "--verbose",
+            "--quick",
+            "--detailed",
+        ] {
             assert!(
                 !help.contains(phantom),
                 "справка обещает `{phantom}`, которого CLI не понимает"

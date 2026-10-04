@@ -405,7 +405,10 @@ mod tests {
             assert!(!outcome.restored, "молчаливый отказ принят за успех");
             assert!(!outcome.already_ok);
             let cause = outcome.error.expect("причина отказа обязана быть названа");
-            assert!(cause.contains("orig"), "в ошибке нет исходной схемы: {cause}");
+            assert!(
+                cause.contains("orig"),
+                "в ошибке нет исходной схемы: {cause}"
+            );
             // Точка остаётся невосстановленной: следующий запуск повторит.
             let cp = load_checkpoint()
                 .expect("читается")

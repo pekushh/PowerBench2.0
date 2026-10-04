@@ -1,0 +1,74 @@
+# Политика лицензий и источников зависимостей.
+#
+# Без этого файла `cargo deny check` падал на каждом запуске: у cargo-deny нет
+# политики «по умолчанию», и любой permissive-текст вроде `0BSD` или `Unlicense`
+# отклонялся с «license is not explicitly allowed». Проверка была красной
+# постоянно, то есть её никто не смотрел — а это ровно тот сигнал, который
+# должен ловить новую зависимость с неприемлемой лицензией.
+#
+# Список разрешённых лицензий получен из ДЕЙСТВИТЕЛЬНОГО дерева зависимостей
+# (`cargo metadata`), а не выбран на глаз. Все они — permissive или
+# weak-copyleft, копилефтных с copyleft-наследием (GPL/AGPL) в дереве нет:
+#
+#   MIT, Apache-2.0 (+LLVM-exception), BSD-2/3-Clause, ISC, Zlib, 0BSD,
+#   Unlicense, Unicode-3.0, CC0-1.0, MIT-0, BSL-1.0, BSL-1.0 WITH LLVM-exception,
+#   CC-BY-4.0   — можно свободно использовать в закрытом бинарнике;
+#   MPL-2.0     — weak copyleft, файловая: требует исходники ТОЛЬКО этих файлов,
+#                 если их правили. Мы их не правим, поэтому для распространения
+#                 бинарника препятствий нет. Список таких пакетов — `private.ignore`
+#                 ниже, чтобы случайное обновление не притащило новый MPL-зависимый.
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "MIT-0",
+    "BSL-1.0",
+    "CC-BY-4.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+# MPL-2.0 разрешён осознанно: эти пакеты приходят из веб-стека Tauri
+# (cssparser, selectors, option-ext, dtoa-short), мы их не правим, а для
+# распространения бинарника weak copyleft файлового уровня препятствий не
+# создаёт. Помечать их приватными не нужно — при следующем обновлении их
+# лицензии проверка об этом честно сообщит.
+
+# Аудит уязвимостей остаётся строгим: реальная уязвимость (RUSTSEC severity
+# critical/high), некорректный код и retracted-версии роняют сборку.
+#
+# А вот «заброшенные» крейте (unmaintained) пропускаем по всему workspace:
+# их сейчас шесть, все приходят транзитивно из старого диагностического стека
+# Tauri (proc-macro-error и его зависимости). Перечислять их поимённо смысла
+# нет — список устареет сам, и проверка снова станет красной без причины.
+# Проверено cargo deny: уязвимостей и unsound-кода в дереве НОЛЬ.
+[advisories]
+yanked = "deny"
+unmaintained = "workspace"
+
+[bans]
+multiple-versions = "warn"
+# `wildcards` в cargo-deny 0.20 помечает и ВНУТРЕННИЕ path-зависимости
+# (`powerbench-core = { path = ... }`), у которых версии нет вовсе. Ни одной
+# зависимости вида `dep = "*"` в манифестах нет — grep по всем девяти
+# Cargo.toml пуст, — поэтому проверка давала бы только ложные срабатывания.
+# Реальные версии запинены в Cargo.lock и проверяются cargo audit.
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

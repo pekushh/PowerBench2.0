@@ -251,7 +251,14 @@ jobs:
           workdir: .
 
       - name: Build docs
-        run: cargo doc --workspace --no-deps --document-private-items
+        # Крейт `powerbench-app` исключён: это тонкая Tauri-обёртка, и на
+        # ubuntu-latest её сборка требует системных библиотек GTK (`glib-2.0` и
+        # далее по цепочке webkit2gtk), которых на образе нет. Задание падало с
+        # «The system library `glib-2.0` required by crate `glib-sys` was not
+        # found» — то есть документация не собиралась вообще. Документировать
+        # обёртку нечего: она не содержит логики, всё интересное живёт в
+        # крейтах ниже, и они документируются на Windows-раннере в job `check`.
+        run: cargo doc --workspace --exclude powerbench-app --no-deps --document-private-items
 
       - name: Upload docs
         uses: actions/upload-artifact@v4
